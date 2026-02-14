@@ -393,7 +393,8 @@ class ModAutoCompiler:
 
         # Cross-loader: also search with fabric when targeting neoforge
         if (self.config.cross_loader
-                and self.config.loader == "neoforge"):
+                and self.config.loader == "neoforge"
+                and self.is_cross_loader_available()):
             independent_searches.extend([
                 f'"{original_repo}" {self.config.mc_version} fabric',
                 f'"{original_repo}" fabric port',
@@ -1834,6 +1835,45 @@ class ModAutoCompiler:
         except Exception as e:
             return False, None, None, f"JAR validation error: {e}"
     
+    def is_cross_loader_available(self) -> bool:
+        """
+        Check if Sinytra Connector + Forgified Fabric API are available
+        on Modrinth for the target MC version. Caches the result per instance.
+        """
+        if hasattr(self, '_cross_loader_available'):
+            return self._cross_loader_available
+
+        base_url = "https://api.modrinth.com/v2"
+        headers = {"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"}
+        mc_version = self.config.mc_version
+
+        available = True
+        for slug in ["connector", "forgified-fabric-api"]:
+            try:
+                resp = requests.get(
+                    f"{base_url}/project/{slug}/version",
+                    params={
+                        "game_versions": f'["{mc_version}"]',
+                        "loaders": '["neoforge"]'
+                    },
+                    headers=headers,
+                    timeout=10
+                )
+                if resp.status_code != 200 or not resp.json():
+                    available = False
+                    break
+            except Exception:
+                available = False
+                break
+
+        self._cross_loader_available = available
+        if not available:
+            print(f"  ⚠️  Cross-loader unavailable: Sinytra Connector or "
+                  f"Forgified Fabric API not found for MC {mc_version}")
+        else:
+            print(f"  ✅ Cross-loader available for MC {mc_version}")
+        return available
+
     def check_modrinth(self, mod_name: str) -> Optional[Dict]:
         """
         Search Modrinth for a mod matching mod_name + target loader + MC version.
@@ -2094,7 +2134,8 @@ class ModAutoCompiler:
                 # not found and cross_loader is enabled
                 if (not modrinth_result
                         and self.config.cross_loader
-                        and self.config.loader == "neoforge"):
+                        and self.config.loader == "neoforge"
+                        and self.is_cross_loader_available()):
                     saved_loader = self.config.loader
                     self.config.loader = "fabric"
                     print(f"  🔄 CROSS-LOADER: Checking Modrinth for Fabric version...")
@@ -2331,7 +2372,8 @@ class ModAutoCompiler:
                 if not compatible_branches:
                     # CROSS-LOADER FALLBACK: Try Fabric branches via Sinytra Connector
                     if (self.config.cross_loader
-                            and self.config.loader == "neoforge"):
+                            and self.config.loader == "neoforge"
+                            and self.is_cross_loader_available()):
                         print(f"\n  🔄 CROSS-LOADER: No NeoForge branches found, "
                               f"trying Fabric fallback via Sinytra Connector...")
 
