@@ -344,13 +344,15 @@ class ModAutoCompiler:
                     parent = repo_data.get('parent', {})
                     if not parent:
                         print(f"       ⚠️  {repo_name}: No parent info (accepting anyway)")
-                        # Accept only if repo name exactly matches original
+                        # Accept if repo name starts with original name
+                        # e.g. "Create-1.21.10" starts with "Create"
                         fork_repo_name = repo_name.split('/')[-1].lower()
-                        if fork_repo_name == original_repo.lower():
+                        orig_lower = original_repo.lower()
+                        if fork_repo_name == orig_lower or fork_repo_name.startswith(orig_lower + "-") or fork_repo_name.startswith(orig_lower + "_"):
                             all_forks[repo_id] = repo_data
                             print(f"       ✅ Fork: {repo_name}")
                         else:
-                            print(f"       ❌ {repo_name}: Name mismatch (expected {original_repo})")
+                            print(f"       ❌ {repo_name}: Name mismatch (expected {original_repo}*)")
                         continue
                     
                     parent_full_name = parent.get('full_name', '')
@@ -386,8 +388,16 @@ class ModAutoCompiler:
         independent_searches = [
             f'"{original_repo}" {self.config.mc_version} {self.config.loader}',
             f'"{original_repo}" {self.config.loader} port',
-            f'{original_repo}-{self.config.loader}',
+            f'"{original_repo}" {self.config.mc_version} port',
         ]
+
+        # Cross-loader: also search with fabric when targeting neoforge
+        if (self.config.cross_loader
+                and self.config.loader == "neoforge"):
+            independent_searches.extend([
+                f'"{original_repo}" {self.config.mc_version} fabric',
+                f'"{original_repo}" fabric port',
+            ])
 
         independent_repos = {}
         original_full = f"{original_owner}/{original_repo}"
@@ -2079,6 +2089,20 @@ class ModAutoCompiler:
             # ── Step 0: Check Modrinth for pre-compiled JAR ──────────
             if not specific_branch and not skip_modrinth:
                 modrinth_result = self.check_modrinth(repo)
+
+                # Cross-loader fallback: try Fabric on Modrinth if NeoForge
+                # not found and cross_loader is enabled
+                if (not modrinth_result
+                        and self.config.cross_loader
+                        and self.config.loader == "neoforge"):
+                    saved_loader = self.config.loader
+                    self.config.loader = "fabric"
+                    print(f"  🔄 CROSS-LOADER: Checking Modrinth for Fabric version...")
+                    modrinth_result = self.check_modrinth(repo)
+                    self.config.loader = saved_loader
+                    if modrinth_result:
+                        modrinth_result["_cross_loader"] = True
+
                 if modrinth_result:
                     print(f"\n  📥 Downloading from Modrinth (no compilation needed)...")
                     try:
@@ -2099,9 +2123,11 @@ class ModAutoCompiler:
                             instance_dest.write_bytes(dl_resp.content)
                             print(f"    💾 Installed: {instance_dest}")
 
+                        is_cross = modrinth_result.get("_cross_loader", False)
+                        cross_note = " [Fabric via Sinytra Connector]" if is_cross else ""
                         print(f"\n  ✅ SUCCESS: {modrinth_result['title']} "
                               f"v{modrinth_result['version_number']} "
-                              f"from Modrinth [pre-compiled]")
+                              f"from Modrinth [pre-compiled]{cross_note}")
 
                         return CompilationResult(
                             repo_url=repo_url,
@@ -2111,6 +2137,7 @@ class ModAutoCompiler:
                             mod_version=modrinth_result["version_number"],
                             compiled_mc_version=self.config.mc_version,
                             modrinth_download=True,
+                            is_cross_loader=is_cross,
                         )
                     except Exception as e:
                         print(f"    ⚠️  Modrinth download failed: {e}")
