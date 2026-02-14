@@ -386,8 +386,8 @@ class ModAutoCompiler:
             # Score this fork
             scored = self.score_fork_reliability(fork_info)
             
-            # Only include if it has SOME relevance signal AND acceptable trust
-            if (scored['has_version_match'] or scored['has_loader_match']) and trust_analysis['trust_score'] >= 40:
+            # Require version match as minimum; loader match alone is not enough
+            if scored['has_version_match'] and trust_analysis['trust_score'] >= 40:
                 fork_candidates.append(scored)
                 
                 # Show trust warnings if any
@@ -1159,6 +1159,11 @@ class ModAutoCompiler:
                     branch.loader = 'neoforge'
                 elif re.search(r'forge_version\s*=', gradle_content):
                     branch.loader = 'forge'
+
+            # Early reject if detected loader doesn't match target
+            if branch.loader and branch.loader != self.config.loader:
+                branch.validation_error = f"Wrong loader: found {branch.loader}, need {self.config.loader}"
+                return False
         
         # STEP 2: Read metadata files for AUTHORITATIVE version range validation
         version_range = self.parse_version_range_from_metadata(owner, repo, branch.name, self.config.loader)
