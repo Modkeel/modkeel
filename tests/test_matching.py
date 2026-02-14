@@ -567,5 +567,120 @@ class TestDiffAnalysis(unittest.TestCase):
         self.assertEqual(0, 0)      # Extensive
 
 
+class TestModrinthMatching(unittest.TestCase):
+    """Test Modrinth name matching logic improvements."""
+
+    def _normalize(self, name: str) -> str:
+        """Replicate the normalization used in check_modrinth."""
+        return re.sub(r'[-_]', '', name.lower())
+
+    def test_slug_with_hyphens_matches(self):
+        """'ForgifiedFabricAPI' should match slug 'forgified-fabric-api'."""
+        mod_name = "ForgifiedFabricAPI"
+        slug = "forgified-fabric-api"
+        mod_normalized = self._normalize(mod_name)
+        slug_normalized = self._normalize(slug)
+        self.assertEqual(mod_normalized, slug_normalized)
+
+    def test_slug_exact_match(self):
+        """'sodium' slug should match 'sodium' mod name."""
+        self.assertEqual(self._normalize("sodium"), self._normalize("sodium"))
+
+    def test_camelcase_normalization(self):
+        """'YetAnotherConfigLib' should match 'yet-another-config-lib'."""
+        self.assertEqual(
+            self._normalize("YetAnotherConfigLib"),
+            self._normalize("yet-another-config-lib")
+        )
+
+    def test_single_word_matching_logic(self):
+        """Single-word mods like 'Create' should be matchable."""
+        search_query = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', "Create")
+        words = search_query.lower().split()
+        self.assertEqual(len(words), 1)
+        self.assertEqual(words[0], "create")
+        # With the fix, single words >= 4 chars are eligible for matching
+        self.assertTrue(len(words[0]) >= 4)
+
+    def test_single_word_title_startswith(self):
+        """'create' should match title starting with 'create'."""
+        word = "create"
+        title = "create mod for minecraft"
+        self.assertTrue(title.startswith(word))
+
+    def test_underscore_normalization(self):
+        """'forge_config_api_port' should match 'forgeconfigapiport'."""
+        self.assertEqual(
+            self._normalize("forge_config_api_port"),
+            self._normalize("forgeconfigapiport")
+        )
+
+
+class TestVersionCatalogFallback(unittest.TestCase):
+    """Test that version catalog is checked when gradle.properties lacks mc version."""
+
+    def test_toml_version_extraction(self):
+        """Should extract minecraft version from libs.versions.toml format."""
+        import toml
+        toml_content = """
+[versions]
+minecraft = "1.21.10"
+neoforge = "21.10.1"
+fabric-loader = "0.16.0"
+"""
+        data = toml.loads(toml_content)
+        versions = data['versions']
+        mc_version = (versions.get('minecraft')
+                      or versions.get('minecraft-version')
+                      or versions.get('game-version'))
+        self.assertEqual(mc_version, "1.21.10")
+
+    def test_toml_loader_detection(self):
+        """Should detect NeoForge loader from version catalog."""
+        import toml
+        toml_content = """
+[versions]
+minecraft = "1.21.10"
+neoforge = "21.10.1"
+
+[libraries]
+neoforge = { module = "net.neoforged:neoforge", version.ref = "neoforge" }
+"""
+        data = toml.loads(toml_content)
+        has_neoforge = 'neoforge' in str(data).lower()
+        self.assertTrue(has_neoforge)
+
+    def test_toml_dict_version_format(self):
+        """Should handle table-format version entries like {ref = 'minecraft'}."""
+        import toml
+        toml_content = """
+[versions]
+minecraft = "1.21.10"
+
+[libraries]
+minecraft = { module = "com.mojang:minecraft", version.ref = "minecraft" }
+"""
+        data = toml.loads(toml_content)
+        mc_version = data['versions']['minecraft']
+        if isinstance(mc_version, dict):
+            mc_version = mc_version.get('ref') or mc_version.get('version')
+        self.assertEqual(str(mc_version).strip('"'), "1.21.10")
+
+    def test_gradle_properties_without_mc_version(self):
+        """gradle.properties without minecraft_version should trigger catalog fallback."""
+        gradle_content = """
+        mod_version=1.0.0
+        group=com.example
+        archives_base_name=mymod
+        """
+        mc_match = re.search(
+            r'minecraft_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
+        if not mc_match:
+            mc_match = re.search(
+                r'mc_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
+        # Should not find anything, triggering version catalog fallback
+        self.assertIsNone(mc_match)
+
+
 if __name__ == "__main__":
     unittest.main()

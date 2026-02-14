@@ -1227,82 +1227,19 @@ class ModAutoCompiler:
         Returns True if compatible, False otherwise.
         """
         target_loader = override_loader or self.config.loader
-        # STEP 1: Try to get Minecraft version from gradle.properties
+
+        # STEP 1: Extract MC version and loader from gradle.properties
         gradle_content = self.get_file_from_repo(owner, repo, branch.name, 'gradle.properties')
-        
-        # If not found, try libs.versions.toml (Gradle Version Catalogs - modern approach)
-        if not gradle_content:
-            libs_versions = self.get_file_from_repo(owner, repo, branch.name, 'gradle/libs.versions.toml')
-            if libs_versions:
-                # Parse TOML to find minecraft version
-                try:
-                    import toml as toml_parser
-                    versions_data = toml_parser.loads(libs_versions)
-                    
-                    # Look in [versions] section
-                    if 'versions' in versions_data:
-                        versions = versions_data['versions']
-                        # Common keys for minecraft version
-                        mc_version = (versions.get('minecraft') or 
-                                    versions.get('minecraft-version') or 
-                                    versions.get('game-version'))
-                        
-                        if mc_version:
-                            # Handle both string and table formats
-                            if isinstance(mc_version, dict):
-                                mc_version = mc_version.get('ref') or mc_version.get('version')
-                            
-                            branch.minecraft_version = str(mc_version).strip('"')
-                            
-                            # Detect loader from libs.versions.toml
-                            if 'neoforge' in str(versions_data).lower():
-                                branch.loader = 'neoforge'
-                                branch.loader_version = str(versions.get('neoforge', 'unknown'))
-                            elif 'fabric' in str(versions_data).lower():
-                                branch.loader = 'fabric'
-                except:
-                    pass
-            
-            # If still no version/loader, try fabric.mod.json
-            if not branch.minecraft_version or not branch.loader:
-                fabric_json = self.get_file_from_repo(owner, repo, branch.name, 'src/main/resources/fabric.mod.json')
-                if fabric_json:
-                    try:
-                        import json
-                        data = json.loads(fabric_json)
-                        
-                        # Extract MC version from depends
-                        depends = data.get('depends', {})
-                        mc_dep = depends.get('minecraft', '')
-                        
-                        if mc_dep:
-                            # Parse version from dependency string (e.g., "~1.21.0", ">=1.21", "1.21.10")
-                            mc_version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', mc_dep)
-                            if mc_version_match and not branch.minecraft_version:
-                                branch.minecraft_version = mc_version_match.group(1)
-                            
-                            # Mark as Fabric
-                            if not branch.loader:
-                                branch.loader = 'fabric'
-                                loader_ver = depends.get('fabricloader', depends.get('fabric-loader', ''))
-                                if loader_ver:
-                                    loader_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', str(loader_ver))
-                                    if loader_match:
-                                        branch.loader_version = loader_match.group(1)
-                    except:
-                        pass
-        
-        # Extract minecraft_version from gradle.properties if found
+
         if gradle_content:
             mc_match = re.search(r'minecraft_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
             if not mc_match:
                 mc_match = re.search(r'mc_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
-            
+
             if mc_match:
                 branch.minecraft_version = mc_match.group(1)
-            
-            # Extract loader version - try to detect ANY loader present
-            # First try to detect target loader
+
+            # Extract loader version - try to detect target loader first
             if target_loader == 'neoforge':
                 loader_match = re.search(r'neo(?:forge)?_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
                 if loader_match:
@@ -1318,7 +1255,7 @@ class ModAutoCompiler:
                 if loader_match:
                     branch.loader = 'fabric'
                     branch.loader_version = loader_match.group(1)
-            
+
             # If target loader not found, detect what loader IS present
             if not branch.loader:
                 if re.search(r'fabric_(?:loader|api)_version\s*=', gradle_content):
@@ -1332,6 +1269,66 @@ class ModAutoCompiler:
             if branch.loader and branch.loader != target_loader:
                 branch.validation_error = f"Wrong loader: found {branch.loader}, need {target_loader}"
                 return False
+
+        # STEP 1b: If MC version not found yet, try libs.versions.toml (version catalogs)
+        if not branch.minecraft_version:
+            libs_versions = self.get_file_from_repo(
+                owner, repo, branch.name, 'gradle/libs.versions.toml')
+            if libs_versions:
+                try:
+                    import toml as toml_parser
+                    versions_data = toml_parser.loads(libs_versions)
+
+                    if 'versions' in versions_data:
+                        versions = versions_data['versions']
+                        mc_version = (versions.get('minecraft')
+                                      or versions.get('minecraft-version')
+                                      or versions.get('game-version'))
+
+                        if mc_version:
+                            if isinstance(mc_version, dict):
+                                mc_version = mc_version.get('ref') or mc_version.get('version')
+                            branch.minecraft_version = str(mc_version).strip('"')
+
+                        # Detect loader from version catalog if not already found
+                        if not branch.loader:
+                            if 'neoforge' in str(versions_data).lower():
+                                branch.loader = 'neoforge'
+                                branch.loader_version = str(
+                                    versions.get('neoforge', 'unknown'))
+                            elif 'fabric' in str(versions_data).lower():
+                                branch.loader = 'fabric'
+                except Exception:
+                    pass
+
+        # STEP 1c: If still no version/loader, try fabric.mod.json
+        if not branch.minecraft_version or not branch.loader:
+            fabric_json = self.get_file_from_repo(
+                owner, repo, branch.name, 'src/main/resources/fabric.mod.json')
+            if fabric_json:
+                try:
+                    import json
+                    data = json.loads(fabric_json)
+
+                    depends = data.get('depends', {})
+                    mc_dep = depends.get('minecraft', '')
+
+                    if mc_dep:
+                        mc_version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', mc_dep)
+                        if mc_version_match and not branch.minecraft_version:
+                            branch.minecraft_version = mc_version_match.group(1)
+
+                        if not branch.loader:
+                            branch.loader = 'fabric'
+                            loader_ver = depends.get(
+                                'fabricloader', depends.get('fabric-loader', ''))
+                            if loader_ver:
+                                loader_match = re.search(
+                                    r'(\d+\.\d+(?:\.\d+)?)', str(loader_ver))
+                                if loader_match:
+                                    branch.loader_version = loader_match.group(1)
+                except Exception:
+                    pass
         
         # STEP 2: Read metadata files for AUTHORITATIVE version range validation
         version_range = self.parse_version_range_from_metadata(owner, repo, branch.name, target_loader)
@@ -1361,7 +1358,7 @@ class ModAutoCompiler:
         
         # STEP 3: Fallback to gradle.properties exact/lenient matching
         if not branch.minecraft_version:
-            branch.validation_error = 'minecraft_version not found in gradle.properties'
+            branch.validation_error = 'minecraft_version not found in gradle.properties or version catalog'
             return False
         
         # Validate Minecraft version compatibility
@@ -2021,17 +2018,24 @@ class ModAutoCompiler:
                 return None
 
             mod_lower = mod_name.lower()
+            # Normalize: remove hyphens/underscores for comparison
+            # "forgified-fabric-api" -> "forgifiedfabricapi"
+            mod_normalized = re.sub(r'[-_]', '', mod_lower)
 
             # Pick best match: prefer exact slug/title match
             best = None
             for hit in hits:
-                slug = hit.get("slug", "")
-                title = hit.get("title", "")
-                if slug.lower() == mod_lower or title.lower() == mod_lower:
+                slug = hit.get("slug", "").lower()
+                title = hit.get("title", "").lower()
+                slug_normalized = re.sub(r'[-_]', '', slug)
+                title_normalized = re.sub(r'[-_ ]', '', title)
+                if (slug == mod_lower or title == mod_lower
+                        or slug_normalized == mod_normalized
+                        or title_normalized == mod_normalized):
                     best = hit
                     break
 
-            # Fallback: check if title contains all words from the mod name
+            # Fallback: check if title/slug contains the mod name words
             # e.g. "JustEnoughItems" -> words ["just","enough","items"]
             #      matches "Just Enough Items (JEI)"
             if not best:
@@ -2039,12 +2043,21 @@ class ModAutoCompiler:
                 for hit in hits:
                     title_lower = hit.get("title", "").lower()
                     slug = hit.get("slug", "").lower()
-                    if slug == mod_lower:
+                    slug_normalized = re.sub(r'[-_]', '', slug)
+                    if slug_normalized == mod_normalized:
                         best = hit
                         break
                     if len(words) >= 2 and all(w in title_lower for w in words):
                         best = hit
                         break
+                    # Single-word mod: match if slug or title contains the word
+                    # e.g. "Create" matches slug "create" or title "Create Mod"
+                    if len(words) == 1 and len(words[0]) >= 4:
+                        if (words[0] == slug
+                                or title_lower.startswith(words[0])
+                                or title_lower.startswith(mod_lower)):
+                            best = hit
+                            break
 
             if not best:
                 print(f"    ℹ️  Modrinth results don't match '{mod_name}'")
