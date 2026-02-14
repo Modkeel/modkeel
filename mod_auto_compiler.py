@@ -270,13 +270,14 @@ class ModAutoCompiler:
             print(f"  ⚠️  Error fetching repo info: {e}")
             return None
     
-    def search_compatible_forks(self, original_owner: str, original_repo: str) -> List[Dict]:
+    def search_compatible_repos(self, original_owner: str, original_repo: str) -> List[Dict]:
         """
-        Search for forks that might have the target Minecraft version.
-        Checks: repo name, description, and topics for version + loader.
-        Returns scored fork candidates ordered by reliability score.
+        Search for forks and independent ports that might have the target
+        Minecraft version. Checks: repo name, description, and topics for
+        version + loader.
+        Returns scored candidates ordered by reliability score.
         """
-        print(f"  🍴 Searching for community forks with MC {self.config.mc_version}...")
+        print(f"  🍴 Searching for community forks and ports with MC {self.config.mc_version}...")
         
         # Build multiple search queries to cast a wider net
         searches = [
@@ -376,16 +377,119 @@ class ModAutoCompiler:
                 print(f"       ⚠️  Unexpected error: {str(e)[:100]}")
                 continue
         
-        if not all_forks:
-            print(f"    ℹ️  No forks found")
+        print(f"    ℹ️  Phase 1 found {len(all_forks)} unique forks")
+
+        # Phase 2: Search for independent ports (not GitHub forks)
+        print(f"    🔎 Phase 2: Searching independent ports...")
+        independent_searches = [
+            f'"{original_repo}" {self.config.mc_version} {self.config.loader}',
+            f'"{original_repo}" {self.config.loader} port',
+            f'{original_repo}-{self.config.loader}',
+        ]
+
+        independent_repos = {}
+        original_full = f"{original_owner}/{original_repo}"
+
+        for query in independent_searches:
+            params = {
+                'q': query,
+                'sort': 'updated',
+                'per_page': 10
+            }
+
+            try:
+                print(f"    🔎 Searching: {query[:60]}...")
+                response = requests.get(url, params=params, headers=headers, timeout=15)
+
+                if response.status_code == 403:
+                    remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
+                    print(f"       ⚠️  Rate limit hit (remaining: {remaining})")
+                    continue
+
+                if response.status_code != 200:
+                    print(f"       ⚠️  HTTP {response.status_code}: {response.text[:100]}")
+                    continue
+
+                results = response.json()
+                items = results.get('items', [])
+                print(f"       Found: {results.get('total_count', 0)} total, {len(items)} returned")
+
+                for repo_data in items:
+                    repo_id = repo_data['id']
+                    repo_full_name = repo_data.get('full_name', 'unknown')
+
+                    # Skip if already found as fork
+                    if repo_id in all_forks:
+                        continue
+                    # Skip if already found as independent
+                    if repo_id in independent_repos:
+                        continue
+                    # Skip the original repo
+                    if repo_full_name.lower() == original_full.lower():
+                        continue
+
+                    # Skip repos not updated in >1 year
+                    updated_str = repo_data.get('updated_at', '')
+                    if updated_str:
+                        updated_at = datetime.strptime(updated_str, '%Y-%m-%dT%H:%M:%SZ')
+                        age_days = (datetime.utcnow() - updated_at).days
+                        if age_days > 365:
+                            continue
+
+                    # Verify name or description mentions the original mod
+                    repo_name_lower = repo_data.get('name', '').lower()
+                    description_lower = (repo_data.get('description') or '').lower()
+                    mod_name_lower = original_repo.lower()
+
+                    if mod_name_lower not in repo_name_lower and mod_name_lower not in description_lower:
+                        continue
+
+                    # Optional: verify via gradle.properties that it's a real port
+                    default_branch = repo_data.get('default_branch', 'main')
+                    port_owner = repo_data['owner']['login']
+                    port_repo = repo_data['name']
+                    gradle_props = self.get_file_from_repo(
+                        port_owner, port_repo, default_branch, 'gradle.properties'
+                    )
+                    if gradle_props is None:
+                        # No gradle.properties = probably not a mod project
+                        print(f"       ❌ {repo_full_name}: No gradle.properties found")
+                        continue
+
+                    # Mark as independent port
+                    repo_data['_is_independent_port'] = True
+                    independent_repos[repo_id] = repo_data
+                    print(f"       ✅ Independent: {repo_full_name}")
+
+                time.sleep(0.3)
+
+            except requests.exceptions.Timeout:
+                print(f"       ⚠️  Query timed out")
+                continue
+            except requests.exceptions.RequestException as e:
+                print(f"       ⚠️  Request failed: {str(e)[:100]}")
+                continue
+            except Exception as e:
+                print(f"       ⚠️  Unexpected error: {str(e)[:100]}")
+                continue
+
+        print(f"    ℹ️  Phase 2 found {len(independent_repos)} independent ports")
+
+        # Merge all candidates
+        all_candidates = {}
+        all_candidates.update(all_forks)
+        all_candidates.update(independent_repos)
+
+        if not all_candidates:
+            print(f"    ℹ️  No forks or independent ports found")
             return []
-        
-        print(f"    ℹ️  Found {len(all_forks)} unique forks, analyzing...")
-        
-        # Score and filter forks
+
+        print(f"    ℹ️  Total: {len(all_candidates)} candidates, analyzing...")
+
+        # Score and filter
         fork_candidates = []
-        
-        for repo_data in all_forks.values():
+
+        for repo_data in all_candidates.values():
             fork_full_name = repo_data['full_name']
             
             # Get real commit and contributor counts (conditional on token)
@@ -412,22 +516,30 @@ class ModAutoCompiler:
                 'contributor_count': contributor_count,
                 'topics': repo_data.get('topics', []),
                 'url': repo_data['html_url'],
-                'trust_analysis': trust_analysis  # NEW: Security analysis
+                'trust_analysis': trust_analysis,
+                'is_independent_port': repo_data.get('_is_independent_port', False)
             }
-            
-            # Score this fork
+
+            # Score this fork/port
             scored = self.score_fork_reliability(fork_info)
-            
+
+            # Apply penalty for independent ports (no verified parent repo)
+            is_independent = repo_data.get('_is_independent_port', False)
+            if is_independent:
+                scored['score'] -= 10
+                scored['signals'].append('independent_port')
+
             # Require version match as minimum; loader match alone is not enough
             if scored['has_version_match'] and trust_analysis['trust_score'] >= 40:
                 fork_candidates.append(scored)
-                
+
                 # Show trust warnings if any
                 trust_indicator = "🔒" if trust_analysis['trust_score'] >= 70 else "⚠️" if trust_analysis['trust_score'] >= 50 else "🚨"
-                
-                print(f"    📦 {fork_full_name} {trust_indicator}")
+                kind = "Independent" if is_independent else "Fork"
+
+                print(f"    📦 {fork_full_name} [{kind}] {trust_indicator}")
                 print(f"       Score: {scored['score']}, Trust: {trust_analysis['trust_score']}%, {', '.join(scored['signals'][:3])}")
-                
+
                 if trust_analysis['warnings']:
                     for warning in trust_analysis['warnings'][:2]:  # Show max 2 warnings
                         print(f"       ⚠️  {warning}")
@@ -435,11 +547,11 @@ class ModAutoCompiler:
                 print(f"    🚨 {fork_full_name} - REJECTED (Trust: {trust_analysis['trust_score']}%)")
                 if trust_analysis['warnings']:
                     print(f"       ⚠️  {trust_analysis['warnings'][0]}")
-        
+
         # Sort by score (highest first)
         fork_candidates.sort(key=lambda x: x['score'], reverse=True)
-        
-        print(f"  ℹ️  {len(fork_candidates)} forks match criteria")
+
+        print(f"  ℹ️  {len(fork_candidates)} candidates match criteria")
         
         return fork_candidates[:5]  # Return top 5
     
@@ -1849,7 +1961,7 @@ class ModAutoCompiler:
                 
                 if should_search_forks:
                     # FALLBACK: Search for community forks
-                    fork_candidates = self.search_compatible_forks(owner, repo)
+                    fork_candidates = self.search_compatible_repos(owner, repo)
                     saved_fork_candidates = fork_candidates or []
                     
                     if not fork_candidates:
