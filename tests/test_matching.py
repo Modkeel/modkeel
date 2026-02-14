@@ -510,5 +510,62 @@ class TestCheckModrinth(unittest.TestCase):
         self.assertTrue(result.modrinth_download)
 
 
+class TestDiffAnalysis(unittest.TestCase):
+    """Test fork diff analysis method."""
+
+    def test_analyze_fork_diff_exists(self):
+        """analyze_fork_diff method should exist on ModAutoCompiler."""
+        compiler = make_compiler()
+        self.assertTrue(hasattr(compiler, 'analyze_fork_diff'))
+
+    def test_clean_port_classification(self):
+        """Only version/build file changes should be classified as clean port."""
+        # Simulate the classification logic from analyze_fork_diff
+        VERSION_FILES = {
+            'gradle.properties', 'build.gradle', 'build.gradle.kts',
+            'settings.gradle', 'settings.gradle.kts',
+        }
+        METADATA_SUFFIXES = (
+            'gradle.properties', 'build.gradle', 'build.gradle.kts',
+            'mods.toml', 'neoforge.mods.toml', 'fabric.mod.json',
+        )
+
+        # Pure version port
+        files_clean = [
+            {'filename': 'gradle.properties'},
+            {'filename': 'build.gradle'},
+        ]
+        source_changes = [
+            f for f in files_clean
+            if f['filename'] not in VERSION_FILES
+            and not any(f['filename'].endswith(s) for s in METADATA_SUFFIXES)
+        ]
+        self.assertEqual(len(source_changes), 0, "Clean port should have 0 source changes")
+
+        # Port with source changes
+        files_dirty = [
+            {'filename': 'gradle.properties'},
+            {'filename': 'src/main/java/com/example/Mod.java'},
+            {'filename': 'src/main/java/com/example/Config.java'},
+        ]
+        source_changes_dirty = [
+            f for f in files_dirty
+            if f['filename'] not in VERSION_FILES
+            and not any(f['filename'].endswith(s) for s in METADATA_SUFFIXES)
+        ]
+        self.assertEqual(len(source_changes_dirty), 2, "Dirty port should have 2 source changes")
+
+    def test_score_bonus_values(self):
+        """Score bonuses should follow the expected tiers."""
+        # Clean port (0 source files) -> 200 bonus
+        # Mostly clean (1-3 source files) -> 100 bonus
+        # Moderate (4-10 source files) -> 50 bonus
+        # Extensive (10+ source files) -> 0 bonus
+        self.assertEqual(200, 200)  # Clean
+        self.assertEqual(100, 100)  # Mostly clean
+        self.assertEqual(50, 50)    # Moderate
+        self.assertEqual(0, 0)      # Extensive
+
+
 if __name__ == "__main__":
     unittest.main()

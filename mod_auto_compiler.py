@@ -450,7 +450,7 @@ class ModAutoCompiler:
                     updated_str = repo_data.get('updated_at', '')
                     if updated_str:
                         updated_at = datetime.strptime(updated_str, '%Y-%m-%dT%H:%M:%SZ')
-                        age_days = (datetime.utcnow() - updated_at).days
+                        age_days = (datetime.now(timezone.utc).replace(tzinfo=None) - updated_at).days
                         if age_days > 365:
                             continue
 
@@ -1505,7 +1505,101 @@ class ModAutoCompiler:
             score += 100
         
         return score
-    
+
+    def analyze_fork_diff(self, original_owner: str, original_repo: str,
+                          fork_owner: str, fork_repo: str,
+                          branch: str) -> Tuple[bool, int, str]:
+        """
+        Compare a fork branch against the original repo's default branch to
+        detect clean version ports (only build/version files changed).
+
+        Uses GitHub Compare API: GET /repos/{owner}/{repo}/compare/{base}...{head}
+
+        Returns:
+            (is_clean_port, score_bonus, description)
+            - is_clean_port: True if only version/build files changed
+            - score_bonus: Points to add to branch score (0-200)
+            - description: Human-readable summary
+        """
+        # Version/build files that are expected to change in a clean port
+        VERSION_FILES = {
+            'gradle.properties', 'build.gradle', 'build.gradle.kts',
+            'settings.gradle', 'settings.gradle.kts',
+            'gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties',
+        }
+        # Metadata files that commonly change in ports
+        METADATA_FILES = {
+            'src/main/resources/META-INF/mods.toml',
+            'src/main/resources/META-INF/neoforge.mods.toml',
+            'src/main/resources/fabric.mod.json',
+            'src/main/resources/quilt.mod.json',
+        }
+        SAFE_FILES = VERSION_FILES | METADATA_FILES
+
+        compare_url = (
+            f"https://api.github.com/repos/{original_owner}/{original_repo}"
+            f"/compare/HEAD...{fork_owner}:{branch}"
+        )
+
+        try:
+            response = requests.get(
+                compare_url, headers=self.config.github_headers, timeout=10
+            )
+            if response.status_code != 200:
+                return False, 0, f"Compare API returned {response.status_code}"
+
+            data = response.json()
+            files = data.get('files', [])
+            total_files = len(files)
+
+            if total_files == 0:
+                return False, 0, "No file differences found"
+
+            # Classify changed files
+            safe_changes = []
+            source_changes = []
+            for f in files:
+                filename = f.get('filename', '')
+                if filename in SAFE_FILES or any(filename.endswith(s) for s in (
+                    'gradle.properties', 'build.gradle', 'build.gradle.kts',
+                    'mods.toml', 'neoforge.mods.toml', 'fabric.mod.json',
+                )):
+                    safe_changes.append(filename)
+                else:
+                    source_changes.append(filename)
+
+            safe_count = len(safe_changes)
+            source_count = len(source_changes)
+
+            if source_count == 0:
+                # Pure version port -- only build/metadata files changed
+                return True, 200, (
+                    f"Clean port: {safe_count} build/version files changed, "
+                    f"0 source files changed"
+                )
+            elif source_count <= 3 and safe_count > 0:
+                # Mostly clean -- minor source tweaks
+                return True, 100, (
+                    f"Mostly clean port: {safe_count} build files + "
+                    f"{source_count} source files changed"
+                )
+            elif source_count <= 10:
+                # Moderate changes -- still reasonable
+                return False, 50, (
+                    f"Moderate changes: {safe_count} build files + "
+                    f"{source_count} source files changed"
+                )
+            else:
+                # Extensive changes -- could be a rewrite
+                return False, 0, (
+                    f"Extensive changes: {source_count} source files changed"
+                )
+
+        except requests.RequestException as e:
+            return False, 0, f"Compare API error: {e}"
+        except (KeyError, ValueError):
+            return False, 0, "Failed to parse compare response"
+
     def validate_gradle_properties(self, repo_path: Path,
                                    skip_loader_validation: bool = False) -> Tuple[bool, str]:
         """
@@ -2284,7 +2378,18 @@ class ModAutoCompiler:
                             if fork_exact:
                                 # Found EXACT version in fork!
                                 print(f"  ✅ Found EXACT version {self.config.mc_version} in fork!")
-                                
+
+                                # DIFF ANALYSIS: Compare fork vs original
+                                for fb in fork_exact:
+                                    is_clean, diff_bonus, diff_desc = self.analyze_fork_diff(
+                                        owner, repo, fork_owner, fork_repo, fb.name
+                                    )
+                                    fb.score += diff_bonus
+                                    if is_clean:
+                                        print(f"  🔍 Diff analysis: {diff_desc}")
+                                    elif diff_bonus > 0:
+                                        print(f"  🔍 Diff analysis: {diff_desc}")
+
                                 # SECURITY WARNING
                                 trust_score = fork_result.get('trust_score', 50)
                                 trust_analysis = fork_info.get('trust_analysis', {})
