@@ -313,10 +313,13 @@ class ModAutoCompiler:
                     parent = repo_data.get('parent', {})
                     if not parent:
                         print(f"       ⚠️  {repo_name}: No parent info (accepting anyway)")
-                        # Accept it anyway if it has the repo name
-                        if original_repo.lower() in repo_name.lower():
+                        # Accept only if repo name exactly matches original
+                        fork_repo_name = repo_name.split('/')[-1].lower()
+                        if fork_repo_name == original_repo.lower():
                             all_forks[repo_id] = repo_data
                             print(f"       ✅ Fork: {repo_name}")
+                        else:
+                            print(f"       ❌ {repo_name}: Name mismatch (expected {original_repo})")
                         continue
                     
                     parent_full_name = parent.get('full_name', '')
@@ -357,14 +360,15 @@ class ModAutoCompiler:
         for repo_data in all_forks.values():
             fork_full_name = repo_data['full_name']
             
-            # Get commit count
-            commit_count = 100  # Fast estimate
-            
-            # Get contributor count (optional, best effort)
-            contributor_count = 1  # Fast estimate
-            
-            # SECURITY: Analyze contributor trustworthiness
-            trust_analysis = {"trust_score": 60, "warnings": [], "signals": [], "contributor_count": 1}
+            # Get real commit and contributor counts (conditional on token)
+            if self.config.github_token:
+                commit_count = self.get_commit_count(fork_full_name)
+                contributor_count = self.get_contributor_count(fork_full_name)
+                trust_analysis = self.analyze_contributor_trust(fork_full_name)
+            else:
+                commit_count = 100  # Estimate when no token
+                contributor_count = 1
+                trust_analysis = {"trust_score": 50, "warnings": ["No token: trust analysis skipped"], "signals": [], "contributor_count": 1}
             
             fork_info = {
                 'owner': repo_data['owner']['login'],
