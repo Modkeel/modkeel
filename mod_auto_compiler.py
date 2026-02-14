@@ -1634,6 +1634,39 @@ class ModAutoCompiler:
         if os.name != 'nt':
             os.chmod(gradlew, 0o755)
 
+        # Quick dependency resolution check (~30s vs 10min full build)
+        try:
+            print(f"    🔍 Checking dependencies...")
+            dep_cmd = [
+                str(gradlew), "dependencies", "--configuration",
+                "compileClasspath", "--no-daemon"
+            ]
+            if extra_gradle_args:
+                dep_cmd.extend(extra_gradle_args)
+
+            dep_result = subprocess.run(
+                dep_cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 minutes max
+            )
+            if dep_result.returncode != 0:
+                fail_type, missing_deps = self.classify_build_failure(
+                    dep_result.stderr, dep_result.stdout
+                )
+                if fail_type == FailureType.DEPENDENCY_RESOLUTION:
+                    print(f"    ❌ Dependency check failed: {', '.join(missing_deps[:3])}")
+                    return (False, None,
+                            f"Dependency check failed: {missing_deps}",
+                            fail_type, missing_deps)
+                # If not a dep failure, continue with full build anyway
+                print(f"    ⚠️  Dep check returned error but not dep-related, continuing build...")
+        except subprocess.TimeoutExpired:
+            print(f"    ⚠️  Dep check timed out, continuing with full build...")
+        except Exception as e:
+            print(f"    ⚠️  Dep check error ({e}), continuing with full build...")
+
         try:
             cmd = [str(gradlew), "build", "--no-daemon"]
             if extra_gradle_args:
