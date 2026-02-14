@@ -1442,9 +1442,15 @@ class ModAutoCompiler:
             )
             
             if result.returncode != 0:
-                # Extract error from output
-                error_lines = result.stderr.split('\n')[-10:]  # Last 10 lines
-                return False, None, f"Gradle build failed:\n" + '\n'.join(error_lines)
+                # Show last 15 lines from both stdout and stderr for diagnosis
+                stderr_tail = '\n'.join(result.stderr.split('\n')[-15:]) if result.stderr else ''
+                stdout_tail = '\n'.join(result.stdout.split('\n')[-15:]) if result.stdout else ''
+                error_detail = f"Gradle build failed (exit code {result.returncode}):\n"
+                if stderr_tail.strip():
+                    error_detail += f"--- stderr ---\n{stderr_tail}\n"
+                if stdout_tail.strip():
+                    error_detail += f"--- stdout ---\n{stdout_tail}"
+                return False, None, error_detail
             
             # Find the compiled JAR
             build_libs = repo_path / "build" / "libs"
@@ -1452,24 +1458,25 @@ class ModAutoCompiler:
             if not build_libs.exists():
                 return False, None, "build/libs directory not found after compilation"
             
-            # Find JAR files (excluding -sources.jar and -dev.jar)
+            # Find JAR files, excluding classifiers that are not the main artifact
+            exclude_suffixes = ('-sources.jar', '-dev.jar', '-javadoc.jar', '-slim.jar', '-api.jar')
             jar_files = [
                 f for f in build_libs.glob("*.jar")
-                if not f.name.endswith('-sources.jar') 
-                and not f.name.endswith('-dev.jar')
-                and not f.name.endswith('-javadoc.jar')
+                if not any(f.name.endswith(s) for s in exclude_suffixes)
             ]
-            
+
             if not jar_files:
                 return False, None, "No JAR file found in build/libs"
-            
-            # If multiple JARs, prefer the one without classifier
-            main_jar = None
-            for jar in jar_files:
-                # Simple heuristic: shortest name is usually the main jar
-                if main_jar is None or len(jar.name) < len(main_jar.name):
-                    main_jar = jar
-            
+
+            # Prefer fat jars (-all, -shadow) as they bundle dependencies
+            fat_jars = [j for j in jar_files if j.name.endswith(('-all.jar', '-shadow.jar'))]
+            if fat_jars:
+                # Pick the largest fat jar
+                main_jar = max(fat_jars, key=lambda j: j.stat().st_size)
+            else:
+                # Pick the largest remaining jar (main artifact is typically largest)
+                main_jar = max(jar_files, key=lambda j: j.stat().st_size)
+
             return True, main_jar, "Compilation successful"
             
         except subprocess.TimeoutExpired:
@@ -1799,19 +1806,20 @@ class ModAutoCompiler:
                 branches_to_try = compatible_branches
             
             # Try each branch until one works (now we only try pre-validated ones)
+            branch_errors = []
             for i, branch in enumerate(branches_to_try, 1):
                 print(f"\n  🌿 Attempting [{i}/{len(branches_to_try)}]: {branch.name}")
                 version_match = "exact" if branch.minecraft_version == self.config.mc_version else "close"
                 print(f"     MC: {branch.minecraft_version} ({version_match}), Loader: {branch.loader} {branch.loader_version}")
-                
+
                 # Clean up previous attempt
                 if repo_temp_dir.exists():
                     shutil.rmtree(repo_temp_dir)
-                
+
                 # Clone the repository with specific branch
                 clone_url = f"https://github.com/{owner}/{repo}.git"
                 print(f"    📥 Cloning...")
-                
+
                 try:
                     result = subprocess.run(
                         ["git", "clone", "-b", branch.name, "--depth", "1", clone_url, str(repo_temp_dir)],
@@ -1819,62 +1827,74 @@ class ModAutoCompiler:
                         text=True,
                         timeout=300  # 5 minutes
                     )
-                    
+
                     if result.returncode != 0:
-                        print(f"    ❌ Clone failed: {result.stderr.strip()}")
+                        err = f"Clone failed: {result.stderr.strip()[:200]}"
+                        print(f"    ❌ {err}")
+                        branch_errors.append(f"{branch.name}: {err}")
                         continue
-                    
+
                 except subprocess.TimeoutExpired:
+                    branch_errors.append(f"{branch.name}: Clone timeout")
                     print(f"    ❌ Clone timeout")
                     continue
                 except Exception as e:
+                    branch_errors.append(f"{branch.name}: Clone error: {e}")
                     print(f"    ❌ Clone error: {e}")
                     continue
-                
+
                 # Secondary validation of gradle.properties (should pass since we pre-validated)
                 print(f"    🔍 Validating gradle.properties...")
                 is_valid, message = self.validate_gradle_properties(repo_temp_dir)
                 if not is_valid:
                     print(f"    ❌ {message}")
+                    branch_errors.append(f"{branch.name}: {message}")
                     continue
                 print(f"    {message}")
-                
+
                 # Validate build.gradle
                 print(f"    🔍 Validating build.gradle...")
                 is_valid, message = self.validate_build_gradle(repo_temp_dir)
                 if not is_valid:
                     print(f"    ❌ {message}")
+                    branch_errors.append(f"{branch.name}: {message}")
                     continue
                 print(f"    ✅ {message}")
-                
+
                 # Compile
                 success, jar_path, message = self.compile_mod(repo_temp_dir)
                 if not success:
                     print(f"    ❌ {message}")
+                    branch_errors.append(f"{branch.name}: {message[:200]}")
                     continue
                 print(f"    ✅ {message}")
-                
+
                 # Validate JAR
                 print(f"    🔍 Validating JAR...")
                 is_valid, mod_name, mod_version, message = self.validate_jar(jar_path)
                 if not is_valid:
                     print(f"    ❌ {message}")
+                    branch_errors.append(f"{branch.name}: JAR validation: {message}")
                     continue
                 print(f"    ✅ {message}")
                 print(f"    📋 Mod: {mod_name} v{mod_version}")
-                
+
                 # Copy JAR to mods folder
                 dest_path = self.config.mods_path / jar_path.name
                 shutil.copy2(jar_path, dest_path)
                 print(f"    💾 Installed to: {dest_path}")
-                
+
+                # Clean up temp dir after successful compilation
+                if repo_temp_dir.exists():
+                    self._safe_rmtree(repo_temp_dir)
+
                 # Success!
                 version_note = ""
                 if branch.minecraft_version != self.config.mc_version:
                     version_note = f" (compiled for MC {branch.minecraft_version})"
-                
+
                 print(f"\n  ✅ SUCCESS: {mod_name} v{mod_version} from branch '{branch.name}'{version_note}")
-                
+
                 return CompilationResult(
                     repo_url=repo_url,
                     success=True,
@@ -1884,12 +1904,15 @@ class ModAutoCompiler:
                     mod_version=mod_version,
                     compiled_mc_version=branch.minecraft_version
                 )
-            
-            # All branches failed
+
+            # All branches failed - show per-branch error detail
+            error_detail = f"All {len(branches_to_try)} branches failed:\n"
+            for err in branch_errors:
+                error_detail += f"  - {err}\n"
             return CompilationResult(
                 repo_url=repo_url,
                 success=False,
-                error=f"All {len(branches_to_try)} compatible branches failed compilation/validation"
+                error=error_detail.strip()
             )
             
         except Exception as e:
