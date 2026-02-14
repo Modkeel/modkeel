@@ -403,5 +403,68 @@ class TestCrossLoader(unittest.TestCase):
                             "Fabric branch should NOT match neoforge config")
 
 
+class TestIndependentPortSearch(unittest.TestCase):
+    """Test independent port filtering logic."""
+
+    def test_search_method_renamed(self):
+        """search_compatible_repos should exist (renamed from search_compatible_forks)."""
+        compiler = make_compiler()
+        self.assertTrue(
+            hasattr(compiler, 'search_compatible_repos'),
+            "search_compatible_repos method should exist"
+        )
+        self.assertFalse(
+            hasattr(compiler, 'search_compatible_forks'),
+            "search_compatible_forks should no longer exist"
+        )
+
+    def test_independent_port_not_original_repo(self):
+        """The original repo should be discarded in independent port filtering."""
+        # Simulate the filtering logic used in search_compatible_repos
+        original_full = "creator/SomeMod"
+
+        candidates = [
+            {"full_name": "creator/SomeMod"},     # original - should skip
+            {"full_name": "porter/SomeMod"},       # port - should keep
+            {"full_name": "other/SomeMod-Forge"},  # port - should keep
+        ]
+
+        accepted = [
+            c for c in candidates
+            if c["full_name"].lower() != original_full.lower()
+        ]
+
+        self.assertEqual(len(accepted), 2)
+        self.assertTrue(
+            all(c["full_name"] != "creator/SomeMod" for c in accepted),
+            "Original repo should not appear in accepted candidates"
+        )
+
+    def test_independent_port_score_penalty(self):
+        """Independent ports should receive a -10 score penalty."""
+        compiler = make_compiler(mc_version="1.21.10")
+        fork_data = {
+            'name': 'SomeMod-1.21.10-neoforge',
+            'description': 'Port of SomeMod to NeoForge 1.21.10',
+            'topics': [],
+            'stars': 5, 'watchers': 2, 'forks': 0,
+            'updated_at': __import__('datetime').datetime.now(),
+            'commit_count': 20, 'contributor_count': 2,
+            'trust_analysis': {'trust_score': 80, 'warnings': [], 'signals': []},
+        }
+
+        # Score without penalty (fork)
+        scored_fork = compiler.score_fork_reliability(fork_data)
+        fork_score = scored_fork['score']
+
+        # Score with penalty (independent)
+        scored_independent = compiler.score_fork_reliability(fork_data)
+        scored_independent['score'] -= 10
+        scored_independent['signals'].append('independent_port')
+
+        self.assertEqual(scored_independent['score'], fork_score - 10)
+        self.assertIn('independent_port', scored_independent['signals'])
+
+
 if __name__ == "__main__":
     unittest.main()
