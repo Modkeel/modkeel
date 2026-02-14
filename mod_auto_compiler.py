@@ -1475,44 +1475,59 @@ class ModAutoCompiler:
                         toml_path = name
                         break
                 
-                if not toml_path:
-                    return False, None, None, "mods.toml not found in JAR"
-                
-                # Read and parse mods.toml
-                with jar.open(toml_path) as f:
-                    toml_content = f.read().decode('utf-8')
-                    mod_info = toml.loads(toml_content)
-                
-                # Extract mod information
-                if 'mods' in mod_info and len(mod_info['mods']) > 0:
-                    first_mod = mod_info['mods'][0]
-                    mod_name = first_mod.get('modId', 'unknown')
-                    mod_version = first_mod.get('version', 'unknown')
+                if toml_path:
+                    # NeoForge/Forge: parse mods.toml
+                    with jar.open(toml_path) as f:
+                        toml_content = f.read().decode('utf-8')
+                        mod_info = toml.loads(toml_content)
+
+                    # Extract mod information
+                    if 'mods' in mod_info and len(mod_info['mods']) > 0:
+                        first_mod = mod_info['mods'][0]
+                        mod_name = first_mod.get('modId', 'unknown')
+                        mod_version = first_mod.get('version', 'unknown')
+                    else:
+                        mod_name = 'unknown'
+                        mod_version = 'unknown'
+
+                    # Check Minecraft version dependency using proper range parsing
+                    if 'dependencies' in mod_info:
+                        for mod_id, dep_info in mod_info['dependencies'].items():
+                            if isinstance(dep_info, list):
+                                for dep in dep_info:
+                                    if dep.get('modId') == 'minecraft':
+                                        version_range = dep.get('versionRange', '')
+                                        if version_range and not self.is_version_in_maven_range(self.config.mc_version, version_range):
+                                            return False, mod_name, mod_version, f"JAR declares incompatible MC version: {version_range}"
+
                 else:
-                    mod_name = 'unknown'
-                    mod_version = 'unknown'
-                
-                # Check loader compatibility
-                if 'loaderVersion' in mod_info:
-                    loader_version = mod_info['loaderVersion']
-                    # This is a version range, just check it exists
-                    pass
-                
-                # Check Minecraft version dependency
-                if 'dependencies' in mod_info:
-                    for mod_id, dep_info in mod_info['dependencies'].items():
-                        if isinstance(dep_info, list):
-                            for dep in dep_info:
-                                if dep.get('modId') == 'minecraft':
-                                    version_range = dep.get('versionRange', '')
-                                    # Simple check: does it mention our version?
-                                    if self.config.mc_version not in version_range and '*' not in version_range:
-                                        return False, mod_name, mod_version, f"JAR declares incompatible MC version: {version_range}"
-                
+                    # Try Fabric: look for fabric.mod.json
+                    fabric_path = None
+                    for name in jar.namelist():
+                        if name == 'fabric.mod.json':
+                            fabric_path = name
+                            break
+
+                    if not fabric_path:
+                        return False, None, None, "Neither mods.toml nor fabric.mod.json found in JAR"
+
+                    with jar.open(fabric_path) as f:
+                        fabric_data = json.loads(f.read().decode('utf-8'))
+
+                    mod_name = fabric_data.get('id', 'unknown')
+                    mod_version = fabric_data.get('version', 'unknown')
+
+                    # Check Minecraft version dependency
+                    depends = fabric_data.get('depends', {})
+                    mc_range = depends.get('minecraft', '')
+                    if mc_range and isinstance(mc_range, str):
+                        if not self.is_version_in_fabric_range(self.config.mc_version, mc_range):
+                            return False, mod_name, mod_version, f"JAR declares incompatible MC version: {mc_range}"
+
                 # Check minimum JAR size (should be at least 10KB for a real mod)
                 if jar_path.stat().st_size < 10 * 1024:
                     return False, mod_name, mod_version, "JAR file suspiciously small (<10KB)"
-                
+
                 return True, mod_name, mod_version, "JAR validation passed"
                 
         except zipfile.BadZipFile:
