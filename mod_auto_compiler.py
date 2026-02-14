@@ -1082,15 +1082,21 @@ class ModAutoCompiler:
                 return 1
             return 0
     
-    def pre_validate_branch(self, owner: str, repo: str, branch: BranchCandidate) -> bool:
+    def pre_validate_branch(self, owner: str, repo: str, branch: BranchCandidate,
+                            override_loader: Optional[str] = None) -> bool:
         """
         Pre-validate a branch by downloading only gradle.properties (without cloning).
         Also checks libs.versions.toml for modern multi-module projects.
         ENHANCED: Reads metadata files (fabric.mod.json/mods.toml) to validate version ranges.
         Updates branch object with validation results.
-        
+
+        Args:
+            override_loader: If set, validate against this loader instead of config.loader.
+                             Used by cross-loader fallback to find Fabric branches.
+
         Returns True if compatible, False otherwise.
         """
+        target_loader = override_loader or self.config.loader
         # STEP 1: Try to get Minecraft version from gradle.properties
         gradle_content = self.get_file_from_repo(owner, repo, branch.name, 'gradle.properties')
         
@@ -1167,17 +1173,17 @@ class ModAutoCompiler:
             
             # Extract loader version - try to detect ANY loader present
             # First try to detect target loader
-            if self.config.loader == 'neoforge':
+            if target_loader == 'neoforge':
                 loader_match = re.search(r'neo(?:forge)?_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
                 if loader_match:
                     branch.loader = 'neoforge'
                     branch.loader_version = loader_match.group(1)
-            elif self.config.loader == 'forge':
+            elif target_loader == 'forge':
                 loader_match = re.search(r'forge_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
                 if loader_match:
                     branch.loader = 'forge'
                     branch.loader_version = loader_match.group(1)
-            elif self.config.loader == 'fabric':
+            elif target_loader == 'fabric':
                 loader_match = re.search(r'fabric_(?:loader|api)_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
                 if loader_match:
                     branch.loader = 'fabric'
@@ -1193,24 +1199,24 @@ class ModAutoCompiler:
                     branch.loader = 'forge'
 
             # Early reject if detected loader doesn't match target
-            if branch.loader and branch.loader != self.config.loader:
-                branch.validation_error = f"Wrong loader: found {branch.loader}, need {self.config.loader}"
+            if branch.loader and branch.loader != target_loader:
+                branch.validation_error = f"Wrong loader: found {branch.loader}, need {target_loader}"
                 return False
         
         # STEP 2: Read metadata files for AUTHORITATIVE version range validation
-        version_range = self.parse_version_range_from_metadata(owner, repo, branch.name, self.config.loader)
+        version_range = self.parse_version_range_from_metadata(owner, repo, branch.name, target_loader)
         
         if version_range:
             # We have a version range from metadata - this is the SOURCE OF TRUTH
             branch.version_range = version_range
             
             # Validate loader compatibility first
-            if branch.loader and branch.loader != self.config.loader:
-                branch.validation_error = f"Loader mismatch: {branch.loader} != {self.config.loader}"
+            if branch.loader and branch.loader != target_loader:
+                branch.validation_error = f"Loader mismatch: {branch.loader} != {target_loader}"
                 return False
-            
+
             # Check if target version is in the range
-            if self.config.loader in ['neoforge', 'forge']:
+            if target_loader in ['neoforge', 'forge']:
                 is_compatible = self.is_version_in_maven_range(self.config.mc_version, version_range)
             else:  # fabric
                 is_compatible = self.is_version_in_fabric_range(self.config.mc_version, version_range)
@@ -1234,14 +1240,14 @@ class ModAutoCompiler:
             return False
         
         # Validate loader compatibility
-        if branch.loader != self.config.loader:
+        if branch.loader != target_loader:
             # Give better error message for Fabric-only mods
-            if branch.loader == 'fabric' and self.config.loader in ['neoforge', 'forge']:
-                branch.validation_error = f"Fabric-only mod (no {self.config.loader} version)"
-            elif branch.loader in ['neoforge', 'forge'] and self.config.loader == 'fabric':
+            if branch.loader == 'fabric' and target_loader in ['neoforge', 'forge']:
+                branch.validation_error = f"Fabric-only mod (no {target_loader} version)"
+            elif branch.loader in ['neoforge', 'forge'] and target_loader == 'fabric':
                 branch.validation_error = f"{branch.loader.capitalize()}-only mod (no Fabric version)"
             else:
-                branch.validation_error = f"Loader mismatch: {branch.loader or 'unknown'} != {self.config.loader}"
+                branch.validation_error = f"Loader mismatch: {branch.loader or 'unknown'} != {target_loader}"
             return False
         
         # All validations passed
@@ -1267,25 +1273,33 @@ class ModAutoCompiler:
         except:
             return False
     
-    def pre_validate_branches(self, owner: str, repo: str, branches: List[BranchCandidate]) -> List[BranchCandidate]:
+    def pre_validate_branches(self, owner: str, repo: str,
+                             branches: List[BranchCandidate],
+                             override_loader: Optional[str] = None) -> List[BranchCandidate]:
         """
         Pre-validate multiple branches using GitHub API (no cloning required).
         Uses concurrent requests for speed.
         Returns only compatible branches.
+
+        Args:
+            override_loader: If set, validate against this loader instead of config.loader.
         """
-        print(f"  🔍 Pre-validating {len(branches)} branches via GitHub API...")
-        
+        loader_label = override_loader or self.config.loader
+        print(f"  🔍 Pre-validating {len(branches)} branches via GitHub API"
+              f" (loader={loader_label})...")
+
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+
         compatible_branches = []
-        
+
         # Use ThreadPoolExecutor for parallel API calls
         max_workers = min(10, len(branches))  # Max 10 concurrent requests
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all validation tasks
             future_to_branch = {
-                executor.submit(self.pre_validate_branch, owner, repo, branch): branch
+                executor.submit(self.pre_validate_branch, owner, repo, branch,
+                                override_loader): branch
                 for branch in branches
             }
             
@@ -1362,10 +1376,16 @@ class ModAutoCompiler:
         
         return score
     
-    def validate_gradle_properties(self, repo_path: Path) -> Tuple[bool, str]:
+    def validate_gradle_properties(self, repo_path: Path,
+                                   skip_loader_validation: bool = False) -> Tuple[bool, str]:
         """
         Validate gradle.properties file for version compatibility.
         Note: This is a secondary validation after pre-validation via API.
+
+        Args:
+            skip_loader_validation: If True, skip the loader-specific checks
+                (e.g. neoforge_version presence). Used for cross-loader Fabric mods.
+
         Returns (is_valid, reason)
         """
         gradle_props = repo_path / "gradle.properties"
@@ -1402,7 +1422,7 @@ class ModAutoCompiler:
                         return False, f"minecraft_version is {found_version}, incompatible with {self.config.mc_version}"
             
             # Check for neoforge/forge version if applicable
-            if self.config.loader == 'neoforge':
+            if not skip_loader_validation and self.config.loader == 'neoforge':
                 neo_match = re.search(r'neo(?:forge)?_version\s*=\s*["\']?([0-9.]+)["\']?', content)
                 if not neo_match:
                     return False, "neoforge_version not found in gradle.properties"
