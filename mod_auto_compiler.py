@@ -1677,6 +1677,85 @@ class ModAutoCompiler:
         except Exception as e:
             return False, None, None, f"JAR validation error: {e}"
     
+    def download_modrinth_mod(self, slug: str, mc_version: str,
+                             loader: str) -> Optional[Path]:
+        """
+        Download the latest version of a mod from Modrinth API.
+
+        Args:
+            slug: Modrinth project slug (e.g. "connector", "forgified-fabric-api")
+            mc_version: Target Minecraft version
+            loader: Target loader (e.g. "neoforge")
+
+        Returns:
+            Path to the downloaded JAR, or None if download failed.
+        """
+        base_url = "https://api.modrinth.com/v2"
+        headers = {"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"}
+
+        # Try exact version first, then fall back to close versions
+        versions_to_try = [mc_version]
+        parts = mc_version.split('.')
+        if len(parts) == 3:
+            # e.g. for 1.21.10, also try 1.21.1
+            major_minor = f"{parts[0]}.{parts[1]}"
+            versions_to_try.append(major_minor)
+
+        for try_version in versions_to_try:
+            try:
+                url = (f"{base_url}/project/{slug}/version"
+                       f"?game_versions=[\"{try_version}\"]"
+                       f"&loaders=[\"{loader}\"]")
+                resp = requests.get(url, headers=headers, timeout=30)
+                if resp.status_code != 200:
+                    continue
+
+                versions = resp.json()
+                if not versions:
+                    continue
+
+                # Pick the most recent version
+                version_data = versions[0]
+                files = version_data.get('files', [])
+                if not files:
+                    continue
+
+                # Find primary file
+                primary = next(
+                    (f for f in files if f.get('primary', False)),
+                    files[0]
+                )
+                download_url = primary['url']
+                filename = primary['filename']
+
+                print(f"    📥 Downloading {slug}: {filename} "
+                      f"(MC {try_version})...")
+                dl_resp = requests.get(download_url, timeout=120)
+                dl_resp.raise_for_status()
+
+                # Save to output_dir
+                dest = self.config.output_dir / filename
+                dest.write_bytes(dl_resp.content)
+                print(f"    💾 Saved: {dest}")
+
+                # Also copy to instance mods if configured
+                if self.config.mods_path:
+                    instance_dest = self.config.mods_path / filename
+                    instance_dest.write_bytes(dl_resp.content)
+                    print(f"    💾 Installed: {instance_dest}")
+
+                return dest
+
+            except Exception as e:
+                logger.debug("Modrinth download error for %s (MC %s): %s",
+                             slug, try_version, e)
+                continue
+
+        print(f"    ⚠️  Could not download {slug} from Modrinth for "
+              f"MC {mc_version}")
+        print(f"       Manual download: https://modrinth.com/mod/{slug}")
+        return None
+
     def clone_and_compile(
         self, repo_url: str, specific_branch: Optional[str] = None,
         extra_gradle_args: Optional[List[str]] = None
@@ -2264,6 +2343,24 @@ class ModAutoCompiler:
             # Collect final results
             self.results = list(pass1_results.values())
 
+            # Auto-download Sinytra Connector if any cross-loader mods were compiled
+            cross_loader_mods = [
+                r for r in self.results
+                if r.success and r.is_cross_loader
+            ]
+            if cross_loader_mods:
+                print(f"\n{'='*80}")
+                print(f"🔄 CROSS-LOADER: {len(cross_loader_mods)} Fabric mod(s) "
+                      f"need Sinytra Connector to run on NeoForge")
+                print(f"{'='*80}")
+                print(f"  Downloading Sinytra Connector + Forgified Fabric API...")
+                self.download_modrinth_mod(
+                    "connector", self.config.mc_version, "neoforge"
+                )
+                self.download_modrinth_mod(
+                    "forgified-fabric-api", self.config.mc_version, "neoforge"
+                )
+
         finally:
             # Cleanup
             print(f"\n🧹 Cleaning up temporary directory...")
@@ -2302,11 +2399,14 @@ class ModAutoCompiler:
         successful = [r for r in self.results if r.success]
         failed = [r for r in self.results if not r.success]
         version_mismatches = [r for r in successful if r.compiled_mc_version and r.compiled_mc_version != self.config.mc_version]
-        
+        cross_loader_mods = [r for r in successful if r.is_cross_loader]
+
         report_lines.append(f"\n✅ Successful: {len(successful)}/{len(self.results)}")
         report_lines.append(f"❌ Failed: {len(failed)}/{len(self.results)}")
         if version_mismatches:
             report_lines.append(f"⚠️  Version warnings: {len(version_mismatches)}")
+        if cross_loader_mods:
+            report_lines.append(f"🔄 Cross-loader (Fabric via Connector): {len(cross_loader_mods)}")
         
         if successful:
             report_lines.append("\n" + "-"*80)
@@ -2317,13 +2417,16 @@ class ModAutoCompiler:
                 report_lines.append(f"\n📦 {result.repo_url}")
                 report_lines.append(f"   🌿 Branch: {result.branch}")
                 report_lines.append(f"   📋 Mod: {result.mod_name} v{result.mod_version}")
-                
+
                 # Show version match status
                 if result.compiled_mc_version == self.config.mc_version:
                     report_lines.append(f"   ✅ Version: {result.compiled_mc_version} (exact match)")
                 else:
                     report_lines.append(f"   ⚠️  Version: {result.compiled_mc_version} (target was {self.config.mc_version})")
-                
+
+                if result.is_cross_loader:
+                    report_lines.append(f"   🔄 Fabric mod via Sinytra Connector")
+
                 report_lines.append(f"   💾 JAR: {result.jar_path}")
         
         if version_mismatches:
@@ -2354,6 +2457,20 @@ class ModAutoCompiler:
                         for dep in result.missing_dependencies:
                             report_lines.append(f"      - {dep}")
         
+        if cross_loader_mods:
+            report_lines.append("\n" + "-"*80)
+            report_lines.append("🔄 CROSS-LOADER MODS (Fabric via Sinytra Connector):")
+            report_lines.append("-"*80)
+            report_lines.append("These Fabric mods were compiled because no NeoForge version was found.")
+            report_lines.append("They require Sinytra Connector + Forgified Fabric API to run on NeoForge.")
+            report_lines.append("Compatibility is ~85% - some mods may have issues. TEST IN-GAME.")
+            report_lines.append("")
+            for result in cross_loader_mods:
+                report_lines.append(f"  • {result.mod_name} v{result.mod_version} ({result.repo_url})")
+            report_lines.append("")
+            report_lines.append("Sinytra Connector: https://modrinth.com/mod/connector")
+            report_lines.append("Forgified Fabric API: https://modrinth.com/mod/forgified-fabric-api")
+
         report_lines.append("\n" + "="*80)
         report_lines.append(f"🎯 Target: Minecraft {self.config.mc_version} with {self.config.loader.capitalize()} {self.config.loader_version}")
         if self.config.strict_version:
