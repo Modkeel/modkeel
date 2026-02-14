@@ -466,5 +466,35 @@ class TestIndependentPortSearch(unittest.TestCase):
         self.assertIn('independent_port', scored_independent['signals'])
 
 
+class TestCheckModrinth(unittest.TestCase):
+    """Test Modrinth search method."""
+
+    def test_check_modrinth_exists(self):
+        """check_modrinth method should exist on ModAutoCompiler."""
+        compiler = make_compiler()
+        self.assertTrue(hasattr(compiler, 'check_modrinth'))
+
+    def test_camelcase_split(self):
+        """CamelCase mod names should be split for search queries."""
+        import re
+        name = "JustEnoughItems"
+        result = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', name)
+        self.assertEqual(result, "Just Enough Items")
+
+    def test_camelcase_single_word(self):
+        """Single-word names should not be modified."""
+        import re
+        name = "Create"
+        result = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', name)
+        self.assertEqual(result, "Create")
+
+    def test_camelcase_with_acronym(self):
+        """Names with ALL CAPS sections should split correctly."""
+        import re
+        name = "YetAnotherConfigLib"
+        result = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', name)
+        self.assertEqual(result, "Yet Another Config Lib")
+
+
 if __name__ == "__main__":
     unittest.main()
