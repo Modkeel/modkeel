@@ -111,31 +111,37 @@ setup_windows_console()
 
 class ModCompilerConfig:
     """Configuration for the mod compilation process"""
-    
-    def __init__(self, mc_version: str, loader: str, loader_version: str, 
-                 instance_path: str, github_token: Optional[str] = None,
-                 strict_version: bool = False):
+
+    def __init__(self, mc_version: str, loader: str, loader_version: str,
+                 instance_path: Optional[str] = None, github_token: Optional[str] = None,
+                 strict_version: bool = False, output_dir: str = "out"):
         self.mc_version = mc_version
         self.loader = loader.lower()
         self.loader_version = loader_version
-        self.instance_path = Path(instance_path)
-        self.mods_path = self.instance_path / "mods"
         self.github_token = github_token
         self.strict_version = strict_version
-        
+
+        # Output directory (always used)
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Instance path (optional - if provided, JARs also go to instance/mods/)
+        if instance_path:
+            self.instance_path = Path(instance_path)
+            if not self.instance_path.exists():
+                raise ValueError(f"Instance path does not exist: {instance_path}")
+            self.mods_path = self.instance_path / "mods"
+            self.mods_path.mkdir(exist_ok=True)
+        else:
+            self.instance_path = None
+            self.mods_path = None
+
         # GitHub API headers
         self.github_headers = {
             "Accept": "application/vnd.github.v3+json"
         }
         if github_token:
             self.github_headers["Authorization"] = f"token {github_token}"
-        
-        # Validate paths
-        if not self.instance_path.exists():
-            raise ValueError(f"Instance path does not exist: {instance_path}")
-        
-        # Create mods directory if it doesn't exist
-        self.mods_path.mkdir(exist_ok=True)
 
 
 class BranchCandidate:
@@ -1879,10 +1885,16 @@ class ModAutoCompiler:
                 print(f"    ✅ {message}")
                 print(f"    📋 Mod: {mod_name} v{mod_version}")
 
-                # Copy JAR to mods folder
-                dest_path = self.config.mods_path / jar_path.name
+                # Copy JAR to output directory
+                dest_path = self.config.output_dir / jar_path.name
                 shutil.copy2(jar_path, dest_path)
-                print(f"    💾 Installed to: {dest_path}")
+                print(f"    💾 Saved to: {dest_path}")
+
+                # Also copy to instance mods folder if configured
+                if self.config.mods_path:
+                    instance_dest = self.config.mods_path / jar_path.name
+                    shutil.copy2(jar_path, instance_dest)
+                    print(f"    💾 Installed to: {instance_dest}")
 
                 # Clean up temp dir after successful compilation
                 if repo_temp_dir.exists():
@@ -2037,7 +2049,9 @@ class ModAutoCompiler:
             report_lines.append(f"🔒 Mode: STRICT (exact version matches only)")
         else:
             report_lines.append(f"🔓 Mode: LENIENT (allows same major.minor versions)")
-        report_lines.append(f"📁 Install Path: {self.config.mods_path}")
+        report_lines.append(f"📁 Output: {self.config.output_dir}")
+        if self.config.mods_path:
+            report_lines.append(f"📁 Instance Mods: {self.config.mods_path}")
         report_lines.append("="*80)
         
         return '\n'.join(report_lines)
@@ -2049,9 +2063,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --mc-version 1.21.10 --loader neoforge --loader-version 64 --instance "C:\\Users\\Juan\\AppData\\Roaming\\.minecraft\\instances\\NeoCreate_1.21.10" repos.txt
-  
-  %(prog)s --mc-version 1.21.10 --loader neoforge --loader-version 64 --instance "~/.minecraft/instances/MyInstance" --github-token ghp_xxx repos.txt
+  # Compile to out/ directory (default)
+  %(prog)s --mc-version 1.21.10 --loader neoforge --loader-version 64 repos.txt
+
+  # Compile and install to instance
+  %(prog)s --mc-version 1.21.10 --loader neoforge --loader-version 64 --instance "~/.minecraft/instances/MyInstance" repos.txt
+
+  # Custom output directory
+  %(prog)s --mc-version 1.21.10 --loader neoforge --loader-version 64 --output-dir build/mods repos.txt
         """
     )
     
@@ -2081,8 +2100,13 @@ Examples:
     
     parser.add_argument(
         '--instance',
-        required=True,
-        help='Path to Minecraft instance directory'
+        help='Path to Minecraft instance directory (optional, JARs also copied here)'
+    )
+
+    parser.add_argument(
+        '--output-dir',
+        default='out',
+        help='Directory for compiled JARs (default: out/)'
     )
     
     parser.add_argument(
@@ -2134,7 +2158,8 @@ Examples:
             loader_version=args.loader_version,
             instance_path=args.instance,
             github_token=args.github_token,
-            strict_version=args.strict
+            strict_version=args.strict,
+            output_dir=args.output_dir
         )
     except ValueError as e:
         print(f"❌ Configuration error: {e}")
