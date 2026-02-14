@@ -495,6 +495,20 @@ class TestCheckModrinth(unittest.TestCase):
         result = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', name)
         self.assertEqual(result, "Yet Another Config Lib")
 
+    def test_modrinth_download_flag_default(self):
+        """modrinth_download should default to False."""
+        result = CompilationResult(repo_url="https://github.com/test/mod", success=True)
+        self.assertFalse(result.modrinth_download)
+
+    def test_modrinth_download_flag_set(self):
+        """modrinth_download=True should be stored."""
+        result = CompilationResult(
+            repo_url="https://github.com/test/mod",
+            success=True,
+            modrinth_download=True
+        )
+        self.assertTrue(result.modrinth_download)
+
 
 if __name__ == "__main__":
     unittest.main()

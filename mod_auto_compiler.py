@@ -192,7 +192,8 @@ class CompilationResult:
                  failure_type: "FailureType" = None,
                  missing_dependencies: Optional[List[str]] = None,
                  clone_dir: Optional[Path] = None,
-                 is_cross_loader: bool = False):
+                 is_cross_loader: bool = False,
+                 modrinth_download: bool = False):
         self.repo_url = repo_url
         self.success = success
         self.branch = branch
@@ -205,6 +206,7 @@ class CompilationResult:
         self.missing_dependencies = missing_dependencies or []
         self.clone_dir = clone_dir
         self.is_cross_loader = is_cross_loader
+        self.modrinth_download = modrinth_download
 
 
 class ModAutoCompiler:
@@ -2044,7 +2046,8 @@ class ModAutoCompiler:
 
     def clone_and_compile(
         self, repo_url: str, specific_branch: Optional[str] = None,
-        extra_gradle_args: Optional[List[str]] = None
+        extra_gradle_args: Optional[List[str]] = None,
+        skip_modrinth: bool = False
     ) -> CompilationResult:
         """
         Clone a repository, find compatible branch using pre-validation, compile, and validate.
@@ -2074,7 +2077,7 @@ class ModAutoCompiler:
                 print(f"  ⭐ Stars: {stars} | 🍴 Forks: {forks}")
 
             # ── Step 0: Check Modrinth for pre-compiled JAR ──────────
-            if not specific_branch:
+            if not specific_branch and not skip_modrinth:
                 modrinth_result = self.check_modrinth(repo)
                 if modrinth_result:
                     print(f"\n  📥 Downloading from Modrinth (no compilation needed)...")
@@ -2107,6 +2110,7 @@ class ModAutoCompiler:
                             mod_name=modrinth_result["title"],
                             mod_version=modrinth_result["version_number"],
                             compiled_mc_version=self.config.mc_version,
+                            modrinth_download=True,
                         )
                     except Exception as e:
                         print(f"    ⚠️  Modrinth download failed: {e}")
@@ -2623,6 +2627,39 @@ class ModAutoCompiler:
                 if not r.success
                 and r.failure_type == FailureType.DEPENDENCY_RESOLUTION
             ]
+
+            # === Recompile Modrinth-only mods for mavenLocal ===
+            # If any mod failed with DEPENDENCY_RESOLUTION, mods that were
+            # downloaded from Modrinth (not compiled) won't be in mavenLocal.
+            # Recompile those from GitHub so downstream mods can find them.
+            if dep_failures:
+                modrinth_only = [
+                    url for url, r in pass1_results.items()
+                    if r.success and r.modrinth_download
+                ]
+                if modrinth_only:
+                    print(f"\n{'='*80}")
+                    print(f"📤 MAVEN PUBLISH: Compiling {len(modrinth_only)} "
+                          f"Modrinth-downloaded mods for mavenLocal")
+                    print(f"{'='*80}")
+
+                    for repo_url in modrinth_only:
+                        print(f"\n  📤 Compiling for mavenLocal: {repo_url}")
+                        try:
+                            compile_result = self.clone_and_compile(
+                                repo_url, skip_modrinth=True
+                            )
+                            if (compile_result.success
+                                    and compile_result.clone_dir
+                                    and compile_result.clone_dir.exists()):
+                                self.publish_to_maven_local(
+                                    compile_result.clone_dir
+                                )
+                        except Exception as e:
+                            print(f"    ⚠️  Maven publish failed: {e}")
+                            # Non-fatal: the Modrinth JAR is still the output
+
+                        time.sleep(1)
 
             if dep_failures:
                 # === Pass 2 ===
