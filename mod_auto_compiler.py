@@ -26,6 +26,11 @@ from urllib.parse import urlparse
 import time
 
 # ============================================================================
+# CONSTANTS
+# ============================================================================
+MODRINTH_USER_AGENT = "ModForge/1.0 (github.com/juanzab/ModForge)"
+
+# ============================================================================
 # LOGGING SETUP
 # ============================================================================
 logger = logging.getLogger("modforge")
@@ -391,9 +396,9 @@ class ModAutoCompiler:
             f'"{original_repo}" {self.config.mc_version} port',
         ]
 
-        # Cross-loader: also search with fabric when targeting neoforge
+        # Cross-loader: also search with fabric when targeting neoforge/forge
         if (self.config.cross_loader
-                and self.config.loader == "neoforge"
+                and self.config.loader in ("neoforge", "forge")
                 and self.is_cross_loader_available()):
             independent_searches.extend([
                 f'"{original_repo}" {self.config.mc_version} fabric',
@@ -1844,7 +1849,7 @@ class ModAutoCompiler:
             return self._cross_loader_available
 
         base_url = "https://api.modrinth.com/v2"
-        headers = {"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"}
+        headers = {"User-Agent": MODRINTH_USER_AGENT}
         mc_version = self.config.mc_version
 
         available = True
@@ -1883,7 +1888,7 @@ class ModAutoCompiler:
         download_url, filename, file_size. Returns None if no match found.
         """
         base_url = "https://api.modrinth.com/v2"
-        headers = {"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"}
+        headers = {"User-Agent": MODRINTH_USER_AGENT}
         loader = self.config.loader
         mc_version = self.config.mc_version
 
@@ -2029,7 +2034,7 @@ class ModAutoCompiler:
             Path to the downloaded JAR, or None if download failed.
         """
         base_url = "https://api.modrinth.com/v2"
-        headers = {"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"}
+        headers = {"User-Agent": MODRINTH_USER_AGENT}
 
         # Try exact version first, then fall back to close versions
         versions_to_try = [mc_version]
@@ -2130,11 +2135,11 @@ class ModAutoCompiler:
             if not specific_branch and not skip_modrinth:
                 modrinth_result = self.check_modrinth(repo)
 
-                # Cross-loader fallback: try Fabric on Modrinth if NeoForge
+                # Cross-loader fallback: try Fabric on Modrinth if NeoForge/Forge
                 # not found and cross_loader is enabled
                 if (not modrinth_result
                         and self.config.cross_loader
-                        and self.config.loader == "neoforge"
+                        and self.config.loader in ("neoforge", "forge")
                         and self.is_cross_loader_available()):
                     saved_loader = self.config.loader
                     self.config.loader = "fabric"
@@ -2149,7 +2154,7 @@ class ModAutoCompiler:
                     try:
                         dl_resp = requests.get(
                             modrinth_result["download_url"],
-                            headers={"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"},
+                            headers={"User-Agent": MODRINTH_USER_AGENT},
                             timeout=120
                         )
                         dl_resp.raise_for_status()
@@ -2372,7 +2377,7 @@ class ModAutoCompiler:
                 if not compatible_branches:
                     # CROSS-LOADER FALLBACK: Try Fabric branches via Sinytra Connector
                     if (self.config.cross_loader
-                            and self.config.loader == "neoforge"
+                            and self.config.loader in ("neoforge", "forge")
                             and self.is_cross_loader_available()):
                         print(f"\n  🔄 CROSS-LOADER: No NeoForge branches found, "
                               f"trying Fabric fallback via Sinytra Connector...")

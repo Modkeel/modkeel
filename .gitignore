@@ -31,6 +31,7 @@ temp_repos/
 *.jar
 compilation_report*.txt
 Create_1.21.10/
+out/
 
 # Virtual environments
 venv/
