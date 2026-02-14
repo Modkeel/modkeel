@@ -1687,7 +1687,10 @@ class ModAutoCompiler:
         print(f"\n{'='*80}")
         print(f"📦 Processing: {repo_url}")
         print(f"{'='*80}")
-        
+
+        is_cross_loader_attempt = False
+        saved_fork_candidates = []
+
         try:
             # Parse repository URL
             owner, repo, url_branch = self.parse_repo_url(repo_url)
@@ -1768,14 +1771,11 @@ class ModAutoCompiler:
                 if should_search_forks:
                     # FALLBACK: Search for community forks
                     fork_candidates = self.search_compatible_forks(owner, repo)
+                    saved_fork_candidates = fork_candidates or []
                     
                     if not fork_candidates:
                         if not compatible_branches:
-                            return CompilationResult(
-                                repo_url=repo_url,
-                                success=False,
-                                error=f"No compatible branches/forks found for MC {self.config.mc_version} + {self.config.loader}"
-                            )
+                            pass  # Fall through to cross-loader check below
                         # else: fall through to use close matches from original repo
                     else:
                         # Try top-scored forks
@@ -1893,11 +1893,56 @@ class ModAutoCompiler:
                             compatible_branches = close_matches
                 
                 if not compatible_branches:
-                    return CompilationResult(
-                        repo_url=repo_url,
-                        success=False,
-                        error=f"No compatible branches in original repo or forks for MC {self.config.mc_version} + {self.config.loader}"
-                    )
+                    # CROSS-LOADER FALLBACK: Try Fabric branches via Sinytra Connector
+                    if (self.config.cross_loader
+                            and self.config.loader == "neoforge"):
+                        print(f"\n  🔄 CROSS-LOADER: No NeoForge branches found, "
+                              f"trying Fabric fallback via Sinytra Connector...")
+
+                        # Re-fetch branches with clean state for Fabric validation
+                        fabric_all = self.get_branches(owner, repo)
+                        fabric_branches = self.pre_validate_branches(
+                            owner, repo, fabric_all, override_loader="fabric"
+                        )
+
+                        # If no Fabric in original repo, try forks
+                        if not fabric_branches and saved_fork_candidates:
+                            for fork_result in saved_fork_candidates:
+                                fi = fork_result['fork']
+                                print(f"  🔄 Checking fork {fi['full_name']} "
+                                      f"for Fabric branches...")
+                                fb = self.get_branches(fi['owner'], fi['repo'])
+                                fabric_branches = self.pre_validate_branches(
+                                    fi['owner'], fi['repo'], fb,
+                                    override_loader="fabric"
+                                )
+                                if fabric_branches:
+                                    owner = fi['owner']
+                                    repo = fi['repo']
+                                    break
+
+                        if fabric_branches:
+                            print(f"  ✅ Found {len(fabric_branches)} Fabric "
+                                  f"branches for cross-loader compilation")
+                            compatible_branches = fabric_branches
+                            is_cross_loader_attempt = True
+                        else:
+                            return CompilationResult(
+                                repo_url=repo_url,
+                                success=False,
+                                error=(f"No compatible branches in original repo "
+                                       f"or forks for MC {self.config.mc_version}"
+                                       f" + {self.config.loader} (also tried "
+                                       f"Fabric cross-loader fallback)")
+                            )
+                    else:
+                        return CompilationResult(
+                            repo_url=repo_url,
+                            success=False,
+                            error=(f"No compatible branches in original repo "
+                                   f"or forks for MC {self.config.mc_version}"
+                                   f" + {self.config.loader}")
+                        )
                 
                 print(f"  🎯 Found {len(compatible_branches)} compatible branches")
                 
@@ -1973,7 +2018,10 @@ class ModAutoCompiler:
 
                 # Secondary validation of gradle.properties (should pass since we pre-validated)
                 print(f"    🔍 Validating gradle.properties...")
-                is_valid, message = self.validate_gradle_properties(repo_temp_dir)
+                is_valid, message = self.validate_gradle_properties(
+                    repo_temp_dir,
+                    skip_loader_validation=is_cross_loader_attempt
+                )
                 if not is_valid:
                     print(f"    ❌ {message}")
                     branch_errors.append(f"{branch.name}: {message}")
@@ -2029,8 +2077,11 @@ class ModAutoCompiler:
                 version_note = ""
                 if branch.minecraft_version != self.config.mc_version:
                     version_note = f" (compiled for MC {branch.minecraft_version})"
+                cross_note = ""
+                if is_cross_loader_attempt:
+                    cross_note = " [Fabric via Sinytra Connector]"
 
-                print(f"\n  ✅ SUCCESS: {mod_name} v{mod_version} from branch '{branch.name}'{version_note}")
+                print(f"\n  ✅ SUCCESS: {mod_name} v{mod_version} from branch '{branch.name}'{version_note}{cross_note}")
 
                 return CompilationResult(
                     repo_url=repo_url,
@@ -2040,7 +2091,8 @@ class ModAutoCompiler:
                     mod_name=mod_name,
                     mod_version=mod_version,
                     compiled_mc_version=branch.minecraft_version,
-                    clone_dir=repo_temp_dir
+                    clone_dir=repo_temp_dir,
+                    is_cross_loader=is_cross_loader_attempt
                 )
 
             # All branches failed - show per-branch error detail
