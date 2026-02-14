@@ -631,40 +631,46 @@ class ModAutoCompiler:
         
         target_version = self.config.mc_version.lower()
         target_loader = self.config.loader.lower()
-        
+
+        # Build regex patterns with word boundaries to avoid substring false positives
+        # e.g. "1.21.1" should NOT match "1.21.10", "forge" should NOT match "reforged"
+        ver_escaped = re.escape(target_version)
+        version_pattern = re.compile(rf'(?<![.\d]){ver_escaped}(?![.\d])')
+        loader_pattern = re.compile(rf'(?<!\w){re.escape(target_loader)}(?!\w)')
+
         # SIGNAL 1: Version match (anywhere) - CRITICAL
         has_version_match = False
         version_location = []
-        
-        if target_version in name:
+
+        if version_pattern.search(name):
             score += 60
             has_version_match = True
             version_location.append("name")
-        elif target_version in description:
+        elif version_pattern.search(description):
             score += 50
             has_version_match = True
             version_location.append("desc")
-        elif any(target_version in topic for topic in topics):
+        elif any(version_pattern.search(topic) for topic in topics):
             score += 40
             has_version_match = True
             version_location.append("topics")
-        
+
         if version_location:
             signals.append(f"Ver:{'+'.join(version_location)}")
-        
+
         # SIGNAL 2: Loader match (anywhere) - IMPORTANT
         has_loader_match = False
         loader_location = []
-        
-        if target_loader in name:
+
+        if loader_pattern.search(name):
             score += 40
             has_loader_match = True
             loader_location.append("name")
-        elif target_loader in description:
+        elif loader_pattern.search(description):
             score += 30
             has_loader_match = True
             loader_location.append("desc")
-        elif any(target_loader in topic for topic in topics):
+        elif any(loader_pattern.search(topic) for topic in topics):
             score += 20
             has_loader_match = True
             loader_location.append("topics")
@@ -762,10 +768,10 @@ class ModAutoCompiler:
         filtered = []
         
         for branch in branches:
-            # Try to extract version from branch name
+            # Try to extract MC version from branch name
+            # Must start with "1." to avoid matching dates like "2024-01-21"
             # Examples: mc1.21.1/dev, 1.21.1/stable, mc1.14/release
-            import re
-            version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', branch.name)
+            version_match = re.search(r'(?:^|[^.\d])(1\.\d+(?:\.\d+)?)(?:[^.\d]|$)', branch.name)
             
             if version_match:
                 branch_version = version_match.group(1)
@@ -1313,7 +1319,8 @@ class ModAutoCompiler:
             score += 150
         
         # Development branches (often have latest features)
-        if 'dev' in name_lower:
+        # Use boundary match to avoid "advent", "development-archive", etc.
+        if re.search(r'(?:^|[/\-_])dev(?:$|[/\-_])', name_lower):
             score += 100
         
         return score
