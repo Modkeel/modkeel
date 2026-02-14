@@ -1,0 +1,10 @@
+https://github.com/PepperCode1/Continuity
+https://github.com/Creators-of-Create/Create
+https://github.com/isXander/Controlify
+https://github.com/Engine-Room/Flywheel
+https://github.com/Fuzss/forgeconfigapiport
+https://github.com/Sinytra/ForgifiedFabricAPI
+https://github.com/IrisShaders/Iris
+https://github.com/mezz/JustEnoughItems
+https://github.com/CaffeineMC/sodium
+https://github.com/isXander/YetAnotherConfigLib

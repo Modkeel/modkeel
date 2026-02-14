@@ -1,0 +1,7 @@
+# Python dependencies for Minecraft Mod Auto-Compiler
+
+# HTTP requests library for GitHub API calls
+requests>=2.31.0
+
+# TOML parser for reading mods.toml files from compiled JARs
+toml>=0.10.2
