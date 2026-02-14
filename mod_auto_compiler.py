@@ -115,12 +115,14 @@ class ModCompilerConfig:
 
     def __init__(self, mc_version: str, loader: str, loader_version: str,
                  instance_path: Optional[str] = None, github_token: Optional[str] = None,
-                 strict_version: bool = False, output_dir: str = "out"):
+                 strict_version: bool = False, output_dir: str = "out",
+                 cross_loader: bool = True):
         self.mc_version = mc_version
         self.loader = loader.lower()
         self.loader_version = loader_version
         self.github_token = github_token
         self.strict_version = strict_version
+        self.cross_loader = cross_loader
 
         # Output directory (always used)
         self.output_dir = Path(output_dir)
@@ -189,7 +191,8 @@ class CompilationResult:
                  compiled_mc_version: Optional[str] = None,
                  failure_type: "FailureType" = None,
                  missing_dependencies: Optional[List[str]] = None,
-                 clone_dir: Optional[Path] = None):
+                 clone_dir: Optional[Path] = None,
+                 is_cross_loader: bool = False):
         self.repo_url = repo_url
         self.success = success
         self.branch = branch
@@ -201,6 +204,7 @@ class CompilationResult:
         self.failure_type = failure_type or FailureType.NONE
         self.missing_dependencies = missing_dependencies or []
         self.clone_dir = clone_dir
+        self.is_cross_loader = is_cross_loader
 
 
 class ModAutoCompiler:
@@ -2356,6 +2360,12 @@ Examples:
     )
     
     parser.add_argument(
+        '--no-cross-loader',
+        action='store_true',
+        help='Disable Fabric fallback via Sinytra Connector for NeoForge'
+    )
+
+    parser.add_argument(
         '--output-report',
         help='Path to save the compilation report (optional)'
     )
@@ -2394,7 +2404,8 @@ Examples:
             instance_path=args.instance,
             github_token=args.github_token,
             strict_version=args.strict,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            cross_loader=not args.no_cross_loader
         )
     except ValueError as e:
         print(f"❌ Configuration error: {e}")
