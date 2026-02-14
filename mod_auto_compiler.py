@@ -1459,7 +1459,8 @@ class ModAutoCompiler:
                 is_dep_failure = True
                 # findall returns strings for groups; the third pattern has no group
                 if isinstance(matches[0], str) and ":" in matches[0]:
-                    missing_deps.extend(matches)
+                    # Strip trailing dots (sentence-ending periods)
+                    missing_deps.extend(m.rstrip(".") for m in matches)
 
         if is_dep_failure:
             # Deduplicate while preserving order

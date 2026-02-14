@@ -15,7 +15,9 @@ from pathlib import Path
 # Add parent dir to path so we can import the module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mod_auto_compiler import ModAutoCompiler, ModCompilerConfig, BranchCandidate
+from mod_auto_compiler import (
+    ModAutoCompiler, ModCompilerConfig, BranchCandidate, FailureType
+)
 
 
 def make_compiler(mc_version: str = "1.21.10", loader: str = "neoforge") -> ModAutoCompiler:
@@ -267,6 +269,72 @@ class TestVersionCompatibility(unittest.TestCase):
     def test_different_major_minor(self):
         """1.20.x is NOT compatible with 1.21.x."""
         self.assertFalse(self.compiler.is_version_compatible("1.20.4", "1.21.10"))
+
+
+class TestClassifyBuildFailure(unittest.TestCase):
+    """Test Gradle build failure classification."""
+
+    def setUp(self):
+        self.compiler = make_compiler()
+
+    def test_dependency_resolution_could_not_find(self):
+        """'Could not find' pattern should classify as DEPENDENCY_RESOLUTION."""
+        stderr = (
+            "FAILURE: Build failed with an exception.\n"
+            "Could not resolve all files for configuration ':compileClasspath'.\n"
+            "Could not find dev.engine-room.flywheel:flywheel-neoforge-api:1.0.0-beta.\n"
+        )
+        fail_type, deps = self.compiler.classify_build_failure(stderr, "")
+        self.assertEqual(fail_type, FailureType.DEPENDENCY_RESOLUTION)
+        self.assertIn(
+            "dev.engine-room.flywheel:flywheel-neoforge-api:1.0.0-beta", deps
+        )
+
+    def test_dependency_resolution_could_not_resolve(self):
+        """'Could not resolve' pattern should classify as DEPENDENCY_RESOLUTION."""
+        stderr = (
+            "Could not resolve com.example:my-lib:2.3.4.\n"
+            "Required by: project :main\n"
+        )
+        fail_type, deps = self.compiler.classify_build_failure(stderr, "")
+        self.assertEqual(fail_type, FailureType.DEPENDENCY_RESOLUTION)
+        self.assertIn("com.example:my-lib:2.3.4", deps)
+
+    def test_multiple_missing_deps_deduplicated(self):
+        """Multiple occurrences of same dep should be deduplicated."""
+        stderr = (
+            "Could not find org.a:b:1.0.\n"
+            "Could not resolve org.a:b:1.0.\n"
+            "Could not find org.c:d:2.0.\n"
+        )
+        fail_type, deps = self.compiler.classify_build_failure(stderr, "")
+        self.assertEqual(fail_type, FailureType.DEPENDENCY_RESOLUTION)
+        self.assertEqual(len(deps), 2)
+        self.assertIn("org.a:b:1.0", deps)
+        self.assertIn("org.c:d:2.0", deps)
+
+    def test_generic_build_error(self):
+        """Non-dependency errors should classify as BUILD_ERROR."""
+        stderr = (
+            "FAILURE: Build failed with an exception.\n"
+            "Compilation failed; see the compiler error output for details.\n"
+        )
+        fail_type, deps = self.compiler.classify_build_failure(stderr, "")
+        self.assertEqual(fail_type, FailureType.BUILD_ERROR)
+        self.assertEqual(deps, [])
+
+    def test_empty_output(self):
+        """Empty stderr/stdout should classify as BUILD_ERROR."""
+        fail_type, deps = self.compiler.classify_build_failure("", "")
+        self.assertEqual(fail_type, FailureType.BUILD_ERROR)
+        self.assertEqual(deps, [])
+
+    def test_dependency_in_stdout(self):
+        """Dependency errors in stdout (not stderr) should also be detected."""
+        stdout = "Could not find net.fabricmc:fabric-api:0.92.0.\n"
+        fail_type, deps = self.compiler.classify_build_failure("", stdout)
+        self.assertEqual(fail_type, FailureType.DEPENDENCY_RESOLUTION)
+        self.assertIn("net.fabricmc:fabric-api:0.92.0", deps)
 
 
 if __name__ == "__main__":
