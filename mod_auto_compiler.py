@@ -9,6 +9,7 @@ Author: Juan - AutoKufe
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -121,13 +122,16 @@ class ModCompilerConfig:
     def __init__(self, mc_version: str, loader: str, loader_version: str,
                  instance_path: Optional[str] = None, github_token: Optional[str] = None,
                  strict_version: bool = False, output_dir: str = "out",
-                 cross_loader: bool = True):
+                 cross_loader: bool = True, docker_test: bool = False,
+                 docker_timeout: int = 180):
         self.mc_version = mc_version
         self.loader = loader.lower()
         self.loader_version = loader_version
         self.github_token = github_token
         self.strict_version = strict_version
         self.cross_loader = cross_loader
+        self.docker_test = docker_test
+        self.docker_timeout = docker_timeout
 
         # Output directory (always used)
         self.output_dir = Path(output_dir)
@@ -184,6 +188,9 @@ class FailureType(Enum):
     CLONE_ERROR = "clone_error"
     VALIDATION_ERROR = "validation_error"
     TIMEOUT = "timeout"
+    DOCKER_CRASH = "docker_crash"
+    DOCKER_TIMEOUT = "docker_timeout"
+    DOCKER_DEPENDENCY = "docker_dependency"
     UNKNOWN = "unknown"
 
 
@@ -212,6 +219,71 @@ class CompilationResult:
         self.clone_dir = clone_dir
         self.is_cross_loader = is_cross_loader
         self.modrinth_download = modrinth_download
+        # Docker test fields
+        self.docker_tested: bool = False
+        self.docker_test_passed: Optional[bool] = None
+        self.docker_error: Optional[str] = None
+
+
+class DockerTestCache:
+    """Cache Docker test results to avoid re-testing identical JAR sets."""
+
+    CACHE_DIR = Path.home() / ".modforge"
+    CACHE_FILE = CACHE_DIR / "docker_test_cache.json"
+
+    def __init__(self):
+        self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self._data: Dict = self._load()
+
+    def _load(self) -> Dict:
+        if self.CACHE_FILE.exists():
+            try:
+                with open(self.CACHE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save(self) -> None:
+        with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, indent=2)
+
+    @staticmethod
+    def compute_jar_set_hash(jar_paths: List[Path]) -> str:
+        """Deterministic hash of a set of JAR files (sorted by content hash)."""
+        file_hashes = []
+        for jar in sorted(jar_paths):
+            h = hashlib.sha256()
+            with open(jar, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            file_hashes.append(h.hexdigest())
+        combined = hashlib.sha256(
+            "|".join(sorted(file_hashes)).encode()
+        )
+        return combined.hexdigest()
+
+    def get(self, jar_hash: str, mc_version: str,
+            loader: str) -> Optional[bool]:
+        """Return cached pass/fail or None if not cached / invalidated."""
+        entry = self._data.get(jar_hash)
+        if entry is None:
+            return None
+        if (entry.get("mc_version") != mc_version
+                or entry.get("loader") != loader):
+            return None
+        return entry.get("passed")
+
+    def set(self, jar_hash: str, passed: bool,
+            mc_version: str, loader: str) -> None:
+        """Store a Docker test result."""
+        self._data[jar_hash] = {
+            "passed": passed,
+            "mc_version": mc_version,
+            "loader": loader,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save()
 
 
 class ModAutoCompiler:
@@ -2776,6 +2848,284 @@ class ModAutoCompiler:
             logger.debug("publishToMavenLocal error: %s", e)
             return False
 
+    # ====================================================================
+    # DOCKER TESTING
+    # ====================================================================
+
+    # Log patterns for server status detection
+    DOCKER_SUCCESS_PATTERN = re.compile(r"Done \([\d.]+s\)! For help")
+    DOCKER_FAIL_PATTERNS = [
+        re.compile(r"Missing or unsupported mandatory dependencies"),
+        re.compile(r"Incompatible mod set!"),
+        re.compile(r"Crash report saved to"),
+        re.compile(r"\[FATAL\]"),
+    ]
+    DOCKER_DEP_PATTERN = re.compile(
+        r"Mod '([^']+)' .* requires .* '([^']+)'"
+    )
+
+    def check_docker_available(self) -> bool:
+        """Check if Docker daemon is accessible."""
+        try:
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True, text=True, timeout=10
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+
+    def _kill_container(self, name: str) -> None:
+        """Best-effort stop and remove a Docker container."""
+        try:
+            subprocess.run(
+                ["docker", "stop", name],
+                capture_output=True, timeout=15
+            )
+        except Exception:
+            pass
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", name],
+                capture_output=True, timeout=10
+            )
+        except Exception:
+            pass
+
+    def _run_docker_server(self, mods_dir: Path) -> dict:
+        """
+        Launch a headless Minecraft server in Docker and analyze logs.
+
+        Returns dict with keys: passed (bool), error (str|None),
+        log_snippet (list[str]).
+        """
+        container_name = f"modforge_test_{int(time.time())}_{os.getpid()}"
+        loader_type = self.config.loader.upper()
+        if loader_type == "NEOFORGE":
+            loader_type = "NEOFORGE"
+        elif loader_type == "FORGE":
+            loader_type = "FORGE"
+        else:
+            loader_type = "FABRIC"
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--name", container_name,
+            "-e", "EULA=TRUE",
+            "-e", f"TYPE={loader_type}",
+            "-e", f"VERSION={self.config.mc_version}",
+            "-e", "REMOVE_OLD_MODS=TRUE",
+            "-v", f"{mods_dir.resolve()}:/mods:ro",
+            "itzg/minecraft-server",
+        ]
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            result = self._analyze_server_logs(process)
+            return result
+        except FileNotFoundError:
+            return {
+                "passed": False,
+                "error": "Docker executable not found",
+                "log_snippet": [],
+            }
+        except Exception as e:
+            return {
+                "passed": False,
+                "error": f"Docker error: {e}",
+                "log_snippet": [],
+            }
+        finally:
+            self._kill_container(container_name)
+
+    def _analyze_server_logs(self, process: subprocess.Popen) -> dict:
+        """
+        Read server stdout in real time, detect success/failure patterns.
+        """
+        start = time.time()
+        recent_lines: List[str] = []
+        timeout = self.config.docker_timeout
+
+        try:
+            for raw_line in process.stdout:
+                line = raw_line.rstrip("\n")
+                recent_lines.append(line)
+                if len(recent_lines) > 10:
+                    recent_lines.pop(0)
+
+                # Check success
+                if self.DOCKER_SUCCESS_PATTERN.search(line):
+                    process.terminate()
+                    return {
+                        "passed": True,
+                        "error": None,
+                        "log_snippet": recent_lines[-5:],
+                    }
+
+                # Check failures
+                for pattern in self.DOCKER_FAIL_PATTERNS:
+                    if pattern.search(line):
+                        process.terminate()
+                        return {
+                            "passed": False,
+                            "error": line.strip(),
+                            "log_snippet": recent_lines[-5:],
+                        }
+
+                # Check timeout
+                if time.time() - start > timeout:
+                    process.terminate()
+                    return {
+                        "passed": False,
+                        "error": (
+                            f"Server did not start within "
+                            f"{timeout}s timeout"
+                        ),
+                        "log_snippet": recent_lines[-5:],
+                    }
+        except Exception as e:
+            return {
+                "passed": False,
+                "error": f"Log analysis error: {e}",
+                "log_snippet": recent_lines[-5:],
+            }
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+
+        return {
+            "passed": False,
+            "error": "Server process ended without success signal",
+            "log_snippet": recent_lines[-5:],
+        }
+
+    @staticmethod
+    def _extract_missing_deps_from_logs(
+        log_lines: List[str],
+    ) -> List[str]:
+        """Extract missing dependency mod IDs from server log lines."""
+        dep_pattern = re.compile(
+            r"Mod '([^']+)' .* requires .* '([^']+)'"
+        )
+        deps = set()
+        for line in log_lines:
+            for m in dep_pattern.finditer(line):
+                deps.add(m.group(2))
+        return sorted(deps)
+
+    def _test_batch_docker(self, jar_paths: List[Path]) -> dict:
+        """Test all JARs together in a single Docker container."""
+        with tempfile.TemporaryDirectory(
+            prefix="modforge_docker_"
+        ) as tmp:
+            tmp_path = Path(tmp)
+            for jar in jar_paths:
+                shutil.copy2(jar, tmp_path / jar.name)
+            return self._run_docker_server(tmp_path)
+
+    def _test_single_docker(self, jar_path: Path) -> dict:
+        """Test a single JAR in isolation."""
+        with tempfile.TemporaryDirectory(
+            prefix="modforge_docker_"
+        ) as tmp:
+            tmp_path = Path(tmp)
+            shutil.copy2(jar_path, tmp_path / jar_path.name)
+            return self._run_docker_server(tmp_path)
+
+    def test_mods_in_docker(self) -> None:
+        """
+        Docker-test all successfully compiled mods.
+
+        Strategy: batch test first; if it fails, test each mod
+        individually to isolate the problem.
+        """
+        if not self.check_docker_available():
+            print("\n⚠️  Docker is not available. Skipping Docker tests.")
+            print("   Install Docker and ensure the daemon is running "
+                  "to enable headless server testing.")
+            return
+
+        successful = [r for r in self.results if r.success and r.jar_path]
+        if not successful:
+            print("\n⚠️  No successful mods to Docker-test.")
+            return
+
+        jar_paths = [Path(r.jar_path) for r in successful]
+        existing_jars = [j for j in jar_paths if j.exists()]
+        if not existing_jars:
+            print("\n⚠️  No JAR files found on disk for Docker testing.")
+            return
+
+        print(f"\n{'='*80}")
+        print(f"🐳 DOCKER TEST: Testing {len(existing_jars)} mod(s) "
+              f"in headless Minecraft server")
+        print(f"{'='*80}")
+
+        # Check cache
+        cache = DockerTestCache()
+        jar_hash = DockerTestCache.compute_jar_set_hash(existing_jars)
+        cached = cache.get(
+            jar_hash, self.config.mc_version, self.config.loader
+        )
+        if cached is not None:
+            status = "PASSED" if cached else "FAILED"
+            print(f"  📋 Cached result found: {status}")
+            for r in successful:
+                r.docker_tested = True
+                r.docker_test_passed = cached
+            return
+
+        # Batch test
+        print(f"  🔄 Batch test: loading all {len(existing_jars)} "
+              f"mod(s) into one server...")
+        batch = self._test_batch_docker(existing_jars)
+
+        if batch["passed"]:
+            print(f"  ✅ Batch test PASSED — all mods loaded successfully")
+            for r in successful:
+                r.docker_tested = True
+                r.docker_test_passed = True
+            cache.set(
+                jar_hash, True,
+                self.config.mc_version, self.config.loader,
+            )
+            return
+
+        # Batch failed — test individually
+        print(f"  ❌ Batch test FAILED: {batch['error']}")
+        print(f"  🔍 Testing mods individually to isolate failures...")
+
+        for result in successful:
+            jar = Path(result.jar_path)
+            if not jar.exists():
+                continue
+            mod_label = result.mod_name or jar.stem
+            print(f"\n    🧪 Testing: {mod_label}...")
+            single = self._test_single_docker(jar)
+            result.docker_tested = True
+            result.docker_test_passed = single["passed"]
+            if single["passed"]:
+                print(f"    ✅ {mod_label}: PASSED")
+            else:
+                result.docker_error = single["error"]
+                missing = self._extract_missing_deps_from_logs(
+                    single.get("log_snippet", [])
+                )
+                if missing:
+                    result.docker_error += (
+                        f" (missing: {', '.join(missing)})"
+                    )
+                print(f"    ❌ {mod_label}: FAILED — {result.docker_error}")
+
     def process_repos(self, repo_urls: List[str]):
         """
         Process a list of repository URLs with dependency-aware multi-pass.
@@ -2916,6 +3266,10 @@ class ModAutoCompiler:
                     "forgified-fabric-api", self.config.mc_version, "neoforge"
                 )
 
+            # === Docker Testing (opt-in) ===
+            if self.config.docker_test:
+                self.test_mods_in_docker()
+
         finally:
             # Cleanup
             print(f"\n🧹 Cleaning up temporary directory...")
@@ -3026,6 +3380,27 @@ class ModAutoCompiler:
             report_lines.append("Sinytra Connector: https://modrinth.com/mod/connector")
             report_lines.append("Forgified Fabric API: https://modrinth.com/mod/forgified-fabric-api")
 
+        # Docker test summary
+        docker_tested = [r for r in self.results if r.docker_tested]
+        if docker_tested:
+            docker_passed = [r for r in docker_tested if r.docker_test_passed]
+            docker_failed = [
+                r for r in docker_tested if not r.docker_test_passed
+            ]
+            report_lines.append("\n" + "-"*80)
+            report_lines.append("🐳 DOCKER TEST RESULTS:")
+            report_lines.append("-"*80)
+            report_lines.append(
+                f"  Tested: {len(docker_tested)}  |  "
+                f"Passed: {len(docker_passed)}  |  "
+                f"Failed: {len(docker_failed)}"
+            )
+            if docker_failed:
+                report_lines.append("")
+                for r in docker_failed:
+                    label = r.mod_name or r.repo_url
+                    report_lines.append(f"  ❌ {label}: {r.docker_error}")
+
         report_lines.append("\n" + "="*80)
         report_lines.append(f"🎯 Target: Minecraft {self.config.mc_version} with {self.config.loader.capitalize()} {self.config.loader_version}")
         if self.config.strict_version:
@@ -3119,6 +3494,19 @@ Examples:
         help='Path to write a log file (optional, in addition to stdout)'
     )
 
+    parser.add_argument(
+        '--docker-test',
+        action='store_true',
+        help='Test compiled mods in a headless Docker Minecraft server'
+    )
+
+    parser.add_argument(
+        '--docker-timeout',
+        type=int,
+        default=180,
+        help='Seconds to wait for Docker server startup (default: 180)'
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -3149,7 +3537,9 @@ Examples:
             github_token=args.github_token,
             strict_version=args.strict,
             output_dir=args.output_dir,
-            cross_loader=not args.no_cross_loader
+            cross_loader=not args.no_cross_loader,
+            docker_test=args.docker_test,
+            docker_timeout=args.docker_timeout
         )
     except ValueError as e:
         print(f"❌ Configuration error: {e}")
