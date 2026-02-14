@@ -2038,15 +2038,85 @@ class ModAutoCompiler:
                 error=f"Unexpected error: {e}"
             )
     
+    def create_maven_local_init_script(self) -> Path:
+        """
+        Create a Gradle init script that injects mavenLocal() into all projects.
+        Returns the path to the init script file.
+        """
+        init_script = Path(self.temp_dir) / "maven-local-init.gradle"
+        init_script.write_text(
+            "allprojects {\n"
+            "    repositories {\n"
+            "        mavenLocal()\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8"
+        )
+        return init_script
+
+    def publish_to_maven_local(
+        self, repo_path: Path,
+        extra_gradle_args: Optional[List[str]] = None
+    ) -> bool:
+        """
+        Run publishToMavenLocal on a successfully compiled repo.
+        Best-effort: returns False if the task doesn't exist or fails.
+        """
+        if os.name == 'nt':
+            gradlew = repo_path / "gradlew.bat"
+        else:
+            gradlew = repo_path / "gradlew"
+
+        if not gradlew.exists():
+            return False
+
+        if os.name != 'nt':
+            os.chmod(gradlew, 0o755)
+
+        cmd = [str(gradlew), "publishToMavenLocal", "--no-daemon"]
+        if extra_gradle_args:
+            cmd.extend(extra_gradle_args)
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=600
+            )
+            if result.returncode == 0:
+                print(f"    📤 Published to Maven Local (~/.m2/repository/)")
+                return True
+            else:
+                logger.debug(
+                    "publishToMavenLocal failed (task may not exist): %s",
+                    result.stderr[:200] if result.stderr else ""
+                )
+                return False
+        except (subprocess.TimeoutExpired, Exception) as e:
+            logger.debug("publishToMavenLocal error: %s", e)
+            return False
+
     def process_repos(self, repo_urls: List[str]):
         """
-        Process a list of repository URLs.
+        Process a list of repository URLs with dependency-aware multi-pass.
+
+        Pass 1: Compile all repos. After each success, publishToMavenLocal
+                so later/retry builds can find the artifact.
+        Pass 2: Retry repos that failed with DEPENDENCY_RESOLUTION, using
+                a Gradle init script that injects mavenLocal().
         """
-        # Create temporary directory
         self.temp_dir = tempfile.mkdtemp(prefix="mod_compiler_")
         print(f"🗂️  Using temporary directory: {self.temp_dir}")
-        
+
         try:
+            # === Pass 1 ===
+            print(f"\n{'='*80}")
+            print(f"📋 PASS 1: Compiling {len(repo_urls)} repositories")
+            print(f"{'='*80}")
+
+            pass1_results: Dict[str, CompilationResult] = {}
             for repo_url in repo_urls:
                 try:
                     result = self.clone_and_compile(repo_url)
@@ -2057,10 +2127,65 @@ class ModAutoCompiler:
                         success=False,
                         error=f"Unhandled error: {e}"
                     )
-                self.results.append(result)
+                pass1_results[repo_url] = result
 
-                # Small delay to avoid hammering GitHub API
+                # After success, publish to maven local for other mods
+                if result.success and result.clone_dir and result.clone_dir.exists():
+                    self.publish_to_maven_local(result.clone_dir)
+
                 time.sleep(1)
+
+            # === Identify dependency failures for Pass 2 ===
+            dep_failures = [
+                url for url, r in pass1_results.items()
+                if not r.success
+                and r.failure_type == FailureType.DEPENDENCY_RESOLUTION
+            ]
+
+            if dep_failures:
+                # === Pass 2 ===
+                print(f"\n{'='*80}")
+                print(f"🔄 PASS 2: Retrying {len(dep_failures)} repos with "
+                      f"dependency failures (mavenLocal injection)")
+                print(f"{'='*80}")
+
+                init_script = self.create_maven_local_init_script()
+                maven_args = ["--init-script", str(init_script)]
+
+                for repo_url in dep_failures:
+                    prev = pass1_results[repo_url]
+                    print(f"\n  🔄 Retrying: {repo_url}")
+                    if prev.missing_dependencies:
+                        print(f"     Previously missing: "
+                              f"{', '.join(prev.missing_dependencies)}")
+
+                    try:
+                        result = self.clone_and_compile(
+                            repo_url, extra_gradle_args=maven_args
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Unhandled error retrying {repo_url}: {e}"
+                        )
+                        result = CompilationResult(
+                            repo_url=repo_url,
+                            success=False,
+                            error=f"Unhandled error (pass 2): {e}"
+                        )
+
+                    # Update result
+                    pass1_results[repo_url] = result
+
+                    if result.success and result.clone_dir \
+                            and result.clone_dir.exists():
+                        self.publish_to_maven_local(
+                            result.clone_dir, maven_args
+                        )
+
+                    time.sleep(1)
+
+            # Collect final results
+            self.results = list(pass1_results.values())
 
         finally:
             # Cleanup
@@ -2146,6 +2271,11 @@ class ModAutoCompiler:
             for result in failed:
                 report_lines.append(f"\n📦 {result.repo_url}")
                 report_lines.append(f"   ❌ Error: {result.error}")
+                if result.failure_type == FailureType.DEPENDENCY_RESOLUTION:
+                    report_lines.append(f"   🔗 Type: Unresolved dependencies")
+                    if result.missing_dependencies:
+                        for dep in result.missing_dependencies:
+                            report_lines.append(f"      - {dep}")
         
         report_lines.append("\n" + "="*80)
         report_lines.append(f"🎯 Target: Minecraft {self.config.mc_version} with {self.config.loader.capitalize()} {self.config.loader_version}")
