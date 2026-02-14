@@ -10,6 +10,7 @@ Author: Juan - AutoKufe
 import argparse
 import base64
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,31 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 import time
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+logger = logging.getLogger("modforge")
+
+
+def setup_logging(log_file: Optional[str] = None) -> None:
+    """Configure logging with stdout and optional file output."""
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Console handler (always)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # File handler (optional)
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        print(f"Logging to file: {log_file}")
 
 try:
     import requests
@@ -1852,12 +1878,20 @@ class ModAutoCompiler:
         
         try:
             for repo_url in repo_urls:
-                result = self.clone_and_compile(repo_url)
+                try:
+                    result = self.clone_and_compile(repo_url)
+                except Exception as e:
+                    logger.error(f"Unhandled error processing {repo_url}: {e}")
+                    result = CompilationResult(
+                        repo_url=repo_url,
+                        success=False,
+                        error=f"Unhandled error: {e}"
+                    )
                 self.results.append(result)
-                
+
                 # Small delay to avoid hammering GitHub API
                 time.sleep(1)
-        
+
         finally:
             # Cleanup
             print(f"\n🧹 Cleaning up temporary directory...")
@@ -2012,8 +2046,16 @@ Examples:
         '--output-report',
         help='Path to save the compilation report (optional)'
     )
-    
+
+    parser.add_argument(
+        '--log-file',
+        help='Path to write a log file (optional, in addition to stdout)'
+    )
+
     args = parser.parse_args()
+
+    # Setup logging
+    setup_logging(args.log_file)
     
     # Read repository URLs
     repos_file = Path(args.repos_file)
