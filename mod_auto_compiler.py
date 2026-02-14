@@ -1822,6 +1822,147 @@ class ModAutoCompiler:
         except Exception as e:
             return False, None, None, f"JAR validation error: {e}"
     
+    def check_modrinth(self, mod_name: str) -> Optional[Dict]:
+        """
+        Search Modrinth for a mod matching mod_name + target loader + MC version.
+
+        Uses the Modrinth search API with facets to filter by loader and game
+        version. Returns the best match dict with keys: slug, title, version_number,
+        download_url, filename, file_size. Returns None if no match found.
+        """
+        base_url = "https://api.modrinth.com/v2"
+        headers = {"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"}
+        loader = self.config.loader
+        mc_version = self.config.mc_version
+
+        # Modrinth uses "forge" category for old Forge, "neoforge" for NeoForge
+        loader_facet = loader.lower()
+
+        facets = (
+            f'[["categories:{loader_facet}"],'
+            f'["versions:{mc_version}"],'
+            f'["project_type:mod"]]'
+        )
+
+        # Split CamelCase names into words for better search
+        # "JustEnoughItems" -> "Just Enough Items"
+        search_query = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', mod_name)
+
+        try:
+            print(f"  🔍 Checking Modrinth for '{mod_name}' "
+                  f"({loader} + MC {mc_version})...")
+            resp = requests.get(
+                f"{base_url}/search",
+                params={"query": search_query, "facets": facets, "limit": 5},
+                headers=headers,
+                timeout=15
+            )
+
+            if resp.status_code != 200:
+                print(f"    ⚠️  Modrinth search failed: HTTP {resp.status_code}")
+                return None
+
+            data = resp.json()
+            hits = data.get("hits", [])
+
+            if not hits:
+                print(f"    ℹ️  Not found on Modrinth")
+                return None
+
+            mod_lower = mod_name.lower()
+
+            # Pick best match: prefer exact slug/title match
+            best = None
+            for hit in hits:
+                slug = hit.get("slug", "")
+                title = hit.get("title", "")
+                if slug.lower() == mod_lower or title.lower() == mod_lower:
+                    best = hit
+                    break
+
+            # Fallback: check if title contains all words from the mod name
+            # e.g. "JustEnoughItems" -> words ["just","enough","items"]
+            #      matches "Just Enough Items (JEI)"
+            if not best:
+                words = search_query.lower().split()
+                for hit in hits:
+                    title_lower = hit.get("title", "").lower()
+                    slug = hit.get("slug", "").lower()
+                    if slug == mod_lower:
+                        best = hit
+                        break
+                    if len(words) >= 2 and all(w in title_lower for w in words):
+                        best = hit
+                        break
+
+            if not best:
+                print(f"    ℹ️  Modrinth results don't match '{mod_name}'")
+                return None
+
+            slug = best["slug"]
+            title = best["title"]
+            downloads = best.get("downloads", 0)
+            print(f"    ✅ Found on Modrinth: {title} ({slug}) "
+                  f"- {downloads:,} downloads")
+
+            # Fetch version files for exact loader + MC version
+            ver_resp = requests.get(
+                f"{base_url}/project/{slug}/version",
+                params={
+                    "loaders": f'["{loader_facet}"]',
+                    "game_versions": f'["{mc_version}"]'
+                },
+                headers=headers,
+                timeout=15
+            )
+
+            if ver_resp.status_code != 200 or not ver_resp.json():
+                print(f"    ⚠️  No version files for {loader} + MC {mc_version}")
+                return None
+
+            versions = ver_resp.json()
+            # Pick most recent release (already sorted by date)
+            version_data = None
+            for v in versions:
+                if v.get("version_type") == "release":
+                    version_data = v
+                    break
+            if not version_data:
+                version_data = versions[0]  # Fall back to latest (beta/alpha)
+
+            files = version_data.get("files", [])
+            if not files:
+                return None
+
+            primary = next(
+                (f for f in files if f.get("primary", False)),
+                files[0]
+            )
+
+            result = {
+                "slug": slug,
+                "title": title,
+                "version_number": version_data.get("version_number", "unknown"),
+                "version_type": version_data.get("version_type", "release"),
+                "download_url": primary["url"],
+                "filename": primary["filename"],
+                "file_size": primary.get("size", 0),
+                "downloads": downloads,
+            }
+
+            size_mb = result["file_size"] / (1024 * 1024)
+            print(f"    📦 Version: {result['version_number']} "
+                  f"({result['version_type']}) - {size_mb:.1f} MB")
+
+            return result
+
+        except requests.exceptions.Timeout:
+            print(f"    ⚠️  Modrinth search timed out")
+            return None
+        except Exception as e:
+            print(f"    ⚠️  Modrinth search error: {e}")
+            return None
+
     def download_modrinth_mod(self, slug: str, mc_version: str,
                              loader: str) -> Optional[Path]:
         """
@@ -1931,10 +2072,50 @@ class ModAutoCompiler:
                 stars = repo_info.get('stargazers_count', 0)
                 forks = repo_info.get('forks_count', 0)
                 print(f"  ⭐ Stars: {stars} | 🍴 Forks: {forks}")
-            
+
+            # ── Step 0: Check Modrinth for pre-compiled JAR ──────────
+            if not specific_branch:
+                modrinth_result = self.check_modrinth(repo)
+                if modrinth_result:
+                    print(f"\n  📥 Downloading from Modrinth (no compilation needed)...")
+                    try:
+                        dl_resp = requests.get(
+                            modrinth_result["download_url"],
+                            headers={"User-Agent": "ModForge/1.0 (github.com/juanzab/ModForge)"},
+                            timeout=120
+                        )
+                        dl_resp.raise_for_status()
+
+                        filename = modrinth_result["filename"]
+                        dest = self.config.output_dir / filename
+                        dest.write_bytes(dl_resp.content)
+                        print(f"    💾 Saved: {dest}")
+
+                        if self.config.mods_path:
+                            instance_dest = self.config.mods_path / filename
+                            instance_dest.write_bytes(dl_resp.content)
+                            print(f"    💾 Installed: {instance_dest}")
+
+                        print(f"\n  ✅ SUCCESS: {modrinth_result['title']} "
+                              f"v{modrinth_result['version_number']} "
+                              f"from Modrinth [pre-compiled]")
+
+                        return CompilationResult(
+                            repo_url=repo_url,
+                            success=True,
+                            jar_path=str(dest),
+                            mod_name=modrinth_result["title"],
+                            mod_version=modrinth_result["version_number"],
+                            compiled_mc_version=self.config.mc_version,
+                        )
+                    except Exception as e:
+                        print(f"    ⚠️  Modrinth download failed: {e}")
+                        print(f"    ℹ️  Falling back to GitHub compilation...")
+
+            # ── Step 1+: GitHub fork search + compilation ─────────────
             # Create temporary directory for this repo
             repo_temp_dir = Path(self.temp_dir) / repo
-            
+
             # Fetch all branches
             print(f"  🔍 Fetching branches...")
             all_branches = self.get_branches(owner, repo)
