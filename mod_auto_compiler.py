@@ -19,6 +19,7 @@ import sys
 import tempfile
 import zipfile
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -168,13 +169,27 @@ class BranchCandidate:
         return f"BranchCandidate(name={self.name}, mc={self.minecraft_version}, range={self.version_range}, loader={self.loader}, compatible={self.is_compatible}, score={self.score})"
 
 
+class FailureType(Enum):
+    """Classification of build failures for dependency-aware retries."""
+    NONE = "none"
+    DEPENDENCY_RESOLUTION = "dependency_resolution"
+    BUILD_ERROR = "build_error"
+    CLONE_ERROR = "clone_error"
+    VALIDATION_ERROR = "validation_error"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
+
+
 class CompilationResult:
     """Result of attempting to compile a mod"""
-    
+
     def __init__(self, repo_url: str, success: bool, branch: Optional[str] = None,
                  jar_path: Optional[str] = None, error: Optional[str] = None,
                  mod_name: Optional[str] = None, mod_version: Optional[str] = None,
-                 compiled_mc_version: Optional[str] = None):
+                 compiled_mc_version: Optional[str] = None,
+                 failure_type: "FailureType" = None,
+                 missing_dependencies: Optional[List[str]] = None,
+                 clone_dir: Optional[Path] = None):
         self.repo_url = repo_url
         self.success = success
         self.branch = branch
@@ -182,7 +197,10 @@ class CompilationResult:
         self.error = error
         self.mod_name = mod_name
         self.mod_version = mod_version
-        self.compiled_mc_version = compiled_mc_version  # Track if version differs from target
+        self.compiled_mc_version = compiled_mc_version
+        self.failure_type = failure_type or FailureType.NONE
+        self.missing_dependencies = missing_dependencies or []
+        self.clone_dir = clone_dir
 
 
 class ModAutoCompiler:
@@ -1417,78 +1435,148 @@ class ModAutoCompiler:
         except Exception as e:
             return False, f"Error reading build.gradle: {e}"
     
-    def compile_mod(self, repo_path: Path) -> Tuple[bool, Optional[Path], str]:
+    def classify_build_failure(
+        self, stderr: str, stdout: str
+    ) -> Tuple[FailureType, List[str]]:
+        """
+        Classify a Gradle build failure by parsing stderr/stdout.
+        Returns (failure_type, list_of_missing_dependency_coordinates).
+        """
+        combined = (stderr or "") + "\n" + (stdout or "")
+        missing_deps: List[str] = []
+
+        # Pattern: "Could not resolve <group:artifact:version>"
+        dep_patterns = [
+            r"Could not find\s+([\w.\-]+:[\w.\-]+:[\w.\-+]+)",
+            r"Could not resolve\s+([\w.\-]+:[\w.\-]+:[\w.\-+]+)",
+            r"Could not resolve all (?:files|dependencies) for configuration",
+        ]
+
+        is_dep_failure = False
+        for pattern in dep_patterns:
+            matches = re.findall(pattern, combined)
+            if matches:
+                is_dep_failure = True
+                # findall returns strings for groups; the third pattern has no group
+                if isinstance(matches[0], str) and ":" in matches[0]:
+                    missing_deps.extend(matches)
+
+        if is_dep_failure:
+            # Deduplicate while preserving order
+            seen = set()
+            unique_deps = []
+            for dep in missing_deps:
+                if dep not in seen:
+                    seen.add(dep)
+                    unique_deps.append(dep)
+            return FailureType.DEPENDENCY_RESOLUTION, unique_deps
+
+        return FailureType.BUILD_ERROR, []
+
+    def compile_mod(
+        self, repo_path: Path,
+        extra_gradle_args: Optional[List[str]] = None
+    ) -> Tuple[bool, Optional[Path], str, FailureType, List[str]]:
         """
         Compile the mod using Gradle.
-        Returns (success, jar_path, message)
+        Returns (success, jar_path, message, failure_type, missing_deps)
         """
         print(f"    🔨 Compiling...")
-        
+
         # Determine the Gradle wrapper command
         if os.name == 'nt':  # Windows
             gradlew = repo_path / "gradlew.bat"
         else:  # Unix-like
             gradlew = repo_path / "gradlew"
-        
+
         if not gradlew.exists():
-            return False, None, "Gradle wrapper not found"
-        
+            return (False, None, "Gradle wrapper not found",
+                    FailureType.BUILD_ERROR, [])
+
         # Make gradlew executable on Unix
         if os.name != 'nt':
             os.chmod(gradlew, 0o755)
-        
+
         try:
-            # Run gradle build
+            cmd = [str(gradlew), "build", "--no-daemon"]
+            if extra_gradle_args:
+                cmd.extend(extra_gradle_args)
+
             result = subprocess.run(
-                [str(gradlew), "build", "--no-daemon"],
+                cmd,
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
                 timeout=600  # 10 minutes timeout
             )
-            
+
             if result.returncode != 0:
+                # Classify the failure
+                failure_type, missing_deps = self.classify_build_failure(
+                    result.stderr, result.stdout
+                )
+
                 # Show last 15 lines from both stdout and stderr for diagnosis
-                stderr_tail = '\n'.join(result.stderr.split('\n')[-15:]) if result.stderr else ''
-                stdout_tail = '\n'.join(result.stdout.split('\n')[-15:]) if result.stdout else ''
+                stderr_tail = '\n'.join(
+                    result.stderr.split('\n')[-15:]
+                ) if result.stderr else ''
+                stdout_tail = '\n'.join(
+                    result.stdout.split('\n')[-15:]
+                ) if result.stdout else ''
                 error_detail = f"Gradle build failed (exit code {result.returncode}):\n"
                 if stderr_tail.strip():
                     error_detail += f"--- stderr ---\n{stderr_tail}\n"
                 if stdout_tail.strip():
                     error_detail += f"--- stdout ---\n{stdout_tail}"
-                return False, None, error_detail
-            
+
+                if missing_deps:
+                    error_detail += (
+                        f"\n--- missing dependencies ---\n"
+                        + "\n".join(f"  {d}" for d in missing_deps)
+                    )
+
+                return False, None, error_detail, failure_type, missing_deps
+
             # Find the compiled JAR
             build_libs = repo_path / "build" / "libs"
-            
+
             if not build_libs.exists():
-                return False, None, "build/libs directory not found after compilation"
-            
+                return (False, None,
+                        "build/libs directory not found after compilation",
+                        FailureType.BUILD_ERROR, [])
+
             # Find JAR files, excluding classifiers that are not the main artifact
-            exclude_suffixes = ('-sources.jar', '-dev.jar', '-javadoc.jar', '-slim.jar', '-api.jar')
+            exclude_suffixes = (
+                '-sources.jar', '-dev.jar', '-javadoc.jar',
+                '-slim.jar', '-api.jar'
+            )
             jar_files = [
                 f for f in build_libs.glob("*.jar")
                 if not any(f.name.endswith(s) for s in exclude_suffixes)
             ]
 
             if not jar_files:
-                return False, None, "No JAR file found in build/libs"
+                return (False, None, "No JAR file found in build/libs",
+                        FailureType.BUILD_ERROR, [])
 
             # Prefer fat jars (-all, -shadow) as they bundle dependencies
-            fat_jars = [j for j in jar_files if j.name.endswith(('-all.jar', '-shadow.jar'))]
+            fat_jars = [
+                j for j in jar_files
+                if j.name.endswith(('-all.jar', '-shadow.jar'))
+            ]
             if fat_jars:
-                # Pick the largest fat jar
                 main_jar = max(fat_jars, key=lambda j: j.stat().st_size)
             else:
-                # Pick the largest remaining jar (main artifact is typically largest)
                 main_jar = max(jar_files, key=lambda j: j.stat().st_size)
 
-            return True, main_jar, "Compilation successful"
-            
+            return True, main_jar, "Compilation successful", FailureType.NONE, []
+
         except subprocess.TimeoutExpired:
-            return False, None, "Compilation timeout (>10 minutes)"
+            return (False, None, "Compilation timeout (>10 minutes)",
+                    FailureType.TIMEOUT, [])
         except Exception as e:
-            return False, None, f"Compilation error: {e}"
+            return (False, None, f"Compilation error: {e}",
+                    FailureType.UNKNOWN, [])
     
     def validate_jar(self, jar_path: Path) -> Tuple[bool, Optional[str], Optional[str], str]:
         """
@@ -1564,7 +1652,10 @@ class ModAutoCompiler:
         except Exception as e:
             return False, None, None, f"JAR validation error: {e}"
     
-    def clone_and_compile(self, repo_url: str, specific_branch: Optional[str] = None) -> CompilationResult:
+    def clone_and_compile(
+        self, repo_url: str, specific_branch: Optional[str] = None,
+        extra_gradle_args: Optional[List[str]] = None
+    ) -> CompilationResult:
         """
         Clone a repository, find compatible branch using pre-validation, compile, and validate.
         """
@@ -1813,6 +1904,9 @@ class ModAutoCompiler:
             
             # Try each branch until one works (now we only try pre-validated ones)
             branch_errors = []
+            last_fail_type = FailureType.UNKNOWN
+            last_missing_deps: List[str] = []
+            last_fail_clone_dir: Optional[Path] = None
             for i, branch in enumerate(branches_to_try, 1):
                 print(f"\n  🌿 Attempting [{i}/{len(branches_to_try)}]: {branch.name}")
                 version_match = "exact" if branch.minecraft_version == self.config.mc_version else "close"
@@ -1838,15 +1932,18 @@ class ModAutoCompiler:
                         err = f"Clone failed: {result.stderr.strip()[:200]}"
                         print(f"    ❌ {err}")
                         branch_errors.append(f"{branch.name}: {err}")
+                        last_fail_type = FailureType.CLONE_ERROR
                         continue
 
                 except subprocess.TimeoutExpired:
                     branch_errors.append(f"{branch.name}: Clone timeout")
                     print(f"    ❌ Clone timeout")
+                    last_fail_type = FailureType.CLONE_ERROR
                     continue
                 except Exception as e:
                     branch_errors.append(f"{branch.name}: Clone error: {e}")
                     print(f"    ❌ Clone error: {e}")
+                    last_fail_type = FailureType.CLONE_ERROR
                     continue
 
                 # Secondary validation of gradle.properties (should pass since we pre-validated)
@@ -1855,6 +1952,7 @@ class ModAutoCompiler:
                 if not is_valid:
                     print(f"    ❌ {message}")
                     branch_errors.append(f"{branch.name}: {message}")
+                    last_fail_type = FailureType.VALIDATION_ERROR
                     continue
                 print(f"    {message}")
 
@@ -1864,14 +1962,20 @@ class ModAutoCompiler:
                 if not is_valid:
                     print(f"    ❌ {message}")
                     branch_errors.append(f"{branch.name}: {message}")
+                    last_fail_type = FailureType.VALIDATION_ERROR
                     continue
                 print(f"    ✅ {message}")
 
                 # Compile
-                success, jar_path, message = self.compile_mod(repo_temp_dir)
+                success, jar_path, message, fail_type, missing_deps = \
+                    self.compile_mod(repo_temp_dir, extra_gradle_args)
                 if not success:
                     print(f"    ❌ {message}")
                     branch_errors.append(f"{branch.name}: {message[:200]}")
+                    # Track last failure info for the result
+                    last_fail_type = fail_type
+                    last_missing_deps = missing_deps
+                    last_fail_clone_dir = repo_temp_dir
                     continue
                 print(f"    ✅ {message}")
 
@@ -1896,10 +2000,6 @@ class ModAutoCompiler:
                     shutil.copy2(jar_path, instance_dest)
                     print(f"    💾 Installed to: {instance_dest}")
 
-                # Clean up temp dir after successful compilation
-                if repo_temp_dir.exists():
-                    self._safe_rmtree(repo_temp_dir)
-
                 # Success!
                 version_note = ""
                 if branch.minecraft_version != self.config.mc_version:
@@ -1914,7 +2014,8 @@ class ModAutoCompiler:
                     jar_path=str(dest_path),
                     mod_name=mod_name,
                     mod_version=mod_version,
-                    compiled_mc_version=branch.minecraft_version
+                    compiled_mc_version=branch.minecraft_version,
+                    clone_dir=repo_temp_dir
                 )
 
             # All branches failed - show per-branch error detail
@@ -1924,7 +2025,10 @@ class ModAutoCompiler:
             return CompilationResult(
                 repo_url=repo_url,
                 success=False,
-                error=error_detail.strip()
+                error=error_detail.strip(),
+                failure_type=last_fail_type,
+                missing_dependencies=last_missing_deps,
+                clone_dir=last_fail_clone_dir
             )
             
         except Exception as e:
