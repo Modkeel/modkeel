@@ -2926,9 +2926,32 @@ class ModAutoCompiler:
         except Exception:
             pass
 
+    # Docker volume name for caching loader installations
+    DOCKER_VOLUME_PREFIX = "modforge_cache"
+
+    def _get_docker_volume_name(self) -> str:
+        """Deterministic volume name based on MC version + loader."""
+        tag = (
+            f"{self.config.mc_version}_{self.config.loader}"
+            .replace(".", "_")
+        )
+        return f"{self.DOCKER_VOLUME_PREFIX}_{tag}"
+
+    def _ensure_docker_volume(self) -> str:
+        """Create a named Docker volume if it doesn't exist."""
+        vol = self._get_docker_volume_name()
+        subprocess.run(
+            ["docker", "volume", "create", vol],
+            capture_output=True, timeout=10,
+        )
+        return vol
+
     def _run_docker_server(self, mods_dir: Path) -> dict:
         """
         Launch a headless Minecraft server in Docker and analyze logs.
+
+        Uses a persistent Docker volume to cache the loader installation
+        (NeoForge/Forge/Fabric download) so only the first run is slow.
 
         Returns dict with keys: passed (bool), error (str|None),
         log_snippet (list[str]).
@@ -2942,6 +2965,8 @@ class ModAutoCompiler:
         else:
             loader_type = "FABRIC"
 
+        volume_name = self._ensure_docker_volume()
+
         cmd = [
             "docker", "run", "--rm",
             "--name", container_name,
@@ -2949,6 +2974,7 @@ class ModAutoCompiler:
             "-e", f"TYPE={loader_type}",
             "-e", f"VERSION={self.config.mc_version}",
             "-e", "REMOVE_OLD_MODS=TRUE",
+            "-v", f"{volume_name}:/data",
             "-v", f"{mods_dir.resolve()}:/mods:ro",
             "itzg/minecraft-server:java21",
         ]
