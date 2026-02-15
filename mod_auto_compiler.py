@@ -3084,56 +3084,88 @@ class ModAutoCompiler:
                 return None
 
         # Step 2: Run installer via Docker's Java + host network
-        print(
-            f"  🔧 Installing NeoForge {nf_version} into local cache "
-            f"(uses Docker Java + host network)..."
-        )
-        try:
-            result = subprocess.run(
-                [
-                    "docker", "run", "--rm", "--network=host",
-                    "-v", f"{installer.resolve()}:/installer.jar:ro",
-                    "-v", f"{cache_dir.resolve()}:/data",
-                    "-w", "/data",
-                    "--entrypoint", "java",
-                    "itzg/minecraft-server:java21",
-                    "-jar", "/installer.jar", "--installServer", "/data",
-                ],
-                capture_output=True, text=True, timeout=600,
-            )
-            if result.returncode == 0:
+        # Retry up to 10 times — each attempt makes progress because
+        # the installer keeps already-downloaded libraries on disk.
+        install_retries = 10
+        for inst_attempt in range(1, install_retries + 1):
+            if self._is_loader_installed(cache_dir):
                 print(f"  ✅ NeoForge installed → {cache_dir}")
-                # Write eula.txt so the server can start
                 (cache_dir / "eula.txt").write_text("eula=true\n")
                 return cache_dir
-            else:
-                # Show last meaningful error lines
-                err_lines = [
-                    l for l in result.stdout.splitlines()
-                    if "fail" in l.lower() or "error" in l.lower()
-                ]
-                if err_lines:
-                    for l in err_lines[-3:]:
-                        print(f"     {l.strip()}")
-                print(
-                    f"  ⚠️  Installer exited with code "
-                    f"{result.returncode}. Will retry via container."
+
+            print(
+                f"  🔧 Installing NeoForge {nf_version} "
+                f"(attempt {inst_attempt}/{install_retries})..."
+            )
+            try:
+                result = subprocess.run(
+                    [
+                        "docker", "run", "--rm", "--network=host",
+                        "-v",
+                        f"{installer.resolve()}:/installer.jar:ro",
+                        "-v", f"{cache_dir.resolve()}:/data",
+                        "-w", "/data",
+                        "--entrypoint", "java",
+                        "itzg/minecraft-server:java21",
+                        "-jar", "/installer.jar",
+                        "--installServer", "/data",
+                    ],
+                    capture_output=True, text=True, timeout=600,
                 )
+                if result.returncode == 0:
+                    print(f"  ✅ NeoForge installed → {cache_dir}")
+                    (cache_dir / "eula.txt").write_text("eula=true\n")
+                    return cache_dir
+
+                # Count how many libs succeeded vs failed
+                lines = result.stdout.splitlines()
+                ok = sum(
+                    1 for l in lines if "Checksum valid" in l
+                )
+                failed = sum(
+                    1 for l in lines
+                    if "failed to download" in l.lower()
+                )
+                print(
+                    f"     Libraries: {ok} cached, "
+                    f"{failed} failed to download"
+                )
+                if inst_attempt < install_retries:
+                    wait = min(10 * inst_attempt, 60)
+                    print(
+                        f"     Retrying in {wait}s "
+                        f"(progress is saved)..."
+                    )
+                    time.sleep(wait)
+
+            except subprocess.TimeoutExpired:
+                print(
+                    f"  ⚠️  Installer timed out "
+                    f"(attempt {inst_attempt}/{install_retries})"
+                )
+                if inst_attempt < install_retries:
+                    print(f"     Retrying (progress is saved)...")
+            except Exception as e:
+                print(f"  ⚠️  Installer error: {e}")
                 return None
-        except subprocess.TimeoutExpired:
-            print(f"  ⚠️  Installer timed out after 10 minutes")
-            return None
-        except Exception as e:
-            print(f"  ⚠️  Installer error: {e}")
-            return None
+
+        print(
+            f"  ❌ Could not install NeoForge after "
+            f"{install_retries} attempts. "
+            f"The maven.neoforged.net CDN may be down."
+        )
+        return None
 
     def _run_docker_server(self, mods_dir: Path) -> dict:
         """
         Launch a headless Minecraft server in Docker and analyze logs.
 
-        Uses a local loader cache (~/.modforge/loaders/) so the loader
-        only downloads once ever. Falls back to in-container install
-        with retries if the cache isn't populated.
+        Two modes:
+        1. DIRECT: Loader is pre-installed in local cache. We run the
+           server directly with ``run.sh`` using a plain Java image,
+           bypassing itzg/minecraft-server's installer entirely.
+        2. FALLBACK: No local cache. Uses itzg/minecraft-server with
+           Docker volume + auto-retry on loader errors.
 
         Returns dict with keys: passed (bool), error (str|None),
         log_snippet (list[str]), is_loader_error (bool, optional).
@@ -3144,6 +3176,121 @@ class ModAutoCompiler:
 
         # Try to use pre-installed loader from local cache
         loader_dir = self._ensure_loader_installed()
+
+        if loader_dir and self._is_loader_installed(loader_dir):
+            return self._run_docker_server_direct(
+                mods_dir, loader_dir,
+            )
+
+        return self._run_docker_server_fallback(
+            mods_dir, loader_type,
+        )
+
+    def _run_docker_server_direct(
+        self, mods_dir: Path, loader_dir: Path,
+    ) -> dict:
+        """
+        Run the server directly from pre-installed loader cache.
+
+        Creates a temp working directory, symlinks the loader's
+        libraries and scripts, copies mods, then runs ``run.sh``
+        inside a plain Java container. No itzg installer involved.
+        """
+        container_name = (
+            f"modforge_test_{int(time.time())}_{os.getpid()}"
+        )
+
+        # Build a startup script that:
+        # 1. Links loader libraries from /loader (read-only)
+        # 2. Sets up server dir at /server (writable tmpfs)
+        # 3. Copies mods and runs the NeoForge server
+        # Find the actual unix_args.txt path (avoid shell glob
+        # since Java's @file doesn't support wildcards)
+        unix_args = list(
+            loader_dir.glob(
+                "libraries/net/neoforged/neoforge/*/unix_args.txt"
+            )
+        )
+        if not unix_args:
+            return {
+                "passed": False,
+                "error": "Corrupted loader cache: unix_args.txt "
+                         "not found",
+                "log_snippet": [],
+            }
+        # Relative path inside the symlinked libraries dir
+        args_rel = str(
+            unix_args[0].relative_to(loader_dir)
+        )
+
+        startup = (
+            '#!/bin/sh\n'
+            'set -e\n'
+            'cd /server\n'
+            'ln -s /loader/libraries libraries\n'
+            'cp /loader/user_jvm_args.txt .\n'
+            'echo "eula=true" > eula.txt\n'
+            'printf "server-port=25565\\nquery.port=25565\\n'
+            'online-mode=false\\nmax-tick-time=-1\\n" '
+            '> server.properties\n'
+            'mkdir -p mods\n'
+            'cp /mods/*.jar mods/ 2>/dev/null || true\n'
+            f'exec java @user_jvm_args.txt @{args_rel} nogui\n'
+        )
+        startup_path = Path(tempfile.mktemp(
+            prefix="modforge_start_", suffix=".sh",
+        ))
+        startup_path.write_text(startup)
+        startup_path.chmod(0o755)
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--name", container_name,
+            "--tmpfs", "/server",
+            "-v", f"{loader_dir.resolve()}:/loader:ro",
+            "-v", f"{mods_dir.resolve()}:/mods:ro",
+            "-v", f"{startup_path.resolve()}:/start.sh:ro",
+            "-w", "/server",
+            "--entrypoint", "/bin/sh",
+            "itzg/minecraft-server:java21",
+            "/start.sh",
+        ]
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            result = self._analyze_server_logs(process)
+        except FileNotFoundError:
+            return {
+                "passed": False,
+                "error": "Docker executable not found",
+                "log_snippet": [],
+            }
+        except Exception as e:
+            return {
+                "passed": False,
+                "error": f"Docker error: {e}",
+                "log_snippet": [],
+            }
+        finally:
+            self._kill_container(container_name)
+            startup_path.unlink(missing_ok=True)
+
+        return result
+
+    def _run_docker_server_fallback(
+        self, mods_dir: Path, loader_type: str,
+    ) -> dict:
+        """
+        Fallback: use itzg/minecraft-server with Docker volume.
+
+        Retries automatically on loader install errors.
+        """
+        volume_name = self._ensure_docker_volume()
 
         for attempt in range(1, self.DOCKER_INSTALL_MAX_RETRIES + 1):
             container_name = (
@@ -3157,20 +3304,8 @@ class ModAutoCompiler:
                 "-e", f"VERSION={self.config.mc_version}",
                 "-e", "REMOVE_OLD_MODS=TRUE",
                 "-v", f"{mods_dir.resolve()}:/mods:ro",
+                "-v", f"{volume_name}:/data",
             ]
-
-            if loader_dir and self._is_loader_installed(loader_dir):
-                # Mount pre-installed loader from host cache
-                cmd.extend([
-                    "-v", f"{loader_dir.resolve()}:/data",
-                ])
-            else:
-                # Fall back to Docker volume (in-container install)
-                volume_name = self._ensure_docker_volume()
-                cmd.extend([
-                    "-v", f"{volume_name}:/data",
-                ])
-
             cmd.append("itzg/minecraft-server:java21")
 
             try:
@@ -3208,9 +3343,7 @@ class ModAutoCompiler:
                     f"This is a server-side issue "
                     f"(maven.neoforged.net CDN), not your fault."
                 )
-                print(
-                    f"     Retrying in 10s..."
-                )
+                print(f"     Retrying in 10s...")
                 time.sleep(10)
             else:
                 print(
