@@ -2962,69 +2962,178 @@ class ModAutoCompiler:
         "1.20.4": "20.4.263",
     }
 
-    def _pre_download_installer(self) -> Optional[Path]:
-        """
-        Download the NeoForge/Forge installer from the host machine
-        (outside Docker) where connectivity is usually better.
+    def _get_loader_cache_dir(self) -> Path:
+        """Local cache: ~/.modforge/loaders/<loader>/<mc_version>/"""
+        d = (
+            Path.home() / ".modforge" / "loaders"
+            / self.config.loader.lower() / self.config.mc_version
+        )
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
-        Returns the local path to the installer JAR, or None if the
-        loader doesn't need pre-downloading or the download fails.
+    def _is_loader_installed(self, cache_dir: Path) -> bool:
+        """Check if a cached loader installation is complete."""
+        return (cache_dir / "run.sh").exists() or (
+            cache_dir / "run.bat"
+        ).exists()
+
+    def _download_installer_with_resume(self, url: str,
+                                         dest: Path) -> bool:
+        """Download a file with retry + resume (HTTP Range)."""
+        max_retries = 10
+        for attempt in range(1, max_retries + 1):
+            try:
+                headers = {}
+                mode = "wb"
+                existing = 0
+                if dest.exists():
+                    existing = dest.stat().st_size
+                    headers["Range"] = f"bytes={existing}-"
+                    mode = "ab"
+
+                resp = requests.get(
+                    url, stream=True, timeout=60, headers=headers,
+                )
+                if resp.status_code == 416:
+                    # Range not satisfiable = file already complete
+                    return True
+                resp.raise_for_status()
+
+                total_str = resp.headers.get("content-length", "0")
+                chunk_total = int(total_str)
+                total = existing + chunk_total
+                downloaded = existing
+
+                with open(dest, mode) as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = downloaded * 100 // total
+                            print(
+                                f"\r     {downloaded // 1024}KB / "
+                                f"{total // 1024}KB ({pct}%)",
+                                end="", flush=True,
+                            )
+
+                print()
+                if downloaded >= total and total > 0:
+                    return True
+
+            except Exception as e:
+                print(
+                    f"\n  ⚠️  Download interrupted (attempt "
+                    f"{attempt}/{max_retries}): {e}"
+                )
+                if attempt < max_retries:
+                    wait = min(5 * attempt, 30)
+                    print(f"     Resuming in {wait}s...")
+                    time.sleep(wait)
+
+        return dest.exists() and dest.stat().st_size > 0
+
+    def _ensure_loader_installed(self) -> Optional[Path]:
         """
+        Ensure the mod loader is installed in a local cache directory.
+
+        Strategy:
+        1. Check local cache (~/.modforge/loaders/<loader>/<version>/)
+        2. If not cached, download installer JAR with retry+resume
+        3. Run installer using Docker's Java but host networking
+        4. Cache is permanent — never re-downloads
+
+        Returns the cache dir path, or None on failure.
+        """
+        cache_dir = self._get_loader_cache_dir()
+
+        # Already installed? Skip everything.
+        if self._is_loader_installed(cache_dir):
+            print(f"  ✅ Loader cached at {cache_dir}")
+            return cache_dir
+
         if self.config.loader.lower() != "neoforge":
-            return None
+            return None  # Only NeoForge pre-install for now
 
         nf_version = self.NEOFORGE_VERSIONS.get(self.config.mc_version)
         if not nf_version:
+            logger.info(
+                "No known NeoForge version for MC %s, "
+                "falling back to in-container install",
+                self.config.mc_version,
+            )
             return None
 
-        cache_dir = Path.home() / ".modforge" / "installers"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        installer_path = cache_dir / f"neoforge-{nf_version}-installer.jar"
-
-        if installer_path.exists() and installer_path.stat().st_size > 0:
-            logger.info("Using cached installer: %s", installer_path)
-            return installer_path
-
+        # Step 1: Download installer JAR with retry+resume
+        installer_dir = Path.home() / ".modforge" / "installers"
+        installer_dir.mkdir(parents=True, exist_ok=True)
+        installer = (
+            installer_dir / f"neoforge-{nf_version}-installer.jar"
+        )
         url = (
             f"https://maven.neoforged.net/releases/net/neoforged/"
             f"neoforge/{nf_version}/neoforge-{nf_version}-installer.jar"
         )
-        print(f"  📥 Pre-downloading NeoForge {nf_version} installer "
-              f"from host (bypasses Docker network issues)...")
 
+        if not (installer.exists() and installer.stat().st_size > 1_000_000):
+            print(
+                f"  📥 Downloading NeoForge {nf_version} installer "
+                f"(with retry+resume)..."
+            )
+            if not self._download_installer_with_resume(url, installer):
+                print(f"  ❌ Could not download installer after retries")
+                return None
+
+        # Step 2: Run installer via Docker's Java + host network
+        print(
+            f"  🔧 Installing NeoForge {nf_version} into local cache "
+            f"(uses Docker Java + host network)..."
+        )
         try:
-            resp = requests.get(url, stream=True, timeout=120)
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            downloaded = 0
-            with open(installer_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total:
-                        pct = downloaded * 100 // total
-                        print(
-                            f"\r     {downloaded // 1024}KB / "
-                            f"{total // 1024}KB ({pct}%)",
-                            end="", flush=True,
-                        )
-            print()  # newline after progress
-            logger.info("Installer downloaded: %s", installer_path)
-            return installer_path
+            result = subprocess.run(
+                [
+                    "docker", "run", "--rm", "--network=host",
+                    "-v", f"{installer.resolve()}:/installer.jar:ro",
+                    "-v", f"{cache_dir.resolve()}:/data",
+                    "-w", "/data",
+                    "--entrypoint", "java",
+                    "itzg/minecraft-server:java21",
+                    "-jar", "/installer.jar", "--installServer", "/data",
+                ],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode == 0:
+                print(f"  ✅ NeoForge installed → {cache_dir}")
+                # Write eula.txt so the server can start
+                (cache_dir / "eula.txt").write_text("eula=true\n")
+                return cache_dir
+            else:
+                # Show last meaningful error lines
+                err_lines = [
+                    l for l in result.stdout.splitlines()
+                    if "fail" in l.lower() or "error" in l.lower()
+                ]
+                if err_lines:
+                    for l in err_lines[-3:]:
+                        print(f"     {l.strip()}")
+                print(
+                    f"  ⚠️  Installer exited with code "
+                    f"{result.returncode}. Will retry via container."
+                )
+                return None
+        except subprocess.TimeoutExpired:
+            print(f"  ⚠️  Installer timed out after 10 minutes")
+            return None
         except Exception as e:
-            print(f"\n  ⚠️  Host download failed: {e}")
-            print(f"     Falling back to in-container download...")
-            installer_path.unlink(missing_ok=True)
+            print(f"  ⚠️  Installer error: {e}")
             return None
 
     def _run_docker_server(self, mods_dir: Path) -> dict:
         """
         Launch a headless Minecraft server in Docker and analyze logs.
 
-        Uses a persistent Docker volume to cache the loader installation.
-        Pre-downloads the NeoForge installer from the host machine to
-        avoid Docker network timeout issues. If the loader install
-        still fails, retries automatically.
+        Uses a local loader cache (~/.modforge/loaders/) so the loader
+        only downloads once ever. Falls back to in-container install
+        with retries if the cache isn't populated.
 
         Returns dict with keys: passed (bool), error (str|None),
         log_snippet (list[str]), is_loader_error (bool, optional).
@@ -3033,8 +3142,8 @@ class ModAutoCompiler:
         if loader_type not in ("NEOFORGE", "FORGE"):
             loader_type = "FABRIC"
 
-        volume_name = self._ensure_docker_volume()
-        installer = self._pre_download_installer()
+        # Try to use pre-installed loader from local cache
+        loader_dir = self._ensure_loader_installed()
 
         for attempt in range(1, self.DOCKER_INSTALL_MAX_RETRIES + 1):
             container_name = (
@@ -3047,17 +3156,19 @@ class ModAutoCompiler:
                 "-e", f"TYPE={loader_type}",
                 "-e", f"VERSION={self.config.mc_version}",
                 "-e", "REMOVE_OLD_MODS=TRUE",
-                "-v", f"{volume_name}:/data",
                 "-v", f"{mods_dir.resolve()}:/mods:ro",
             ]
 
-            # Mount pre-downloaded installer if available
-            if installer and installer.exists():
+            if loader_dir and self._is_loader_installed(loader_dir):
+                # Mount pre-installed loader from host cache
                 cmd.extend([
-                    "-v",
-                    f"{installer.resolve()}:/tmp/neoforge-installer.jar:ro",
-                    "-e",
-                    "NEOFORGE_INSTALLER=/tmp/neoforge-installer.jar",
+                    "-v", f"{loader_dir.resolve()}:/data",
+                ])
+            else:
+                # Fall back to Docker volume (in-container install)
+                volume_name = self._ensure_docker_volume()
+                cmd.extend([
+                    "-v", f"{volume_name}:/data",
                 ])
 
             cmd.append("itzg/minecraft-server:java21")
