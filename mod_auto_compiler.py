@@ -2991,6 +2991,12 @@ class ModAutoCompiler:
         r"Mod '([^']+)' .* requires .* '([^']+)'"
     )
 
+    # Client-only mod crash: the mod tries to load client classes
+    # on a dedicated server. Not a bug, just untestable headlessly.
+    DOCKER_CLIENT_ONLY_PATTERN = re.compile(
+        r"invalid dist DEDICATED_SERVER"
+    )
+
     # Known loader/infrastructure errors that are NOT caused by mods.
     # Each entry: (compiled regex, human-readable explanation).
     DOCKER_LOADER_ERRORS = [
@@ -3546,6 +3552,18 @@ class ModAutoCompiler:
                             "is_loader_error": True,
                         }
 
+                # Check client-only mod crash (not testable on server)
+                if self.DOCKER_CLIENT_ONLY_PATTERN.search(line):
+                    process.terminate()
+                    return {
+                        "passed": False,
+                        "error": "[CLIENT-ONLY] Mod uses client-side "
+                                 "classes, cannot test on headless "
+                                 "server",
+                        "log_snippet": recent_lines[-5:],
+                        "is_client_only": True,
+                    }
+
                 # Check mod failures
                 for pattern in self.DOCKER_FAIL_PATTERNS:
                     if pattern.search(line):
@@ -3744,6 +3762,17 @@ class ModAutoCompiler:
                 r.docker_error = batch["error"]
             return
 
+        # If client-only crash in batch, test individually to find which
+        if batch.get("is_client_only") and len(successful) == 1:
+            r = successful[0]
+            mod_label = r.mod_name or Path(r.jar_path).stem
+            r.docker_tested = True
+            r.docker_test_passed = None  # not failed, just untestable
+            r.docker_error = batch["error"]
+            print(f"  ℹ️  {mod_label} is client-only — cannot test "
+                  f"on headless server")
+            return
+
         # Mod-related failure — test individually to isolate
         print(f"  🔍 Testing mods individually to isolate failures...")
 
@@ -3761,6 +3790,13 @@ class ModAutoCompiler:
                 result.docker_error = single["error"]
                 print(f"    ⚠️  {mod_label}: INCONCLUSIVE — "
                       f"{result.docker_error}")
+                continue
+
+            if single.get("is_client_only"):
+                result.docker_test_passed = None  # not failed, untestable
+                result.docker_error = single["error"]
+                print(f"    ℹ️  {mod_label}: CLIENT-ONLY — "
+                      f"cannot test on headless server")
                 continue
 
             result.docker_test_passed = single["passed"]
@@ -4046,24 +4082,45 @@ class ModAutoCompiler:
             report_lines.append("\n" + "-"*80)
             report_lines.append("🐳 DOCKER TEST RESULTS:")
             report_lines.append("-"*80)
+            docker_client_only = [
+                r for r in docker_inconclusive
+                if r.docker_error
+                and "[CLIENT-ONLY]" in r.docker_error
+            ]
+            docker_loader_err = [
+                r for r in docker_inconclusive
+                if r not in docker_client_only
+            ]
             parts = [
                 f"Tested: {len(docker_tested)}",
                 f"Passed: {len(docker_passed)}",
                 f"Failed: {len(docker_failed)}",
             ]
-            if docker_inconclusive:
+            if docker_client_only:
                 parts.append(
-                    f"Inconclusive: {len(docker_inconclusive)}"
+                    f"Client-only: {len(docker_client_only)}"
+                )
+            if docker_loader_err:
+                parts.append(
+                    f"Inconclusive: {len(docker_loader_err)}"
                 )
             report_lines.append(f"  {'  |  '.join(parts)}")
-            if docker_inconclusive:
+            if docker_client_only:
+                report_lines.append("")
+                for r in docker_client_only:
+                    label = r.mod_name or r.repo_url
+                    report_lines.append(
+                        f"  ℹ️  {label}: client-only mod, "
+                        f"cannot test on headless server"
+                    )
+            if docker_loader_err:
                 report_lines.append("")
                 report_lines.append(
-                    "  ⚠️  LOADER/INFRASTRUCTURE ERROR (not caused by mods):"
+                    "  ⚠️  LOADER/INFRASTRUCTURE ERROR "
+                    "(not caused by mods):"
                 )
-                # All inconclusive share the same loader error
                 report_lines.append(
-                    f"     {docker_inconclusive[0].docker_error}"
+                    f"     {docker_loader_err[0].docker_error}"
                 )
             if docker_failed:
                 report_lines.append("")
