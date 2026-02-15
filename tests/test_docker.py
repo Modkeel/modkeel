@@ -131,6 +131,100 @@ class TestLogPatterns(unittest.TestCase):
 
 
 # ============================================================================
+# LOADER ERROR DETECTION
+# ============================================================================
+
+class TestLoaderErrors(unittest.TestCase):
+    """Test detection of known loader/infrastructure errors."""
+
+    def test_java_module_error(self):
+        """Java module incompatibility should be detected."""
+        line = (
+            "java.lang.module.FindException: "
+            "Module jdk.crypto.ec not found, required by com.nimbusds"
+        )
+        matched = False
+        for regex, explanation in ModAutoCompiler.DOCKER_LOADER_ERRORS:
+            if regex.search(line):
+                matched = True
+                self.assertIn("Java module", explanation)
+                break
+        self.assertTrue(matched)
+
+    def test_class_version_error(self):
+        """UnsupportedClassVersionError should be detected."""
+        line = "java.lang.UnsupportedClassVersionError: net/foo/Bar"
+        matched = any(
+            r.search(line) for r, _ in ModAutoCompiler.DOCKER_LOADER_ERRORS
+        )
+        self.assertTrue(matched)
+
+    def test_install_failure(self):
+        """Loader installation failure should be detected."""
+        lines = [
+            "Failed to install NeoForge",
+            "There was an error during installation",
+            "These libraries failed to download. Try again.",
+        ]
+        for line in lines:
+            matched = any(
+                r.search(line)
+                for r, _ in ModAutoCompiler.DOCKER_LOADER_ERRORS
+            )
+            self.assertTrue(matched, f"Not detected: {line}")
+
+    def test_download_warning_not_fatal(self):
+        """Individual download WARNING should NOT be a loader error."""
+        line = (
+            "WARNING: Failed to download from "
+            "https://maven.neoforged.net/foo.jar"
+        )
+        matched = any(
+            r.search(line) for r, _ in ModAutoCompiler.DOCKER_LOADER_ERRORS
+        )
+        self.assertFalse(matched)
+
+    def test_server_failed_exitcode(self):
+        """Server process crash with exit code should be detected."""
+        line = 'Minecraft server failed. Inspect logs. {"exitCode": 1}'
+        matched = any(
+            r.search(line) for r, _ in ModAutoCompiler.DOCKER_LOADER_ERRORS
+        )
+        self.assertTrue(matched)
+
+    def test_normal_log_not_loader_error(self):
+        """Normal mod loading lines should NOT match loader errors."""
+        lines = [
+            "Loading mod create v1.0",
+            "[Server thread/INFO]: Loaded 42 mods",
+            "Missing or unsupported mandatory dependencies",
+        ]
+        for line in lines:
+            matched = any(
+                r.search(line)
+                for r, _ in ModAutoCompiler.DOCKER_LOADER_ERRORS
+            )
+            self.assertFalse(matched, f"False positive: {line}")
+
+    def test_analyze_logs_returns_loader_error_flag(self):
+        """_analyze_server_logs should set is_loader_error flag."""
+        compiler = make_compiler()
+        proc = MagicMock()
+        proc.stdout = iter([
+            "Starting server...\n",
+            "Module jdk.crypto.ec not found, required by foo\n",
+        ])
+        proc.poll.return_value = None
+        proc.terminate = MagicMock()
+        proc.wait = MagicMock()
+        proc.kill = MagicMock()
+        result = compiler._analyze_server_logs(proc)
+        self.assertFalse(result["passed"])
+        self.assertTrue(result.get("is_loader_error", False))
+        self.assertIn("LOADER ERROR", result["error"])
+
+
+# ============================================================================
 # MISSING DEPENDENCY EXTRACTION
 # ============================================================================
 
@@ -349,12 +443,24 @@ class TestAnalyzeServerLogs(unittest.TestCase):
     def test_timeout_detection(self):
         compiler = make_compiler(docker_timeout=0)
         proc = self._mock_process([
-            "Loading mods...",
+            "Starting minecraft server version 1.21.4",
             "Still loading...",
         ])
         result = compiler._analyze_server_logs(proc)
         self.assertFalse(result["passed"])
         self.assertIn("timeout", result["error"].lower())
+
+    def test_timeout_not_during_install(self):
+        """Timeout should NOT trigger during install phase."""
+        compiler = make_compiler(docker_timeout=0)
+        proc = self._mock_process([
+            "Downloading library...",
+            "Installing NeoForge...",
+            'Done (5s)! For help, type "help"',
+        ])
+        result = compiler._analyze_server_logs(proc)
+        # Server never "started", but success pattern should still match
+        self.assertTrue(result["passed"])
 
     def test_log_snippet_kept(self):
         compiler = make_compiler()

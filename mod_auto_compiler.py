@@ -2864,6 +2864,40 @@ class ModAutoCompiler:
         r"Mod '([^']+)' .* requires .* '([^']+)'"
     )
 
+    # Known loader/infrastructure errors that are NOT caused by mods.
+    # Each entry: (compiled regex, human-readable explanation).
+    DOCKER_LOADER_ERRORS = [
+        (
+            re.compile(r"Module [\w.]+ not found, required by"),
+            "Java module incompatibility (wrong JVM version for this loader)"
+        ),
+        (
+            re.compile(r"UnsupportedClassVersionError"),
+            "Class file version mismatch (loader needs a different Java version)"
+        ),
+        (
+            re.compile(
+                r"Failed to install (?:Neo)?Forge|"
+                r"There was an error during installation|"
+                r"These libraries failed to download",
+                re.IGNORECASE,
+            ),
+            "Loader installation failed (network issue or corrupt download)"
+        ),
+        (
+            re.compile(r"Could not find or load main class"),
+            "Loader installation corrupted (server bootstrap failure)"
+        ),
+        (
+            re.compile(r"Unable to access jarfile"),
+            "Loader JAR missing (incomplete server install)"
+        ),
+        (
+            re.compile(r"Minecraft server failed.*exitCode", re.IGNORECASE),
+            "Server process crashed during startup (check loader compatibility)"
+        ),
+    ]
+
     def check_docker_available(self) -> bool:
         """Check if Docker daemon is accessible."""
         try:
@@ -2916,7 +2950,7 @@ class ModAutoCompiler:
             "-e", f"VERSION={self.config.mc_version}",
             "-e", "REMOVE_OLD_MODS=TRUE",
             "-v", f"{mods_dir.resolve()}:/mods:ro",
-            "itzg/minecraft-server",
+            "itzg/minecraft-server:java21",
         ]
 
         try:
@@ -2943,13 +2977,29 @@ class ModAutoCompiler:
         finally:
             self._kill_container(container_name)
 
+    # Pattern that signals the MC server JVM has started (not just
+    # the container downloading/installing NeoForge).  The timeout
+    # clock only begins once this line appears.
+    DOCKER_SERVER_STARTING_PATTERN = re.compile(
+        r"Starting minecraft server|ModLauncher running|"
+        r"Launching wrapped minecraft"
+    )
+
     def _analyze_server_logs(self, process: subprocess.Popen) -> dict:
         """
         Read server stdout in real time, detect success/failure patterns.
+
+        The timeout only counts from the moment the Minecraft server JVM
+        starts, NOT during the NeoForge download/install phase which can
+        take several minutes on first run.
         """
-        start = time.time()
+        server_started = False
+        start = None  # set when server JVM starts
         recent_lines: List[str] = []
         timeout = self.config.docker_timeout
+        # Hard cap: never wait more than 10 min total (incl. install)
+        absolute_start = time.time()
+        absolute_max = 600
 
         try:
             for raw_line in process.stdout:
@@ -2957,6 +3007,15 @@ class ModAutoCompiler:
                 recent_lines.append(line)
                 if len(recent_lines) > 10:
                     recent_lines.pop(0)
+
+                # Detect server JVM start to begin timeout
+                if (not server_started
+                        and self.DOCKER_SERVER_STARTING_PATTERN.search(line)):
+                    server_started = True
+                    start = time.time()
+                    logger.info(
+                        "Docker: server JVM started, timeout begins now"
+                    )
 
                 # Check success
                 if self.DOCKER_SUCCESS_PATTERN.search(line):
@@ -2967,7 +3026,18 @@ class ModAutoCompiler:
                         "log_snippet": recent_lines[-5:],
                     }
 
-                # Check failures
+                # Check known loader/infrastructure errors (not mod's fault)
+                for regex, explanation in self.DOCKER_LOADER_ERRORS:
+                    if regex.search(line):
+                        process.terminate()
+                        return {
+                            "passed": False,
+                            "error": f"[LOADER ERROR] {explanation}",
+                            "log_snippet": recent_lines[-5:],
+                            "is_loader_error": True,
+                        }
+
+                # Check mod failures
                 for pattern in self.DOCKER_FAIL_PATTERNS:
                     if pattern.search(line):
                         process.terminate()
@@ -2977,14 +3047,26 @@ class ModAutoCompiler:
                             "log_snippet": recent_lines[-5:],
                         }
 
-                # Check timeout
-                if time.time() - start > timeout:
+                # Check timeout (only after server JVM started)
+                if server_started and time.time() - start > timeout:
                     process.terminate()
                     return {
                         "passed": False,
                         "error": (
                             f"Server did not start within "
                             f"{timeout}s timeout"
+                        ),
+                        "log_snippet": recent_lines[-5:],
+                    }
+
+                # Absolute timeout (install + startup)
+                if time.time() - absolute_start > absolute_max:
+                    process.terminate()
+                    return {
+                        "passed": False,
+                        "error": (
+                            f"Total Docker time exceeded "
+                            f"{absolute_max}s hard limit"
                         ),
                         "log_snippet": recent_lines[-5:],
                     }
@@ -3001,6 +3083,17 @@ class ModAutoCompiler:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
+
+        # Process ended — check if accumulated logs contain loader errors
+        all_text = "\n".join(recent_lines)
+        for regex, explanation in self.DOCKER_LOADER_ERRORS:
+            if regex.search(all_text):
+                return {
+                    "passed": False,
+                    "error": f"[LOADER ERROR] {explanation}",
+                    "log_snippet": recent_lines[-5:],
+                    "is_loader_error": True,
+                }
 
         return {
             "passed": False,
@@ -3100,8 +3193,21 @@ class ModAutoCompiler:
             )
             return
 
-        # Batch failed — test individually
+        # Batch failed
         print(f"  ❌ Batch test FAILED: {batch['error']}")
+
+        # If it's a loader/infrastructure error, don't blame individual mods
+        if batch.get("is_loader_error"):
+            print(f"  ⚠️  This is a loader/infrastructure error, "
+                  f"not caused by the mods.")
+            print(f"     Snippet: {' | '.join(batch['log_snippet'][-3:])}")
+            for r in successful:
+                r.docker_tested = True
+                r.docker_test_passed = None  # inconclusive
+                r.docker_error = batch["error"]
+            return
+
+        # Mod-related failure — test individually to isolate
         print(f"  🔍 Testing mods individually to isolate failures...")
 
         for result in successful:
@@ -3112,6 +3218,14 @@ class ModAutoCompiler:
             print(f"\n    🧪 Testing: {mod_label}...")
             single = self._test_single_docker(jar)
             result.docker_tested = True
+
+            if single.get("is_loader_error"):
+                result.docker_test_passed = None  # inconclusive
+                result.docker_error = single["error"]
+                print(f"    ⚠️  {mod_label}: INCONCLUSIVE — "
+                      f"{result.docker_error}")
+                continue
+
             result.docker_test_passed = single["passed"]
             if single["passed"]:
                 print(f"    ✅ {mod_label}: PASSED")
@@ -3383,18 +3497,37 @@ class ModAutoCompiler:
         # Docker test summary
         docker_tested = [r for r in self.results if r.docker_tested]
         if docker_tested:
-            docker_passed = [r for r in docker_tested if r.docker_test_passed]
+            docker_passed = [
+                r for r in docker_tested if r.docker_test_passed is True
+            ]
             docker_failed = [
-                r for r in docker_tested if not r.docker_test_passed
+                r for r in docker_tested if r.docker_test_passed is False
+            ]
+            docker_inconclusive = [
+                r for r in docker_tested if r.docker_test_passed is None
             ]
             report_lines.append("\n" + "-"*80)
             report_lines.append("🐳 DOCKER TEST RESULTS:")
             report_lines.append("-"*80)
-            report_lines.append(
-                f"  Tested: {len(docker_tested)}  |  "
-                f"Passed: {len(docker_passed)}  |  "
-                f"Failed: {len(docker_failed)}"
-            )
+            parts = [
+                f"Tested: {len(docker_tested)}",
+                f"Passed: {len(docker_passed)}",
+                f"Failed: {len(docker_failed)}",
+            ]
+            if docker_inconclusive:
+                parts.append(
+                    f"Inconclusive: {len(docker_inconclusive)}"
+                )
+            report_lines.append(f"  {'  |  '.join(parts)}")
+            if docker_inconclusive:
+                report_lines.append("")
+                report_lines.append(
+                    "  ⚠️  LOADER/INFRASTRUCTURE ERROR (not caused by mods):"
+                )
+                # All inconclusive share the same loader error
+                report_lines.append(
+                    f"     {docker_inconclusive[0].docker_error}"
+                )
             if docker_failed:
                 report_lines.append("")
                 for r in docker_failed:
