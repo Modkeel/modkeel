@@ -36,8 +36,7 @@ MODFORGE_VERSION = "1.0.0"
 MODRINTH_USER_AGENT = f"ModForge/{MODFORGE_VERSION} (github.com/juanzab/ModForge)"
 
 # Crowdsource API (Supabase Edge Function)
-# Updated when the backend is deployed
-MODFORGE_API_URL = ""
+MODFORGE_API_URL = "https://pcczpdyhytvzqcnmddfv.supabase.co/functions/v1/submit-report"
 
 # HMAC key for report signing. This is NOT a secret — it's embedded in the
 # CLI to raise the bar for casual API abuse. The real anti-spam protection
