@@ -10,14 +10,17 @@ Author: Juan - AutoKufe
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from enum import Enum
@@ -29,7 +32,17 @@ import time
 # ============================================================================
 # CONSTANTS
 # ============================================================================
-MODRINTH_USER_AGENT = "ModForge/1.0 (github.com/juanzab/ModForge)"
+MODFORGE_VERSION = "1.0.0"
+MODRINTH_USER_AGENT = f"ModForge/{MODFORGE_VERSION} (github.com/juanzab/ModForge)"
+
+# Crowdsource API (Supabase Edge Function)
+# Updated when the backend is deployed
+MODFORGE_API_URL = ""
+
+# HMAC key for report signing. This is NOT a secret — it's embedded in the
+# CLI to raise the bar for casual API abuse. The real anti-spam protection
+# comes from statistical consensus, rate limiting, and reputation scoring.
+MODFORGE_HMAC_KEY = b"modforge-crowdsource-v1-hmac-signing-key"
 
 # ============================================================================
 # LOGGING SETUP
@@ -223,6 +236,7 @@ class CompilationResult:
         self.docker_tested: bool = False
         self.docker_test_passed: Optional[bool] = None
         self.docker_error: Optional[str] = None
+        self.docker_load_time_ms: Optional[int] = None
 
 
 class DockerTestCache:
@@ -286,9 +300,127 @@ class DockerTestCache:
         self._save()
 
 
+class ModForgeConfig:
+    """Persistent user config stored at ~/.modforge/config.toml."""
+
+    CONFIG_DIR = Path.home() / ".modforge"
+    CONFIG_FILE = CONFIG_DIR / "config.toml"
+
+    def __init__(self):
+        self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        self._data: Dict = {}
+        self._is_first_run = not self.CONFIG_FILE.exists()
+        self._load()
+
+    def _load(self) -> None:
+        if self.CONFIG_FILE.exists():
+            try:
+                self._data = toml.load(str(self.CONFIG_FILE))
+            except Exception:
+                self._data = {}
+        # Ensure client_id exists
+        if not self._data.get("client_id"):
+            self._data["client_id"] = str(uuid.uuid4())
+            self._save()
+
+    def _save(self) -> None:
+        with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
+            toml.dump(self._data, f)
+
+    @property
+    def sharing(self) -> str:
+        """Data sharing preference: 'always', 'ask', or 'never'."""
+        return self._data.get("sharing", "ask")
+
+    @sharing.setter
+    def sharing(self, value: str) -> None:
+        if value not in ("always", "ask", "never"):
+            raise ValueError(f"Invalid sharing value: {value}")
+        self._data["sharing"] = value
+        self._save()
+
+    @property
+    def client_id(self) -> str:
+        return self._data.get("client_id", "")
+
+    @property
+    def is_first_run(self) -> bool:
+        return self._is_first_run
+
+    def mark_prompted(self) -> None:
+        """Mark that the first-run prompt has been shown."""
+        self._data["_prompted"] = True
+        self._is_first_run = False
+        self._save()
+
+    @property
+    def was_prompted(self) -> bool:
+        return self._data.get("_prompted", False)
+
+
+def prompt_sharing_preference(config: ModForgeConfig) -> str:
+    """
+    Show the opt-in prompt on first run. Returns the user's choice.
+    """
+    print(f"\n{'='*60}")
+    print("  Help improve ModForge for everyone!")
+    print(f"{'='*60}")
+    print()
+    print("  When a mod compiles/loads successfully, ModForge")
+    print("  can share anonymous compatibility data with the")
+    print("  community. This helps other players find working")
+    print("  mods faster.")
+    print()
+    print("  What's shared: mod name, version, MC version,")
+    print("  loader, result (works/fails), Java version, OS.")
+    print("  What's NOT shared: personal info, IP, file paths.")
+    print()
+    print("  [A] Always share (recommended)")
+    print("  [K] Ask each time")
+    print("  [N] Never share, don't ask again")
+    print()
+
+    while True:
+        try:
+            choice = input("  Your choice [A/K/N]: ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            choice = "K"
+            break
+        if choice in ("A", "K", "N"):
+            break
+        print("  Please enter A, K, or N.")
+
+    mapping = {"A": "always", "K": "ask", "N": "never"}
+    value = mapping.get(choice, "ask")
+    config.sharing = value
+    config.mark_prompted()
+    print(f"\n  Saved: sharing = {value}")
+    print(f"  Change anytime: edit {config.CONFIG_FILE}")
+    print()
+    return value
+
+
+def sign_report(report: Dict) -> str:
+    """
+    Create HMAC-SHA256 signature for a crowdsource report.
+
+    Uses deterministic JSON serialization (sorted keys, compact
+    separators) to ensure the signature is reproducible.
+    """
+    # Exclude the signature field itself from the payload
+    payload = {k: v for k, v in report.items() if k != "signature"}
+    serialized = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+    )
+    sig = hmac.new(
+        MODFORGE_HMAC_KEY, serialized.encode("utf-8"), hashlib.sha256,
+    )
+    return f"hmac-sha256:{sig.hexdigest()}"
+
+
 class ModAutoCompiler:
     """Main class for automatic mod compilation"""
-    
+
     def __init__(self, config: ModCompilerConfig):
         self.config = config
         self.results: List[CompilationResult] = []
@@ -2980,7 +3112,7 @@ class ModAutoCompiler:
     # ====================================================================
 
     # Log patterns for server status detection
-    DOCKER_SUCCESS_PATTERN = re.compile(r"Done \([\d.]+s\)! For help")
+    DOCKER_SUCCESS_PATTERN = re.compile(r"Done \(([\d.]+)s\)! For help")
     DOCKER_FAIL_PATTERNS = [
         re.compile(r"Missing or unsupported mandatory dependencies"),
         re.compile(r"Incompatible mod set!"),
@@ -3533,12 +3665,15 @@ class ModAutoCompiler:
                     )
 
                 # Check success
-                if self.DOCKER_SUCCESS_PATTERN.search(line):
+                m = self.DOCKER_SUCCESS_PATTERN.search(line)
+                if m:
                     process.terminate()
+                    load_ms = int(float(m.group(1)) * 1000)
                     return {
                         "passed": True,
                         "error": None,
                         "log_snippet": recent_lines[-5:],
+                        "load_time_ms": load_ms,
                     }
 
                 # Check known loader/infrastructure errors (not mod's fault)
@@ -3742,6 +3877,7 @@ class ModAutoCompiler:
             for r in successful:
                 r.docker_tested = True
                 r.docker_test_passed = True
+                r.docker_load_time_ms = batch.get("load_time_ms")
             cache.set(
                 jar_hash, True,
                 self.config.mc_version, self.config.loader,
@@ -3800,6 +3936,7 @@ class ModAutoCompiler:
                 continue
 
             result.docker_test_passed = single["passed"]
+            result.docker_load_time_ms = single.get("load_time_ms")
             if single["passed"]:
                 print(f"    ✅ {mod_label}: PASSED")
             else:
@@ -3983,6 +4120,158 @@ class ModAutoCompiler:
             print(f"⚠️  Warning: Could not fully clean up {path}: {e}")
             print(f"   You may need to manually delete this directory.")
     
+    # ── Crowdsource reporting ──────────────────────────────────
+
+    @staticmethod
+    def _detect_java_version() -> str:
+        """Detect the installed Java version."""
+        try:
+            result = subprocess.run(
+                ["java", "-version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            output = result.stderr or result.stdout
+            match = re.search(r'"([\d._]+)"', output)
+            if match:
+                return match.group(1)
+            return output.strip().split("\n")[0][:50]
+        except Exception:
+            return "unknown"
+
+    def build_report(
+        self, result: CompilationResult,
+    ) -> Optional[Dict]:
+        """
+        Build a crowdsource report from a CompilationResult.
+
+        Returns None if the result should not be reported (failed
+        compilation, client-only, or inconclusive).
+        """
+        if not result.success:
+            return None
+
+        # Determine status
+        if result.docker_tested and result.docker_test_passed is True:
+            status = "works"
+        elif result.docker_tested and result.docker_test_passed is False:
+            status = "fails"
+        elif (result.docker_tested
+              and result.docker_test_passed is None):
+            return None  # client-only or inconclusive
+        else:
+            status = "compiled"
+
+        # Compute JAR hash
+        jar_hash = ""
+        if result.jar_path and Path(result.jar_path).exists():
+            h = hashlib.sha256()
+            with open(result.jar_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            jar_hash = h.hexdigest()
+
+        # Source repo info
+        source_repo = result.repo_url
+        try:
+            owner, repo, _ = self.parse_repo_url(result.repo_url)
+            source_repo = f"{owner}/{repo}"
+        except Exception:
+            pass
+
+        return {
+            "mod_name": result.mod_name or "unknown",
+            "mod_version": result.mod_version or "unknown",
+            "jar_hash_sha256": jar_hash,
+            "source_repo": source_repo,
+            "source_branch": result.branch or "",
+            "mc_version": self.config.mc_version,
+            "loader": self.config.loader,
+            "loader_version": self.config.loader_version,
+            "status": status,
+            "log_snippet": (result.docker_error or "")[:500],
+            "load_time_ms": result.docker_load_time_ms,
+            "java_version": self._detect_java_version(),
+            "os": platform.system().lower(),
+            "os_version": platform.release(),
+            "is_cross_loader": result.is_cross_loader,
+            "modrinth_download": result.modrinth_download,
+            "cli_version": MODFORGE_VERSION,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def submit_reports(
+        self, modforge_config: "ModForgeConfig",
+    ) -> None:
+        """
+        Submit crowdsource reports for all successful results.
+
+        Respects the user's sharing preference. Silent failure on
+        network errors — never blocks or slows down the CLI.
+        """
+        if modforge_config.sharing == "never":
+            return
+
+        if not MODFORGE_API_URL:
+            logger.debug("No API URL configured, skipping reports")
+            return
+
+        reports = []
+        for result in self.results:
+            report = self.build_report(result)
+            if report:
+                reports.append(report)
+
+        if not reports:
+            return
+
+        # If "ask", prompt user
+        if modforge_config.sharing == "ask":
+            print(
+                f"\n📊 Share {len(reports)} anonymous compatibility "
+                f"report(s) with the community? [Y/n] ",
+                end="",
+            )
+            try:
+                answer = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            if answer not in ("", "y", "yes"):
+                print("  Skipped.")
+                return
+
+        # Submit each report
+        client_id = modforge_config.client_id
+        submitted = 0
+        for report in reports:
+            report["client_id"] = client_id
+            report["signature"] = sign_report(report)
+
+            try:
+                resp = requests.post(
+                    MODFORGE_API_URL,
+                    json=report,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": MODRINTH_USER_AGENT,
+                    },
+                    timeout=10,
+                )
+                if resp.status_code in (200, 201):
+                    submitted += 1
+                else:
+                    logger.debug(
+                        "Report submission failed (%d): %s",
+                        resp.status_code, resp.text[:200],
+                    )
+            except Exception as e:
+                logger.debug("Report submission error: %s", e)
+
+        if submitted:
+            print(
+                f"  📊 Shared {submitted}/{len(reports)} "
+                f"report(s). Thank you!"
+            )
+
     def generate_report(self) -> str:
         """
         Generate a detailed report of compilation results.
@@ -4234,6 +4523,12 @@ Examples:
         help='Seconds to wait for Docker server startup (default: 180)'
     )
 
+    parser.add_argument(
+        '--no-share',
+        action='store_true',
+        help='Skip anonymous data sharing for this run'
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -4253,7 +4548,17 @@ Examples:
         sys.exit(1)
     
     print(f"📋 Loaded {len(repo_urls)} repositories from {args.repos_file}")
-    
+
+    # Load persistent ModForge config (sharing preferences, client_id)
+    modforge_cfg = ModForgeConfig()
+
+    # First-run: ask about anonymous data sharing
+    if modforge_cfg.is_first_run and not modforge_cfg.was_prompted:
+        prompt_sharing_preference(modforge_cfg)
+
+    # Override sharing if --no-share flag is set
+    no_share = args.no_share
+
     # Create configuration
     try:
         config = ModCompilerConfig(
@@ -4285,6 +4590,13 @@ Examples:
         with open(args.output_report, 'w', encoding='utf-8') as f:
             f.write(report)
         print(f"\n💾 Report saved to: {args.output_report}")
+
+    # Submit anonymous crowdsource reports (last step, silent failure)
+    if not no_share:
+        try:
+            compiler.submit_reports(modforge_cfg)
+        except Exception as e:
+            logger.debug("Crowdsource submission error: %s", e)
 
 
 if __name__ == "__main__":
