@@ -480,6 +480,106 @@ class TestAnalyzeServerLogs(unittest.TestCase):
 
 
 # ============================================================================
+# RETRY LOGIC
+# ============================================================================
+
+class TestRetryLogic(unittest.TestCase):
+    """Test auto-retry on loader install failures."""
+
+    @patch("mod_auto_compiler.time.sleep")
+    @patch("mod_auto_compiler.subprocess.Popen")
+    @patch("mod_auto_compiler.subprocess.run")
+    def test_retries_on_loader_error(self, mock_run, mock_popen,
+                                      mock_sleep):
+        """Should retry when loader install fails."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        # First call: loader error. Second call: success.
+        fail_proc = MagicMock()
+        fail_proc.stdout = iter([
+            "Failed to install NeoForge\n",
+        ])
+        fail_proc.poll.return_value = None
+        fail_proc.terminate = MagicMock()
+        fail_proc.wait = MagicMock()
+        fail_proc.kill = MagicMock()
+
+        ok_proc = MagicMock()
+        ok_proc.stdout = iter([
+            'Done (5.0s)! For help, type "help"\n',
+        ])
+        ok_proc.poll.return_value = None
+        ok_proc.terminate = MagicMock()
+        ok_proc.wait = MagicMock()
+        ok_proc.kill = MagicMock()
+
+        mock_popen.side_effect = [fail_proc, ok_proc]
+
+        compiler = make_compiler()
+        result = compiler._run_docker_server(Path("/tmp/fake"))
+        self.assertTrue(result["passed"])
+        self.assertEqual(mock_popen.call_count, 2)
+        mock_sleep.assert_called_once_with(10)
+
+    @patch("mod_auto_compiler.time.sleep")
+    @patch("mod_auto_compiler.subprocess.Popen")
+    @patch("mod_auto_compiler.subprocess.run")
+    def test_no_retry_on_mod_failure(self, mock_run, mock_popen,
+                                      mock_sleep):
+        """Should NOT retry when a mod fails (not a loader error)."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        proc = MagicMock()
+        proc.stdout = iter([
+            "Missing or unsupported mandatory dependencies: flywheel\n",
+        ])
+        proc.poll.return_value = None
+        proc.terminate = MagicMock()
+        proc.wait = MagicMock()
+        proc.kill = MagicMock()
+
+        mock_popen.return_value = proc
+
+        compiler = make_compiler()
+        result = compiler._run_docker_server(Path("/tmp/fake"))
+        self.assertFalse(result["passed"])
+        self.assertEqual(mock_popen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @patch("mod_auto_compiler.time.sleep")
+    @patch("mod_auto_compiler.subprocess.Popen")
+    @patch("mod_auto_compiler.subprocess.run")
+    def test_gives_up_after_max_retries(self, mock_run, mock_popen,
+                                         mock_sleep):
+        """Should give up after DOCKER_INSTALL_MAX_RETRIES."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        def make_fail_proc():
+            p = MagicMock()
+            p.stdout = iter(["Failed to install NeoForge\n"])
+            p.poll.return_value = None
+            p.terminate = MagicMock()
+            p.wait = MagicMock()
+            p.kill = MagicMock()
+            return p
+
+        mock_popen.side_effect = [
+            make_fail_proc() for _ in range(
+                ModAutoCompiler.DOCKER_INSTALL_MAX_RETRIES
+            )
+        ]
+
+        compiler = make_compiler()
+        result = compiler._run_docker_server(Path("/tmp/fake"))
+        self.assertFalse(result["passed"])
+        self.assertTrue(result.get("is_loader_error"))
+        self.assertEqual(
+            mock_popen.call_count,
+            ModAutoCompiler.DOCKER_INSTALL_MAX_RETRIES,
+        )
+
+
+# ============================================================================
 # DATA STRUCTURE FIELDS
 # ============================================================================
 

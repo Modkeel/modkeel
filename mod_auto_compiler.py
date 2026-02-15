@@ -2946,62 +2946,174 @@ class ModAutoCompiler:
         )
         return vol
 
+    # Max retries when loader install fails.
+    DOCKER_INSTALL_MAX_RETRIES = 5
+
+    # NeoForge version map: MC version -> latest NeoForge version.
+    # Updated periodically. When the exact version is missing the
+    # container auto-resolves it, but having it here lets us
+    # pre-download the installer from the host machine.
+    NEOFORGE_VERSIONS = {
+        "1.21.4": "21.4.156",
+        "1.21.3": "21.3.56",
+        "1.21.1": "21.1.94",
+        "1.21": "21.0.167",
+        "1.20.6": "20.6.120",
+        "1.20.4": "20.4.263",
+    }
+
+    def _pre_download_installer(self) -> Optional[Path]:
+        """
+        Download the NeoForge/Forge installer from the host machine
+        (outside Docker) where connectivity is usually better.
+
+        Returns the local path to the installer JAR, or None if the
+        loader doesn't need pre-downloading or the download fails.
+        """
+        if self.config.loader.lower() != "neoforge":
+            return None
+
+        nf_version = self.NEOFORGE_VERSIONS.get(self.config.mc_version)
+        if not nf_version:
+            return None
+
+        cache_dir = Path.home() / ".modforge" / "installers"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        installer_path = cache_dir / f"neoforge-{nf_version}-installer.jar"
+
+        if installer_path.exists() and installer_path.stat().st_size > 0:
+            logger.info("Using cached installer: %s", installer_path)
+            return installer_path
+
+        url = (
+            f"https://maven.neoforged.net/releases/net/neoforged/"
+            f"neoforge/{nf_version}/neoforge-{nf_version}-installer.jar"
+        )
+        print(f"  📥 Pre-downloading NeoForge {nf_version} installer "
+              f"from host (bypasses Docker network issues)...")
+
+        try:
+            resp = requests.get(url, stream=True, timeout=120)
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0))
+            downloaded = 0
+            with open(installer_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = downloaded * 100 // total
+                        print(
+                            f"\r     {downloaded // 1024}KB / "
+                            f"{total // 1024}KB ({pct}%)",
+                            end="", flush=True,
+                        )
+            print()  # newline after progress
+            logger.info("Installer downloaded: %s", installer_path)
+            return installer_path
+        except Exception as e:
+            print(f"\n  ⚠️  Host download failed: {e}")
+            print(f"     Falling back to in-container download...")
+            installer_path.unlink(missing_ok=True)
+            return None
+
     def _run_docker_server(self, mods_dir: Path) -> dict:
         """
         Launch a headless Minecraft server in Docker and analyze logs.
 
-        Uses a persistent Docker volume to cache the loader installation
-        (NeoForge/Forge/Fabric download) so only the first run is slow.
+        Uses a persistent Docker volume to cache the loader installation.
+        Pre-downloads the NeoForge installer from the host machine to
+        avoid Docker network timeout issues. If the loader install
+        still fails, retries automatically.
 
         Returns dict with keys: passed (bool), error (str|None),
-        log_snippet (list[str]).
+        log_snippet (list[str]), is_loader_error (bool, optional).
         """
-        container_name = f"modforge_test_{int(time.time())}_{os.getpid()}"
         loader_type = self.config.loader.upper()
-        if loader_type == "NEOFORGE":
-            loader_type = "NEOFORGE"
-        elif loader_type == "FORGE":
-            loader_type = "FORGE"
-        else:
+        if loader_type not in ("NEOFORGE", "FORGE"):
             loader_type = "FABRIC"
 
         volume_name = self._ensure_docker_volume()
+        installer = self._pre_download_installer()
 
-        cmd = [
-            "docker", "run", "--rm",
-            "--name", container_name,
-            "-e", "EULA=TRUE",
-            "-e", f"TYPE={loader_type}",
-            "-e", f"VERSION={self.config.mc_version}",
-            "-e", "REMOVE_OLD_MODS=TRUE",
-            "-v", f"{volume_name}:/data",
-            "-v", f"{mods_dir.resolve()}:/mods:ro",
-            "itzg/minecraft-server:java21",
-        ]
-
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+        for attempt in range(1, self.DOCKER_INSTALL_MAX_RETRIES + 1):
+            container_name = (
+                f"modforge_test_{int(time.time())}_{os.getpid()}"
             )
-            result = self._analyze_server_logs(process)
-            return result
-        except FileNotFoundError:
-            return {
-                "passed": False,
-                "error": "Docker executable not found",
-                "log_snippet": [],
-            }
-        except Exception as e:
-            return {
-                "passed": False,
-                "error": f"Docker error: {e}",
-                "log_snippet": [],
-            }
-        finally:
-            self._kill_container(container_name)
+            cmd = [
+                "docker", "run", "--rm",
+                "--name", container_name,
+                "-e", "EULA=TRUE",
+                "-e", f"TYPE={loader_type}",
+                "-e", f"VERSION={self.config.mc_version}",
+                "-e", "REMOVE_OLD_MODS=TRUE",
+                "-v", f"{volume_name}:/data",
+                "-v", f"{mods_dir.resolve()}:/mods:ro",
+            ]
+
+            # Mount pre-downloaded installer if available
+            if installer and installer.exists():
+                cmd.extend([
+                    "-v",
+                    f"{installer.resolve()}:/tmp/neoforge-installer.jar:ro",
+                    "-e",
+                    "NEOFORGE_INSTALLER=/tmp/neoforge-installer.jar",
+                ])
+
+            cmd.append("itzg/minecraft-server:java21")
+
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                result = self._analyze_server_logs(process)
+            except FileNotFoundError:
+                return {
+                    "passed": False,
+                    "error": "Docker executable not found",
+                    "log_snippet": [],
+                }
+            except Exception as e:
+                return {
+                    "passed": False,
+                    "error": f"Docker error: {e}",
+                    "log_snippet": [],
+                }
+            finally:
+                self._kill_container(container_name)
+
+            # If it's NOT a loader error, return immediately
+            if not result.get("is_loader_error"):
+                return result
+
+            # Loader install failed — retry
+            if attempt < self.DOCKER_INSTALL_MAX_RETRIES:
+                print(
+                    f"  ⚠️  Loader install failed (attempt "
+                    f"{attempt}/{self.DOCKER_INSTALL_MAX_RETRIES}). "
+                    f"This is a server-side issue "
+                    f"(maven.neoforged.net CDN), not your fault."
+                )
+                print(
+                    f"     Retrying in 10s..."
+                )
+                time.sleep(10)
+            else:
+                print(
+                    f"  ❌ Loader install failed after "
+                    f"{self.DOCKER_INSTALL_MAX_RETRIES} attempts. "
+                    f"The {loader_type} download server "
+                    f"(maven.neoforged.net) is unreliable right now."
+                )
+                print(
+                    f"     Try again later, or use a VPN to connect "
+                    f"through a different region."
+                )
+
+        return result
 
     # Pattern that signals the MC server JVM has started (not just
     # the container downloading/installing NeoForge).  The timeout
