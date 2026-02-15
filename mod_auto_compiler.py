@@ -2175,6 +2175,14 @@ class ModAutoCompiler:
                 files[0]
             )
 
+            # Collect required dependencies (project IDs)
+            deps = []
+            for dep in version_data.get("dependencies", []):
+                if dep.get("dependency_type") == "required":
+                    pid = dep.get("project_id")
+                    if pid:
+                        deps.append(pid)
+
             result = {
                 "slug": slug,
                 "title": title,
@@ -2184,6 +2192,7 @@ class ModAutoCompiler:
                 "filename": primary["filename"],
                 "file_size": primary.get("size", 0),
                 "downloads": downloads,
+                "required_deps": deps,
             }
 
             size_mb = result["file_size"] / (1024 * 1024)
@@ -2198,6 +2207,121 @@ class ModAutoCompiler:
         except Exception as e:
             print(f"    ⚠️  Modrinth search error: {e}")
             return None
+
+    def _download_modrinth_deps(
+        self, modrinth_result: Dict, _seen: Optional[set] = None,
+    ) -> None:
+        """
+        Recursively download required dependencies for a Modrinth mod.
+
+        Fetches each required dependency's project info, finds the
+        matching version for the current loader + MC version, downloads
+        the JAR, and recurses into that dependency's own dependencies.
+        Skips already-downloaded slugs to avoid cycles.
+        """
+        if _seen is None:
+            _seen = set()
+
+        dep_ids = modrinth_result.get("required_deps", [])
+        if not dep_ids:
+            return
+
+        base_url = "https://api.modrinth.com/v2"
+        headers = {"User-Agent": MODRINTH_USER_AGENT}
+        loader = self.config.loader.lower()
+        mc = self.config.mc_version
+
+        for project_id in dep_ids:
+            if project_id in _seen:
+                continue
+            _seen.add(project_id)
+
+            try:
+                # Get project info
+                pr = requests.get(
+                    f"{base_url}/project/{project_id}",
+                    headers=headers, timeout=15,
+                )
+                if not pr.ok:
+                    continue
+                proj = pr.json()
+                slug = proj["slug"]
+                title = proj["title"]
+
+                # Skip if already downloaded
+                existing = list(
+                    self.config.output_dir.glob(f"{slug}*")
+                ) + list(
+                    self.config.output_dir.glob(
+                        f"*{slug.replace('-', '_')}*"
+                    )
+                )
+                if existing:
+                    continue
+
+                # Get version for our loader + MC version
+                vr = requests.get(
+                    f"{base_url}/project/{slug}/version",
+                    params={
+                        "loaders": f'["{loader}"]',
+                        "game_versions": f'["{mc}"]',
+                    },
+                    headers=headers, timeout=15,
+                )
+                if not vr.ok or not vr.json():
+                    logger.debug(
+                        "No Modrinth version for dep %s (%s + %s)",
+                        slug, loader, mc,
+                    )
+                    continue
+
+                versions = vr.json()
+                # Prefer release, fallback to latest
+                vdata = next(
+                    (v for v in versions
+                     if v.get("version_type") == "release"),
+                    versions[0],
+                )
+                files = vdata.get("files", [])
+                if not files:
+                    continue
+                primary = next(
+                    (f for f in files if f.get("primary", False)),
+                    files[0],
+                )
+
+                # Download
+                print(f"    📦 Dependency: {title} "
+                      f"v{vdata['version_number']}")
+                dl = requests.get(
+                    primary["url"], headers=headers, timeout=120,
+                )
+                dl.raise_for_status()
+                fname = primary["filename"]
+                dest = self.config.output_dir / fname
+                dest.write_bytes(dl.content)
+                print(f"    💾 Saved: {dest}")
+
+                if self.config.mods_path:
+                    (self.config.mods_path / fname).write_bytes(
+                        dl.content
+                    )
+
+                # Recurse into this dependency's own deps
+                sub_deps = [
+                    d.get("project_id")
+                    for d in vdata.get("dependencies", [])
+                    if d.get("dependency_type") == "required"
+                    and d.get("project_id")
+                ]
+                if sub_deps:
+                    self._download_modrinth_deps(
+                        {"required_deps": sub_deps}, _seen,
+                    )
+
+            except Exception as e:
+                logger.debug("Failed to download dep %s: %s",
+                             project_id, e)
 
     def download_modrinth_mod(self, slug: str, mc_version: str,
                              loader: str) -> Optional[Path]:
@@ -2347,6 +2471,9 @@ class ModAutoCompiler:
                             instance_dest = self.config.mods_path / filename
                             instance_dest.write_bytes(dl_resp.content)
                             print(f"    💾 Installed: {instance_dest}")
+
+                        # Download required dependencies from Modrinth
+                        self._download_modrinth_deps(modrinth_result)
 
                         is_cross = modrinth_result.get("_cross_loader", False)
                         cross_note = " [Fabric via Sinytra Connector]" if is_cross else ""
@@ -3497,6 +3624,25 @@ class ModAutoCompiler:
                 deps.add(m.group(2))
         return sorted(deps)
 
+    def _collect_dep_jars(self, exclude: Optional[set] = None) -> List[Path]:
+        """
+        Collect dependency JARs from output_dir that aren't in results.
+
+        These are JARs downloaded as Modrinth dependencies (e.g. YACL
+        for Controlify) that don't have their own CompilationResult.
+        """
+        result_jars = {
+            Path(r.jar_path).name
+            for r in self.results if r.jar_path
+        }
+        if exclude:
+            result_jars |= exclude
+        dep_jars = []
+        for jar in self.config.output_dir.glob("*.jar"):
+            if jar.name not in result_jars:
+                dep_jars.append(jar)
+        return dep_jars
+
     def _test_batch_docker(self, jar_paths: List[Path]) -> dict:
         """Test all JARs together in a single Docker container."""
         with tempfile.TemporaryDirectory(
@@ -3505,15 +3651,24 @@ class ModAutoCompiler:
             tmp_path = Path(tmp)
             for jar in jar_paths:
                 shutil.copy2(jar, tmp_path / jar.name)
+            # Include dependency JARs (e.g. YACL for Controlify)
+            for dep in self._collect_dep_jars():
+                if not (tmp_path / dep.name).exists():
+                    shutil.copy2(dep, tmp_path / dep.name)
             return self._run_docker_server(tmp_path)
 
     def _test_single_docker(self, jar_path: Path) -> dict:
-        """Test a single JAR in isolation."""
+        """Test a single JAR in isolation (with its dependencies)."""
         with tempfile.TemporaryDirectory(
             prefix="modforge_docker_"
         ) as tmp:
             tmp_path = Path(tmp)
             shutil.copy2(jar_path, tmp_path / jar_path.name)
+            # Include dependency JARs so the mod can load
+            for dep in self._collect_dep_jars(
+                exclude={jar_path.name}
+            ):
+                shutil.copy2(dep, tmp_path / dep.name)
             return self._run_docker_server(tmp_path)
 
     def test_mods_in_docker(self) -> None:
