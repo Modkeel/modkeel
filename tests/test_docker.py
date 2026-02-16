@@ -486,9 +486,9 @@ class TestAnalyzeServerLogs(unittest.TestCase):
 class TestRetryLogic(unittest.TestCase):
     """Test auto-retry on loader install failures."""
 
-    @patch("mod_auto_compiler.time.sleep")
-    @patch("mod_auto_compiler.subprocess.Popen")
-    @patch("mod_auto_compiler.subprocess.run")
+    @patch("modforge.docker.time.sleep")
+    @patch("modforge.docker.subprocess.Popen")
+    @patch("modforge.docker.subprocess.run")
     def test_retries_on_loader_error(self, mock_run, mock_popen,
                                       mock_sleep):
         """Should retry when loader install fails."""
@@ -521,9 +521,9 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 2)
         mock_sleep.assert_called_once_with(10)
 
-    @patch("mod_auto_compiler.time.sleep")
-    @patch("mod_auto_compiler.subprocess.Popen")
-    @patch("mod_auto_compiler.subprocess.run")
+    @patch("modforge.docker.time.sleep")
+    @patch("modforge.docker.subprocess.Popen")
+    @patch("modforge.docker.subprocess.run")
     def test_no_retry_on_mod_failure(self, mock_run, mock_popen,
                                       mock_sleep):
         """Should NOT retry when a mod fails (not a loader error)."""
@@ -546,9 +546,9 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 1)
         mock_sleep.assert_not_called()
 
-    @patch("mod_auto_compiler.time.sleep")
-    @patch("mod_auto_compiler.subprocess.Popen")
-    @patch("mod_auto_compiler.subprocess.run")
+    @patch("modforge.docker.time.sleep")
+    @patch("modforge.docker.subprocess.Popen")
+    @patch("modforge.docker.subprocess.run")
     def test_gives_up_after_max_retries(self, mock_run, mock_popen,
                                          mock_sleep):
         """Should give up after DOCKER_INSTALL_MAX_RETRIES."""
