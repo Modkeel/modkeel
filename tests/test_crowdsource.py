@@ -456,7 +456,7 @@ class TestSubmitReports:
         config_dir = tmp_path / "cfg"
         with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
              patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("mod_auto_compiler.MODFORGE_API_URL", ""):
+             patch("modforge.crowdsource.MODFORGE_API_URL", ""):
             mf_cfg = ModForgeConfig()
             mf_cfg.sharing = "always"
 
@@ -470,7 +470,7 @@ class TestSubmitReports:
         config_dir = tmp_path / "cfg"
         with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
              patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("mod_auto_compiler.MODFORGE_API_URL", "https://api.example.com/submit"):
+             patch("modforge.crowdsource.MODFORGE_API_URL", "https://api.example.com/submit"):
             mf_cfg = ModForgeConfig()
             mf_cfg.sharing = "always"
 
@@ -490,7 +490,7 @@ class TestSubmitReports:
         config_dir = tmp_path / "cfg"
         with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
              patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("mod_auto_compiler.MODFORGE_API_URL", "https://api.example.com/submit"), \
+             patch("modforge.crowdsource.MODFORGE_API_URL", "https://api.example.com/submit"), \
              patch("builtins.input", return_value="n"):
             mf_cfg = ModForgeConfig()
             mf_cfg.sharing = "ask"
@@ -505,7 +505,7 @@ class TestSubmitReports:
         config_dir = tmp_path / "cfg"
         with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
              patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("mod_auto_compiler.MODFORGE_API_URL", "https://api.example.com/submit"):
+             patch("modforge.crowdsource.MODFORGE_API_URL", "https://api.example.com/submit"):
             mf_cfg = ModForgeConfig()
             mf_cfg.sharing = "always"
 

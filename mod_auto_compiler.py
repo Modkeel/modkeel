@@ -5,6 +5,9 @@ Automatically detects, compiles, and installs mods from GitHub repositories
 for specific Minecraft versions and mod loaders.
 
 Author: Juan - AutoKufe
+
+NOTE: This file is being progressively refactored into the modforge/ package.
+      Imports are re-exported here for backwards compatibility.
 """
 
 import argparse
@@ -30,43 +33,36 @@ from urllib.parse import urlparse
 import time
 
 # ============================================================================
-# CONSTANTS
+# IMPORTS FROM modforge PACKAGE (re-exported for backwards compatibility)
 # ============================================================================
-MODFORGE_VERSION = "1.0.0"
-MODRINTH_USER_AGENT = f"ModForge/{MODFORGE_VERSION} (github.com/juanzab/ModForge)"
-
-# Crowdsource API (Supabase Edge Function)
-MODFORGE_API_URL = "https://pcczpdyhytvzqcnmddfv.supabase.co/functions/v1/submit-report"
-
-# HMAC key for report signing. This is NOT a secret — it's embedded in the
-# CLI to raise the bar for casual API abuse. The real anti-spam protection
-# comes from statistical consensus, rate limiting, and reputation scoring.
-MODFORGE_HMAC_KEY = b"modforge-crowdsource-v1-hmac-signing-key"
+from modforge.constants import (
+    MODFORGE_VERSION, MODRINTH_USER_AGENT,
+    MODFORGE_API_URL, MODFORGE_HMAC_KEY,
+)
+from modforge.models import (
+    ModCompilerConfig, BranchCandidate, FailureType,
+    CompilationResult, DockerTestCache,
+)
+from modforge.version import (
+    compare_versions as _compare_versions_standalone,
+    is_version_in_maven_range as _is_version_in_maven_range_standalone,
+    is_version_in_fabric_range as _is_version_in_fabric_range_standalone,
+    is_version_compatible as _is_version_compatible_standalone,
+)
+from modforge.config import ModForgeConfig, prompt_sharing_preference
+from modforge.utils import (
+    setup_logging, setup_windows_console, safe_rmtree,
+)
+from modforge.crowdsource import (
+    sign_report, detect_java_version,
+    build_report as _build_report_standalone,
+    submit_reports as _submit_reports_standalone,
+)
 
 # ============================================================================
-# LOGGING SETUP
+# LOGGING
 # ============================================================================
 logger = logging.getLogger("modforge")
-
-
-def setup_logging(log_file: Optional[str] = None) -> None:
-    """Configure logging with stdout and optional file output."""
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    # Console handler (always)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    # File handler (optional)
-    if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        print(f"Logging to file: {log_file}")
 
 try:
     import requests
@@ -80,341 +76,13 @@ except ImportError:
     print("Error: 'toml' library not found. Install it with: pip install toml")
     sys.exit(1)
 
-# ============================================================================
-# WINDOWS EMOJI COMPATIBILITY FIX
-# ============================================================================
-import platform
-
-def setup_windows_console():
-    """Setup console for emoji support on Windows"""
-    if platform.system() == 'Windows':
-        # Try to enable UTF-8 output
-        try:
-            import sys
-            import codecs
-            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-            sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
-        except:
-            # If UTF-8 doesn't work, replace print with safe version
-            import builtins
-            original_print = builtins.print
-            
-            def safe_print(*args, **kwargs):
-                try:
-                    original_print(*args, **kwargs)
-                except UnicodeEncodeError:
-                    # Replace emojis with ASCII
-                    safe_args = []
-                    for arg in args:
-                        if isinstance(arg, str):
-                            replacements = {
-                                '📦': '[PKG]', '🔍': '[SEARCH]', '✅': '[OK]',
-                                '❌': '[FAIL]', '⚠️': '[WARN]', '🌿': '[BRANCH]',
-                                '📥': '[DOWN]', '🔨': '[BUILD]', '📋': '[LIST]',
-                                '🎯': '[TARGET]', '⭐': '*', '🍴': '[FORK]',
-                                '🔒': '[LOCK]', '🚨': '[ALERT]', '📊': '[STAT]',
-                                '📍': '[LOC]', '💾': '[SAVE]', '🔎': '[FIND]',
-                            }
-                            for emoji, ascii_rep in replacements.items():
-                                arg = arg.replace(emoji, ascii_rep)
-                            safe_args.append(arg)
-                        else:
-                            safe_args.append(arg)
-                    original_print(*safe_args, **kwargs)
-            
-            builtins.print = safe_print
-
 setup_windows_console()
 # ============================================================================
 
 
-class ModCompilerConfig:
-    """Configuration for the mod compilation process"""
-
-    def __init__(self, mc_version: str, loader: str, loader_version: str,
-                 instance_path: Optional[str] = None, github_token: Optional[str] = None,
-                 strict_version: bool = False, output_dir: str = "out",
-                 cross_loader: bool = True, docker_test: bool = False,
-                 docker_timeout: int = 180):
-        self.mc_version = mc_version
-        self.loader = loader.lower()
-        self.loader_version = loader_version
-        self.github_token = github_token
-        self.strict_version = strict_version
-        self.cross_loader = cross_loader
-        self.docker_test = docker_test
-        self.docker_timeout = docker_timeout
-
-        # Output directory (always used)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Instance path (optional - if provided, JARs also go to instance/mods/)
-        if instance_path:
-            self.instance_path = Path(instance_path)
-            if not self.instance_path.exists():
-                raise ValueError(f"Instance path does not exist: {instance_path}")
-            self.mods_path = self.instance_path / "mods"
-            self.mods_path.mkdir(exist_ok=True)
-        else:
-            self.instance_path = None
-            self.mods_path = None
-
-        # GitHub API headers
-        self.github_headers = {
-            "Accept": "application/vnd.github.v3+json"
-        }
-        if github_token:
-            self.github_headers["Authorization"] = f"token {github_token}"
-
-
-class BranchCandidate:
-    """Represents a potential branch for compilation"""
-    
-    def __init__(self, name: str, commit_sha: str, commit_date: str):
-        self.name = name
-        self.commit_sha = commit_sha
-        self.commit_date = commit_date
-        self.score = 0  # Will be calculated based on relevance
-        
-        # Pre-validation fields (populated via GitHub API)
-        self.minecraft_version = None
-        self.loader = None
-        self.loader_version = None
-        self.is_compatible = False
-        self.validation_error = None
-        
-        # Metadata validation fields
-        self.version_range = None  # e.g., "[1.21,1.22)" or "~1.21.0"
-        self.validation_method = None  # 'metadata_range' or 'gradle_properties'
-    
-    def __repr__(self):
-        return f"BranchCandidate(name={self.name}, mc={self.minecraft_version}, range={self.version_range}, loader={self.loader}, compatible={self.is_compatible}, score={self.score})"
-
-
-class FailureType(Enum):
-    """Classification of build failures for dependency-aware retries."""
-    NONE = "none"
-    DEPENDENCY_RESOLUTION = "dependency_resolution"
-    BUILD_ERROR = "build_error"
-    CLONE_ERROR = "clone_error"
-    VALIDATION_ERROR = "validation_error"
-    TIMEOUT = "timeout"
-    DOCKER_CRASH = "docker_crash"
-    DOCKER_TIMEOUT = "docker_timeout"
-    DOCKER_DEPENDENCY = "docker_dependency"
-    UNKNOWN = "unknown"
-
-
-class CompilationResult:
-    """Result of attempting to compile a mod"""
-
-    def __init__(self, repo_url: str, success: bool, branch: Optional[str] = None,
-                 jar_path: Optional[str] = None, error: Optional[str] = None,
-                 mod_name: Optional[str] = None, mod_version: Optional[str] = None,
-                 compiled_mc_version: Optional[str] = None,
-                 failure_type: "FailureType" = None,
-                 missing_dependencies: Optional[List[str]] = None,
-                 clone_dir: Optional[Path] = None,
-                 is_cross_loader: bool = False,
-                 modrinth_download: bool = False):
-        self.repo_url = repo_url
-        self.success = success
-        self.branch = branch
-        self.jar_path = jar_path
-        self.error = error
-        self.mod_name = mod_name
-        self.mod_version = mod_version
-        self.compiled_mc_version = compiled_mc_version
-        self.failure_type = failure_type or FailureType.NONE
-        self.missing_dependencies = missing_dependencies or []
-        self.clone_dir = clone_dir
-        self.is_cross_loader = is_cross_loader
-        self.modrinth_download = modrinth_download
-        # Docker test fields
-        self.docker_tested: bool = False
-        self.docker_test_passed: Optional[bool] = None
-        self.docker_error: Optional[str] = None
-        self.docker_load_time_ms: Optional[int] = None
-
-
-class DockerTestCache:
-    """Cache Docker test results to avoid re-testing identical JAR sets."""
-
-    CACHE_DIR = Path.home() / ".modforge"
-    CACHE_FILE = CACHE_DIR / "docker_test_cache.json"
-
-    def __init__(self):
-        self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        self._data: Dict = self._load()
-
-    def _load(self) -> Dict:
-        if self.CACHE_FILE.exists():
-            try:
-                with open(self.CACHE_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
-
-    def _save(self) -> None:
-        with open(self.CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2)
-
-    @staticmethod
-    def compute_jar_set_hash(jar_paths: List[Path]) -> str:
-        """Deterministic hash of a set of JAR files (sorted by content hash)."""
-        file_hashes = []
-        for jar in sorted(jar_paths):
-            h = hashlib.sha256()
-            with open(jar, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    h.update(chunk)
-            file_hashes.append(h.hexdigest())
-        combined = hashlib.sha256(
-            "|".join(sorted(file_hashes)).encode()
-        )
-        return combined.hexdigest()
-
-    def get(self, jar_hash: str, mc_version: str,
-            loader: str) -> Optional[bool]:
-        """Return cached pass/fail or None if not cached / invalidated."""
-        entry = self._data.get(jar_hash)
-        if entry is None:
-            return None
-        if (entry.get("mc_version") != mc_version
-                or entry.get("loader") != loader):
-            return None
-        return entry.get("passed")
-
-    def set(self, jar_hash: str, passed: bool,
-            mc_version: str, loader: str) -> None:
-        """Store a Docker test result."""
-        self._data[jar_hash] = {
-            "passed": passed,
-            "mc_version": mc_version,
-            "loader": loader,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save()
-
-
-class ModForgeConfig:
-    """Persistent user config stored at ~/.modforge/config.toml."""
-
-    CONFIG_DIR = Path.home() / ".modforge"
-    CONFIG_FILE = CONFIG_DIR / "config.toml"
-
-    def __init__(self):
-        self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        self._data: Dict = {}
-        self._is_first_run = not self.CONFIG_FILE.exists()
-        self._load()
-
-    def _load(self) -> None:
-        if self.CONFIG_FILE.exists():
-            try:
-                self._data = toml.load(str(self.CONFIG_FILE))
-            except Exception:
-                self._data = {}
-        # Ensure client_id exists
-        if not self._data.get("client_id"):
-            self._data["client_id"] = str(uuid.uuid4())
-            self._save()
-
-    def _save(self) -> None:
-        with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
-            toml.dump(self._data, f)
-
-    @property
-    def sharing(self) -> str:
-        """Data sharing preference: 'always', 'ask', or 'never'."""
-        return self._data.get("sharing", "ask")
-
-    @sharing.setter
-    def sharing(self, value: str) -> None:
-        if value not in ("always", "ask", "never"):
-            raise ValueError(f"Invalid sharing value: {value}")
-        self._data["sharing"] = value
-        self._save()
-
-    @property
-    def client_id(self) -> str:
-        return self._data.get("client_id", "")
-
-    @property
-    def is_first_run(self) -> bool:
-        return self._is_first_run
-
-    def mark_prompted(self) -> None:
-        """Mark that the first-run prompt has been shown."""
-        self._data["_prompted"] = True
-        self._is_first_run = False
-        self._save()
-
-    @property
-    def was_prompted(self) -> bool:
-        return self._data.get("_prompted", False)
-
-
-def prompt_sharing_preference(config: ModForgeConfig) -> str:
-    """
-    Show the opt-in prompt on first run. Returns the user's choice.
-    """
-    print(f"\n{'='*60}")
-    print("  Help improve ModForge for everyone!")
-    print(f"{'='*60}")
-    print()
-    print("  When a mod compiles/loads successfully, ModForge")
-    print("  can share anonymous compatibility data with the")
-    print("  community. This helps other players find working")
-    print("  mods faster.")
-    print()
-    print("  What's shared: mod name, version, MC version,")
-    print("  loader, result (works/fails), Java version, OS.")
-    print("  What's NOT shared: personal info, IP, file paths.")
-    print()
-    print("  [A] Always share (recommended)")
-    print("  [K] Ask each time")
-    print("  [N] Never share, don't ask again")
-    print()
-
-    while True:
-        try:
-            choice = input("  Your choice [A/K/N]: ").strip().upper()
-        except (EOFError, KeyboardInterrupt):
-            choice = "K"
-            break
-        if choice in ("A", "K", "N"):
-            break
-        print("  Please enter A, K, or N.")
-
-    mapping = {"A": "always", "K": "ask", "N": "never"}
-    value = mapping.get(choice, "ask")
-    config.sharing = value
-    config.mark_prompted()
-    print(f"\n  Saved: sharing = {value}")
-    print(f"  Change anytime: edit {config.CONFIG_FILE}")
-    print()
-    return value
-
-
-def sign_report(report: Dict) -> str:
-    """
-    Create HMAC-SHA256 signature for a crowdsource report.
-
-    Uses deterministic JSON serialization (sorted keys, compact
-    separators) to ensure the signature is reproducible.
-    """
-    # Exclude the signature field itself from the payload
-    payload = {k: v for k, v in report.items() if k != "signature"}
-    serialized = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"),
-    )
-    sig = hmac.new(
-        MODFORGE_HMAC_KEY, serialized.encode("utf-8"), hashlib.sha256,
-    )
-    return f"hmac-sha256:{sig.hexdigest()}"
+# Classes and functions imported from modforge package (see imports above):
+# ModCompilerConfig, BranchCandidate, FailureType, CompilationResult,
+# DockerTestCache, ModForgeConfig, prompt_sharing_preference, sign_report
 
 
 class ModAutoCompiler:
@@ -1293,127 +961,13 @@ class ModAutoCompiler:
         return None
     
     def is_version_in_maven_range(self, version: str, range_str: str) -> bool:
-        """
-        Check if a version is within a Maven-style version range.
-        
-        Examples:
-        - [1.21,1.22) = 1.21.x (inclusive 1.21, exclusive 1.22)
-        - [1.21.1] = exactly 1.21.1
-        - [1.21,) = 1.21 and above
-        """
-        try:
-            # Parse the range
-            if range_str.startswith('[') or range_str.startswith('('):
-                # Remove brackets/parentheses
-                range_clean = range_str.strip('[]()') 
-                parts = range_clean.split(',')
-                
-                if len(parts) == 1:
-                    # [1.21.1] - exact version
-                    return version == parts[0].strip()
-                
-                elif len(parts) == 2:
-                    min_ver = parts[0].strip() if parts[0].strip() else None
-                    max_ver = parts[1].strip() if parts[1].strip() else None
-                    
-                    # Check minimum (inclusive with [, exclusive with ()
-                    if min_ver:
-                        is_inclusive = range_str.startswith('[')
-                        if is_inclusive:
-                            if not self._compare_versions(version, min_ver) >= 0:
-                                return False
-                        else:
-                            if not self._compare_versions(version, min_ver) > 0:
-                                return False
-                    
-                    # Check maximum (exclusive with ), inclusive with ])
-                    if max_ver:
-                        is_inclusive = range_str.endswith(']')
-                        if is_inclusive:
-                            if not self._compare_versions(version, max_ver) <= 0:
-                                return False
-                        else:
-                            if not self._compare_versions(version, max_ver) < 0:
-                                return False
-                    
-                    return True
-        except:
-            pass
-        
-        return False
-    
+        return _is_version_in_maven_range_standalone(version, range_str)
+
     def is_version_in_fabric_range(self, version: str, range_str: str) -> bool:
-        """
-        Check if a version is within a Fabric-style version range.
-        
-        Examples:
-        - ~1.21.0 = 1.21.x
-        - >=1.21.0 = 1.21.0 and above
-        - 1.21.1 = exactly 1.21.1
-        """
-        if not range_str:
-            return False
-        
-        try:
-            if range_str.startswith('~'):
-                # ~1.21.0 means 1.21.x
-                base = range_str[1:].strip()
-                base_parts = base.split('.')[:2]  # Get major.minor
-                version_parts = version.split('.')[:2]
-                return base_parts == version_parts
-            
-            elif range_str.startswith('>='):
-                min_ver = range_str[2:].strip()
-                return self._compare_versions(version, min_ver) >= 0
-            
-            elif range_str.startswith('>'):
-                min_ver = range_str[1:].strip()
-                return self._compare_versions(version, min_ver) > 0
-            
-            elif range_str.startswith('<='):
-                max_ver = range_str[2:].strip()
-                return self._compare_versions(version, max_ver) <= 0
-            
-            elif range_str.startswith('<'):
-                max_ver = range_str[1:].strip()
-                return self._compare_versions(version, max_ver) < 0
-            
-            else:
-                # Exact version
-                return version == range_str
-        except:
-            pass
-        
-        return False
-    
+        return _is_version_in_fabric_range_standalone(version, range_str)
+
     def _compare_versions(self, v1: str, v2: str) -> int:
-        """
-        Compare two version strings.
-        Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
-        """
-        try:
-            parts1 = [int(x) for x in v1.split('.')]
-            parts2 = [int(x) for x in v2.split('.')]
-            
-            # Pad to same length
-            max_len = max(len(parts1), len(parts2))
-            parts1 += [0] * (max_len - len(parts1))
-            parts2 += [0] * (max_len - len(parts2))
-            
-            for p1, p2 in zip(parts1, parts2):
-                if p1 < p2:
-                    return -1
-                elif p1 > p2:
-                    return 1
-            
-            return 0
-        except:
-            # Fallback to string comparison
-            if v1 < v2:
-                return -1
-            elif v1 > v2:
-                return 1
-            return 0
+        return _compare_versions_standalone(v1, v2)
     
     def pre_validate_branch(self, owner: str, repo: str, branch: BranchCandidate,
                             override_loader: Optional[str] = None) -> bool:
@@ -1586,22 +1140,9 @@ class ModAutoCompiler:
         return True
     
     def is_version_compatible(self, found_version: str, target_version: str) -> bool:
-        """
-        Determine if a Minecraft version is compatible with the target version.
-        
-        Strict mode: Only exact match (1.21.10 == 1.21.10)
-        Lenient mode: Same major.minor (1.21.x compatible with 1.21.y)
-        """
-        if self.config.strict_version:
-            return found_version == target_version
-        
-        # Lenient mode: allow same major.minor version
-        try:
-            target_parts = target_version.split('.')[:2]  # ["1", "21"]
-            found_parts = found_version.split('.')[:2]    # ["1", "21"]
-            return target_parts == found_parts
-        except:
-            return False
+        return _is_version_compatible_standalone(
+            found_version, target_version, strict=self.config.strict_version
+        )
     
     def pre_validate_branches(self, owner: str, repo: str,
                              branches: List[BranchCandidate],
@@ -4100,176 +3641,26 @@ class ModAutoCompiler:
                 self._safe_rmtree(self.temp_dir)
     
     def _safe_rmtree(self, path: Path):
-        """
-        Safely remove directory tree, handling Windows permission errors with Git files.
-        """
-        def handle_remove_readonly(func, path, exc):
-            """Error handler for Windows read-only files"""
-            import stat
-            if not os.access(path, os.W_OK):
-                # Try to make the file writable
-                os.chmod(path, stat.S_IWUSR | stat.S_IREAD)
-                func(path)
-            else:
-                raise
-        
-        try:
-            shutil.rmtree(path, onerror=handle_remove_readonly)
-        except Exception as e:
-            print(f"⚠️  Warning: Could not fully clean up {path}: {e}")
-            print(f"   You may need to manually delete this directory.")
+        safe_rmtree(path)
     
     # ── Crowdsource reporting ──────────────────────────────────
 
     @staticmethod
     def _detect_java_version() -> str:
-        """Detect the installed Java version."""
-        try:
-            result = subprocess.run(
-                ["java", "-version"],
-                capture_output=True, text=True, timeout=10,
-            )
-            output = result.stderr or result.stdout
-            match = re.search(r'"([\d._]+)"', output)
-            if match:
-                return match.group(1)
-            return output.strip().split("\n")[0][:50]
-        except Exception:
-            return "unknown"
+        return detect_java_version()
 
-    def build_report(
-        self, result: CompilationResult,
-    ) -> Optional[Dict]:
-        """
-        Build a crowdsource report from a CompilationResult.
+    def build_report(self, result: CompilationResult) -> Optional[Dict]:
+        return _build_report_standalone(
+            result, self.config.mc_version, self.config.loader,
+            self.config.loader_version, self.parse_repo_url,
+        )
 
-        Returns None if the result should not be reported (failed
-        compilation, client-only, or inconclusive).
-        """
-        if not result.success:
-            return None
-
-        # Determine status
-        if result.docker_tested and result.docker_test_passed is True:
-            status = "works"
-        elif result.docker_tested and result.docker_test_passed is False:
-            status = "fails"
-        elif (result.docker_tested
-              and result.docker_test_passed is None):
-            return None  # client-only or inconclusive
-        else:
-            status = "compiled"
-
-        # Compute JAR hash
-        jar_hash = ""
-        if result.jar_path and Path(result.jar_path).exists():
-            h = hashlib.sha256()
-            with open(result.jar_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    h.update(chunk)
-            jar_hash = h.hexdigest()
-
-        # Source repo info
-        source_repo = result.repo_url
-        try:
-            owner, repo, _ = self.parse_repo_url(result.repo_url)
-            source_repo = f"{owner}/{repo}"
-        except Exception:
-            pass
-
-        return {
-            "mod_name": result.mod_name or "unknown",
-            "mod_version": result.mod_version or "unknown",
-            "jar_hash_sha256": jar_hash,
-            "source_repo": source_repo,
-            "source_branch": result.branch or "",
-            "mc_version": self.config.mc_version,
-            "loader": self.config.loader,
-            "loader_version": self.config.loader_version,
-            "status": status,
-            "log_snippet": (result.docker_error or "")[:500],
-            "load_time_ms": result.docker_load_time_ms,
-            "java_version": self._detect_java_version(),
-            "os": platform.system().lower(),
-            "os_version": platform.release(),
-            "is_cross_loader": result.is_cross_loader,
-            "modrinth_download": result.modrinth_download,
-            "cli_version": MODFORGE_VERSION,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-    def submit_reports(
-        self, modforge_config: "ModForgeConfig",
-    ) -> None:
-        """
-        Submit crowdsource reports for all successful results.
-
-        Respects the user's sharing preference. Silent failure on
-        network errors — never blocks or slows down the CLI.
-        """
-        if modforge_config.sharing == "never":
-            return
-
-        if not MODFORGE_API_URL:
-            logger.debug("No API URL configured, skipping reports")
-            return
-
-        reports = []
-        for result in self.results:
-            report = self.build_report(result)
-            if report:
-                reports.append(report)
-
-        if not reports:
-            return
-
-        # If "ask", prompt user
-        if modforge_config.sharing == "ask":
-            print(
-                f"\n📊 Share {len(reports)} anonymous compatibility "
-                f"report(s) with the community? [Y/n] ",
-                end="",
-            )
-            try:
-                answer = input().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                answer = "n"
-            if answer not in ("", "y", "yes"):
-                print("  Skipped.")
-                return
-
-        # Submit each report
-        client_id = modforge_config.client_id
-        submitted = 0
-        for report in reports:
-            report["client_id"] = client_id
-            report["signature"] = sign_report(report)
-
-            try:
-                resp = requests.post(
-                    MODFORGE_API_URL,
-                    json=report,
-                    headers={
-                        "Content-Type": "application/json",
-                        "User-Agent": MODRINTH_USER_AGENT,
-                    },
-                    timeout=10,
-                )
-                if resp.status_code in (200, 201):
-                    submitted += 1
-                else:
-                    logger.debug(
-                        "Report submission failed (%d): %s",
-                        resp.status_code, resp.text[:200],
-                    )
-            except Exception as e:
-                logger.debug("Report submission error: %s", e)
-
-        if submitted:
-            print(
-                f"  📊 Shared {submitted}/{len(reports)} "
-                f"report(s). Thank you!"
-            )
+    def submit_reports(self, modforge_config: "ModForgeConfig") -> None:
+        _submit_reports_standalone(
+            self.results, modforge_config, self.config.mc_version,
+            self.config.loader, self.config.loader_version,
+            self.parse_repo_url,
+        )
 
     def generate_report(self) -> str:
         """
