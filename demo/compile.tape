@@ -1,7 +1,9 @@
 # VHS tape: modforge compile demo
 # Run with: vhs demo/compile.tape
-# Requires: modforge installed, github_token.txt, repos.txt with 2-3 small mods
-# Note: This runs a real compilation and may take several minutes.
+# Shows the compile panel with banner, repo list, and initial pipeline output.
+# Uses a small demo repos file for a quick demo.
+# Requires: modforge installed (pip install -e .), github_token.txt in project root
+# Pre-req: run once to create ~/.modforge/config.toml (avoids interactive prompt)
 
 Output demo/compile.gif
 Set Theme "Dracula"
@@ -11,10 +13,12 @@ Set Height 800
 Set Padding 20
 Set TypingSpeed 50ms
 
-Type "cat repos.txt"
+# Show the repos file
+Type "cat demo/demo_repos.txt"
 Enter
 Sleep 2s
 
-Type "modforge compile repos.txt -m 1.21.10 -l neoforge -lv 64 -t $(cat github_token.txt)"
+# Run compile with token and --no-share to keep output clean
+Type "modforge compile demo/demo_repos.txt -m 1.21.1 -l neoforge -lv 21.1.94 -t $(cat github_token.txt) --no-share"
 Enter
-Sleep 60s
+Sleep 30s

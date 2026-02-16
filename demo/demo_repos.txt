@@ -1,0 +1,3 @@
+# Demo repos - small list for GIF generation
+https://github.com/mezz/JustEnoughItems
+https://github.com/PepperCode1/Continuity
