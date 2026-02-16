@@ -76,6 +76,7 @@ from modforge.docker import (
     DOCKER_INSTALL_MAX_RETRIES as _DOCKER_INSTALL_MAX_RETRIES,
     NEOFORGE_VERSIONS as _NEOFORGE_VERSIONS,
 )
+from modforge.loaders import ALL_LOADERS
 from modforge.pipeline import Pipeline
 
 # ============================================================================
@@ -447,7 +448,7 @@ Examples:
     parser.add_argument(
         '--loader',
         required=True,
-        choices=['forge', 'neoforge', 'fabric'],
+        choices=ALL_LOADERS,
         help='Mod loader type'
     )
 

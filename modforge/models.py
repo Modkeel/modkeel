@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from modforge.loaders import ALL_LOADERS, normalize_loader
+
 
 class ModCompilerConfig:
     """Configuration for the mod compilation process."""
@@ -17,7 +19,7 @@ class ModCompilerConfig:
                  cross_loader: bool = True, docker_test: bool = False,
                  docker_timeout: int = 180):
         self.mc_version = mc_version
-        self.loader = loader.lower()
+        self.loader = normalize_loader(loader)
         self.loader_version = loader_version
         self.github_token = github_token
         self.strict_version = strict_version

@@ -25,6 +25,7 @@ from modforge.github import GitHubClient, parse_repo_url
 from modforge.models import CompilationResult, FailureType, ModCompilerConfig
 from modforge.modrinth import ModrinthClient
 from modforge.utils import safe_rmtree
+from modforge.loaders import get_bridge_mods, get_cross_loader_chain, get_profile
 from modforge.validation import BranchValidator
 from modforge.version import is_version_in_maven_range, is_version_in_fabric_range
 
@@ -74,17 +75,21 @@ class Pipeline:
             if not specific_branch and not skip_modrinth:
                 modrinth_result = self.modrinth.check_modrinth(repo)
 
+                fallback_loaders = get_cross_loader_chain(self.config.loader)
                 if (not modrinth_result
                         and self.config.cross_loader
-                        and self.config.loader in ("neoforge", "forge")
+                        and fallback_loaders
                         and self.modrinth.is_cross_loader_available()):
                     saved_loader = self.config.loader
-                    self.config.loader = "fabric"
-                    print(f"  \U0001f504 CROSS-LOADER: Checking Modrinth for Fabric version...")
-                    modrinth_result = self.modrinth.check_modrinth(repo)
+                    for fallback in fallback_loaders:
+                        self.config.loader = fallback
+                        print(f"  \U0001f504 CROSS-LOADER: Checking Modrinth for {fallback.capitalize()} version...")
+                        modrinth_result = self.modrinth.check_modrinth(repo)
+                        if modrinth_result:
+                            modrinth_result["_cross_loader"] = True
+                            modrinth_result["_fallback_loader"] = fallback
+                            break
                     self.config.loader = saved_loader
-                    if modrinth_result:
-                        modrinth_result["_cross_loader"] = True
 
                 if modrinth_result:
                     print(f"\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)...")
@@ -181,7 +186,7 @@ class Pipeline:
                 if should_search_forks:
                     cross_available = (
                         self.config.cross_loader
-                        and self.config.loader in ("neoforge", "forge")
+                        and get_cross_loader_chain(self.config.loader)
                         and self.modrinth.is_cross_loader_available()
                     )
                     fork_candidates = self.github.search_compatible_repos(
@@ -262,7 +267,8 @@ class Pipeline:
                                 )
 
                                 if version_range:
-                                    if self.config.loader in ['neoforge', 'forge']:
+                                    range_format = get_profile(self.config.loader)["version_range_format"]
+                                    if range_format == "maven":
                                         is_compat = is_version_in_maven_range(self.config.mc_version, version_range)
                                     else:
                                         is_compat = is_version_in_fabric_range(self.config.mc_version, version_range)
@@ -299,45 +305,53 @@ class Pipeline:
                             compatible_branches = close_matches
 
                 if not compatible_branches:
+                    fallback_loaders_compile = get_cross_loader_chain(self.config.loader)
                     if (self.config.cross_loader
-                            and self.config.loader in ("neoforge", "forge")
+                            and fallback_loaders_compile
                             and self.modrinth.is_cross_loader_available()):
-                        print(f"\n  \U0001f504 CROSS-LOADER: No NeoForge branches found, "
-                              f"trying Fabric fallback via Sinytra Connector...")
+                        fallback_label = fallback_loaders_compile[0].capitalize()
+                        print(f"\n  \U0001f504 CROSS-LOADER: No {self.config.loader.capitalize()} branches found, "
+                              f"trying {fallback_label} fallback via bridge mods...")
 
-                        fabric_all = self.github.get_branches(owner, repo)
-                        fabric_branches = self.validator.pre_validate_branches(
-                            owner, repo, fabric_all, override_loader="fabric"
-                        )
+                        fallback_found = False
+                        for fallback_loader in fallback_loaders_compile:
+                            fb_all = self.github.get_branches(owner, repo)
+                            fb_branches = self.validator.pre_validate_branches(
+                                owner, repo, fb_all, override_loader=fallback_loader
+                            )
 
-                        if not fabric_branches and saved_fork_candidates:
-                            for fork_result in saved_fork_candidates:
-                                fi = fork_result['fork']
-                                print(f"  \U0001f504 Checking fork {fi['full_name']} "
-                                      f"for Fabric branches...")
-                                fb = self.github.get_branches(fi['owner'], fi['repo'])
-                                fabric_branches = self.validator.pre_validate_branches(
-                                    fi['owner'], fi['repo'], fb,
-                                    override_loader="fabric"
-                                )
-                                if fabric_branches:
-                                    owner = fi['owner']
-                                    repo = fi['repo']
-                                    break
+                            if not fb_branches and saved_fork_candidates:
+                                for fork_result in saved_fork_candidates:
+                                    fi = fork_result['fork']
+                                    print(f"  \U0001f504 Checking fork {fi['full_name']} "
+                                          f"for {fallback_loader.capitalize()} branches...")
+                                    fork_b = self.github.get_branches(fi['owner'], fi['repo'])
+                                    fb_branches = self.validator.pre_validate_branches(
+                                        fi['owner'], fi['repo'], fork_b,
+                                        override_loader=fallback_loader
+                                    )
+                                    if fb_branches:
+                                        owner = fi['owner']
+                                        repo = fi['repo']
+                                        break
 
-                        if fabric_branches:
-                            print(f"  \u2705 Found {len(fabric_branches)} Fabric "
-                                  f"branches for cross-loader compilation")
-                            compatible_branches = fabric_branches
-                            is_cross_loader_attempt = True
-                        else:
+                            if fb_branches:
+                                print(f"  \u2705 Found {len(fb_branches)} {fallback_loader.capitalize()} "
+                                      f"branches for cross-loader compilation")
+                                compatible_branches = fb_branches
+                                is_cross_loader_attempt = True
+                                fallback_found = True
+                                break
+
+                        if not fallback_found:
+                            tried = ", ".join(fallback_loaders_compile)
                             return CompilationResult(
                                 repo_url=repo_url,
                                 success=False,
                                 error=(f"No compatible branches in original repo "
                                        f"or forks for MC {self.config.mc_version}"
                                        f" + {self.config.loader} (also tried "
-                                       f"Fabric cross-loader fallback)")
+                                       f"{tried} cross-loader fallback)")
                             )
                     else:
                         return CompilationResult(
@@ -617,17 +631,19 @@ class Pipeline:
                 if r.success and r.is_cross_loader
             ]
             if cross_loader_mods:
+                fallback_loaders_dl = get_cross_loader_chain(self.config.loader)
                 print(f"\n{'='*80}")
-                print(f"\U0001f504 CROSS-LOADER: {len(cross_loader_mods)} Fabric mod(s) "
-                      f"need Sinytra Connector to run on NeoForge")
+                print(f"\U0001f504 CROSS-LOADER: {len(cross_loader_mods)} mod(s) "
+                      f"need bridge mods to run on {self.config.loader.capitalize()}")
                 print(f"{'='*80}")
-                print(f"  Downloading Sinytra Connector + Forgified Fabric API...")
-                self.modrinth.download_modrinth_mod(
-                    "connector", self.config.mc_version, "neoforge"
-                )
-                self.modrinth.download_modrinth_mod(
-                    "forgified-fabric-api", self.config.mc_version, "neoforge"
-                )
+                for target in fallback_loaders_dl:
+                    bridge_slugs = get_bridge_mods(self.config.loader, target)
+                    if bridge_slugs:
+                        print(f"  Downloading bridge mods for {target.capitalize()} compatibility...")
+                        for slug in bridge_slugs:
+                            self.modrinth.download_modrinth_mod(
+                                slug, self.config.mc_version, self.config.loader
+                            )
 
             if self.config.docker_test:
                 self.docker.test_mods_in_docker(self.results)

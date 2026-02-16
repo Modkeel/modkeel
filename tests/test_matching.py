@@ -677,5 +677,89 @@ minecraft = { module = "com.mojang:minecraft", version.ref = "minecraft" }
         self.assertIsNone(mc_match)
 
 
+class TestQuiltGradleDetection(unittest.TestCase):
+    """Test that Quilt loader is detected from gradle.properties."""
+
+    def test_quilt_loader_version_detected(self):
+        """quilt_loader_version in gradle.properties should detect Quilt."""
+        from modforge.loaders import LOADER_PROFILES
+
+        gradle_content = """
+minecraft_version=1.21.10
+quilt_loader_version=0.23.1
+quilt_mappings_version=1.21.10+build.1
+"""
+        for pattern in LOADER_PROFILES["quilt"]["gradle_detection_patterns"]:
+            if re.search(pattern, gradle_content):
+                detected = True
+                break
+        else:
+            detected = False
+        self.assertTrue(detected, "Quilt should be detected from gradle.properties")
+
+    def test_quilt_version_extraction(self):
+        """Should extract Quilt loader version from gradle.properties."""
+        from modforge.loaders import LOADER_PROFILES
+
+        gradle_content = "quilt_loader_version = 0.23.1"
+        for pattern in LOADER_PROFILES["quilt"]["gradle_version_patterns"]:
+            match = re.search(pattern, gradle_content)
+            if match:
+                break
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), "0.23.1")
+
+    def test_quilt_not_confused_with_fabric(self):
+        """Quilt patterns should not match fabric_loader_version."""
+        from modforge.loaders import LOADER_PROFILES
+
+        gradle_content = "fabric_loader_version = 0.16.0"
+        for pattern in LOADER_PROFILES["quilt"]["gradle_detection_patterns"]:
+            if re.search(pattern, gradle_content):
+                self.fail("Quilt pattern should not match fabric_loader_version")
+
+
+class TestLoaderValidationInConfig(unittest.TestCase):
+    """Test that ModCompilerConfig validates and normalizes loader."""
+
+    def test_valid_loader_accepted(self):
+        """All loaders in ALL_LOADERS should be accepted."""
+        from modforge.loaders import ALL_LOADERS
+        from unittest.mock import patch
+        for loader in ALL_LOADERS:
+            with patch.object(Path, 'mkdir'):
+                config = ModCompilerConfig(
+                    mc_version="1.21.10",
+                    loader=loader,
+                    loader_version="1",
+                    output_dir="/tmp/test_out"
+                )
+                self.assertEqual(config.loader, loader)
+
+    def test_invalid_loader_raises(self):
+        """Unknown loader should raise ValueError."""
+        from unittest.mock import patch
+        with self.assertRaises(ValueError):
+            with patch.object(Path, 'mkdir'):
+                ModCompilerConfig(
+                    mc_version="1.21.10",
+                    loader="bukkit",
+                    loader_version="1",
+                    output_dir="/tmp/test_out"
+                )
+
+    def test_loader_normalized_to_lowercase(self):
+        """Loader should be normalized to lowercase."""
+        from unittest.mock import patch
+        with patch.object(Path, 'mkdir'):
+            config = ModCompilerConfig(
+                mc_version="1.21.10",
+                loader="NeoForge",
+                loader_version="1",
+                output_dir="/tmp/test_out"
+            )
+            self.assertEqual(config.loader, "neoforge")
+
+
 if __name__ == "__main__":
     unittest.main()

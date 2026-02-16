@@ -12,6 +12,15 @@ from typing import Dict, List, Optional
 
 import requests
 
+from modforge.loaders import (
+    KNOWN_LOADER_VERSIONS,
+    get_docker_server_type,
+    get_installer_filename,
+    get_installer_url,
+    get_known_version,
+    get_maven_domain,
+    get_profile,
+)
 from modforge.models import CompilationResult, DockerTestCache, ModCompilerConfig
 
 logger = logging.getLogger("modforge")
@@ -74,14 +83,8 @@ DOCKER_SERVER_STARTING_PATTERN = re.compile(
 DOCKER_VOLUME_PREFIX = "modforge_cache"
 DOCKER_INSTALL_MAX_RETRIES = 5
 
-NEOFORGE_VERSIONS = {
-    "1.21.4": "21.4.156",
-    "1.21.3": "21.3.56",
-    "1.21.1": "21.1.94",
-    "1.21": "21.0.167",
-    "1.20.6": "20.6.120",
-    "1.20.4": "20.4.263",
-}
+# Backwards-compatible alias
+NEOFORGE_VERSIONS = KNOWN_LOADER_VERSIONS.get("neoforge", {})
 
 
 class DockerTester:
@@ -212,31 +215,31 @@ class DockerTester:
             print(f"  \u2705 Loader cached at {cache_dir}")
             return cache_dir
 
-        if self.config.loader.lower() != "neoforge":
+        loader = self.config.loader.lower()
+        profile = get_profile(loader)
+        if not profile.get("installer_url_template"):
             return None
 
-        nf_version = NEOFORGE_VERSIONS.get(self.config.mc_version)
-        if not nf_version:
+        loader_version = get_known_version(loader, self.config.mc_version)
+        if not loader_version:
+            display = profile["display_name"]
             logger.info(
-                "No known NeoForge version for MC %s, "
+                "No known %s version for MC %s, "
                 "falling back to in-container install",
-                self.config.mc_version,
+                display, self.config.mc_version,
             )
             return None
 
         installer_dir = Path.home() / ".modforge" / "installers"
         installer_dir.mkdir(parents=True, exist_ok=True)
-        installer = (
-            installer_dir / f"neoforge-{nf_version}-installer.jar"
-        )
-        url = (
-            f"https://maven.neoforged.net/releases/net/neoforged/"
-            f"neoforge/{nf_version}/neoforge-{nf_version}-installer.jar"
-        )
+        installer_fname = get_installer_filename(loader, loader_version)
+        installer = installer_dir / installer_fname
+        url = get_installer_url(loader, loader_version)
 
+        display = profile["display_name"]
         if not (installer.exists() and installer.stat().st_size > 1_000_000):
             print(
-                f"  \U0001f4e5 Downloading NeoForge {nf_version} installer "
+                f"  \U0001f4e5 Downloading {display} {loader_version} installer "
                 f"(with retry+resume)..."
             )
             if not self._download_installer_with_resume(url, installer):
@@ -246,12 +249,12 @@ class DockerTester:
         install_retries = 10
         for inst_attempt in range(1, install_retries + 1):
             if self._is_loader_installed(cache_dir):
-                print(f"  \u2705 NeoForge installed \u2192 {cache_dir}")
+                print(f"  \u2705 {display} installed \u2192 {cache_dir}")
                 (cache_dir / "eula.txt").write_text("eula=true\n")
                 return cache_dir
 
             print(
-                f"  \U0001f527 Installing NeoForge {nf_version} "
+                f"  \U0001f527 Installing {display} {loader_version} "
                 f"(attempt {inst_attempt}/{install_retries})..."
             )
             try:
@@ -270,7 +273,7 @@ class DockerTester:
                     capture_output=True, text=True, timeout=600,
                 )
                 if result.returncode == 0:
-                    print(f"  \u2705 NeoForge installed \u2192 {cache_dir}")
+                    print(f"  \u2705 {display} installed \u2192 {cache_dir}")
                     (cache_dir / "eula.txt").write_text("eula=true\n")
                     return cache_dir
 
@@ -305,18 +308,17 @@ class DockerTester:
                 print(f"  \u26a0\ufe0f  Installer error: {e}")
                 return None
 
+        maven = get_maven_domain(loader) or "the download server"
         print(
-            f"  \u274c Could not install NeoForge after "
+            f"  \u274c Could not install {display} after "
             f"{install_retries} attempts. "
-            f"The maven.neoforged.net CDN may be down."
+            f"The {maven} CDN may be down."
         )
         return None
 
     def _run_docker_server(self, mods_dir: Path) -> dict:
         """Launch a headless Minecraft server in Docker and analyze logs."""
-        loader_type = self.config.loader.upper()
-        if loader_type not in ("NEOFORGE", "FORGE"):
-            loader_type = "FABRIC"
+        loader_type = get_docker_server_type(self.config.loader)
 
         loader_dir = self._ensure_loader_installed()
 
@@ -460,12 +462,13 @@ class DockerTester:
             if not result.get("is_loader_error"):
                 return result
 
+            maven = get_maven_domain(self.config.loader) or "the download server"
             if attempt < DOCKER_INSTALL_MAX_RETRIES:
                 print(
                     f"  \u26a0\ufe0f  Loader install failed (attempt "
                     f"{attempt}/{DOCKER_INSTALL_MAX_RETRIES}). "
                     f"This is a server-side issue "
-                    f"(maven.neoforged.net CDN), not your fault."
+                    f"({maven} CDN), not your fault."
                 )
                 print(f"     Retrying in 10s...")
                 time.sleep(10)
@@ -474,7 +477,7 @@ class DockerTester:
                     f"  \u274c Loader install failed after "
                     f"{DOCKER_INSTALL_MAX_RETRIES} attempts. "
                     f"The {loader_type} download server "
-                    f"(maven.neoforged.net) is unreliable right now."
+                    f"({maven}) is unreliable right now."
                 )
                 print(
                     f"     Try again later, or use a VPN to connect "

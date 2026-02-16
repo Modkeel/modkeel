@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from modforge.loaders import get_cross_loader_chain
 from modforge.models import BranchCandidate, ModCompilerConfig
 
 logger = logging.getLogger("modforge")
@@ -182,13 +183,15 @@ class GitHubClient:
             f'"{original_repo}" {self.config.mc_version} port',
         ]
 
+        fallback_loaders = get_cross_loader_chain(self.config.loader)
         if (self.config.cross_loader
-                and self.config.loader in ("neoforge", "forge")
+                and fallback_loaders
                 and cross_loader_available):
-            independent_searches.extend([
-                f'"{original_repo}" {self.config.mc_version} fabric',
-                f'"{original_repo}" fabric port',
-            ])
+            for fallback in fallback_loaders:
+                independent_searches.extend([
+                    f'"{original_repo}" {self.config.mc_version} {fallback}',
+                    f'"{original_repo}" {fallback} port',
+                ])
 
         independent_repos = {}
         original_full = f"{original_owner}/{original_repo}"

@@ -12,6 +12,7 @@ from rich.table import Table
 
 from modforge.config import ModForgeConfig, prompt_sharing_preference
 from modforge.constants import MODFORGE_VERSION
+from modforge.loaders import ALL_LOADERS, KNOWN_LOADER_VERSIONS
 from modforge.models import CompilationResult, FailureType, ModCompilerConfig
 from modforge.pipeline import Pipeline
 from modforge.utils import setup_logging, setup_windows_console
@@ -114,11 +115,10 @@ def compile(
     setup_logging(log_file)
 
     # Validate loader
-    valid_loaders = ["forge", "neoforge", "fabric"]
-    if loader.lower() not in valid_loaders:
+    if loader.lower() not in ALL_LOADERS:
         console.print(
             f"[red]Error:[/red] Invalid loader '{loader}'. "
-            f"Must be one of: {', '.join(valid_loaders)}"
+            f"Must be one of: {', '.join(ALL_LOADERS)}"
         )
         raise typer.Exit(1)
 
@@ -263,25 +263,70 @@ def search(
 
     console.print(table)
 
-    # GitHub fork search
+    # GitHub fork search with pre-filtering
     if github_token:
+        from modforge.validation import BranchValidator
+
         console.print("\n[bold]GitHub Forks:[/bold]")
         github = GitHubClient(config)
         forks = github.search_compatible_repos(query, query, False)
 
         if forks:
-            fork_table = Table(title=f"GitHub Forks ({len(forks)} found)")
-            fork_table.add_column("Repository", style="cyan")
-            fork_table.add_column("Score", style="green", justify="right")
-            fork_table.add_column("Signals", style="yellow")
+            validator = BranchValidator(github, config)
+            validated_forks = []
 
             for fork in forks[:10]:
+                fork_info = fork["fork"]
+                fork_owner = fork_info["owner"]
+                fork_repo = fork_info["repo"]
+
+                branches = github.get_branches(fork_owner, fork_repo)
+                if not branches:
+                    continue
+
+                compatible = validator.pre_validate_branches(
+                    fork_owner, fork_repo, branches
+                )
+                if compatible:
+                    best = max(compatible, key=lambda b: validator.score_branch(b))
+                    fork["_best_branch"] = best
+                    validated_forks.append(fork)
+
+            total_found = len(forks)
+            passed = len(validated_forks)
+
+            fork_table = Table(
+                title=f"Pre-filtered GitHub Forks ({passed} of {total_found} passed)"
+            )
+            fork_table.add_column("Repository", style="cyan")
+            fork_table.add_column("Branch", style="blue")
+            fork_table.add_column("MC Version", style="green")
+            fork_table.add_column("Loader", style="yellow")
+            fork_table.add_column("Score", style="green", justify="right")
+
+            for fork in validated_forks:
+                best = fork["_best_branch"]
                 fork_table.add_row(
                     fork["fork"]["full_name"],
+                    best.name,
+                    best.minecraft_version or "?",
+                    best.loader or "?",
                     str(fork["score"]),
-                    ", ".join(fork["signals"][:3]),
                 )
+
             console.print(fork_table)
+
+            if validated_forks:
+                console.print(
+                    "\n[dim]  Pre-filtered via gradle.properties. "
+                    "Use 'modforge compile' to build and "
+                    "'--docker-test' to confirm compatibility.[/dim]"
+                )
+            else:
+                console.print(
+                    "[yellow]No forks passed pre-filtering "
+                    f"for MC {mc_version} + {loader}.[/yellow]"
+                )
         else:
             console.print("[yellow]No GitHub forks found.[/yellow]")
     else:
@@ -293,7 +338,6 @@ def search(
 @app.command()
 def status():
     """Show ModForge status: version, config, and Docker cache info."""
-    from modforge.docker import NEOFORGE_VERSIONS
     from modforge.models import DockerTestCache
 
     console.print(
@@ -321,7 +365,7 @@ def status():
     if config_file.exists():
         cfg = ModForgeConfig()
         table.add_row("Client ID", cfg.client_id[:8] + "...")
-        table.add_row("Data sharing", str(cfg.share_enabled))
+        table.add_row("Data sharing", str(cfg.sharing))
 
     console.print(table)
 
@@ -367,13 +411,18 @@ def status():
         except Exception:
             pass
 
-    # Known NeoForge versions
-    nf_table = Table(title="Known NeoForge Versions")
-    nf_table.add_column("MC Version", style="cyan")
-    nf_table.add_column("NeoForge Version", style="green")
-    for mc, nf in sorted(NEOFORGE_VERSIONS.items(), reverse=True):
-        nf_table.add_row(mc, nf)
-    console.print(nf_table)
+    # Known loader versions (all loaders that have entries)
+    for loader_name, versions in sorted(KNOWN_LOADER_VERSIONS.items()):
+        if not versions:
+            continue
+        from modforge.loaders import get_profile
+        display_name = get_profile(loader_name)["display_name"]
+        ver_table = Table(title=f"Known {display_name} Versions")
+        ver_table.add_column("MC Version", style="cyan")
+        ver_table.add_column(f"{display_name} Version", style="green")
+        for mc, lv in sorted(versions.items(), reverse=True):
+            ver_table.add_row(mc, lv)
+        console.print(ver_table)
 
 
 if __name__ == "__main__":

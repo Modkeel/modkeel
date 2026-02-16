@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
+from modforge.loaders import get_profile
 from modforge.models import BranchCandidate, ModCompilerConfig
 from modforge.version import (
     is_version_compatible,
@@ -61,38 +62,38 @@ class BranchValidator:
         self, owner: str, repo: str, branch_name: str, loader: str
     ) -> Optional[str]:
         """Parse version range from mod metadata files."""
-        if loader in ['neoforge', 'forge']:
-            locations = [
-                'neoforge/src/main/resources/META-INF/mods.toml',
-                'forge/src/main/resources/META-INF/mods.toml',
-                'src/main/resources/META-INF/mods.toml',
-            ]
+        profile = get_profile(loader)
+        locations = profile["source_metadata_locations"]
+        fmt = profile["source_metadata_format"]
 
-            for location in locations:
-                mods_toml = self.github.get_file_from_repo(owner, repo, branch_name, location)
-                if mods_toml:
-                    pattern = r'\[\[dependencies\.[^\]]+\]\].*?modId\s*=\s*["\']minecraft["\'].*?versionRange\s*=\s*["\']([^"\']+)["\']'
-                    match = re.search(pattern, mods_toml, re.DOTALL | re.IGNORECASE)
-                    if match:
-                        return match.group(1)
+        for location in locations:
+            content = self.github.get_file_from_repo(owner, repo, branch_name, location)
+            if not content:
+                continue
 
-        elif loader == 'fabric':
-            locations = [
-                'common/src/main/resources/fabric.mod.json',
-                'fabric/src/main/resources/fabric.mod.json',
-                'src/main/resources/fabric.mod.json',
-            ]
+            if fmt == "toml":
+                pattern = r'\[\[dependencies\.[^\]]+\]\].*?modId\s*=\s*["\']minecraft["\'].*?versionRange\s*=\s*["\']([^"\']+)["\']'
+                match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
+                if match:
+                    return match.group(1)
 
-            for location in locations:
-                fabric_json = self.github.get_file_from_repo(owner, repo, branch_name, location)
-                if fabric_json:
-                    try:
-                        data = json.loads(fabric_json)
-                        mc_dep = data.get('depends', {}).get('minecraft', '')
-                        if mc_dep:
-                            return mc_dep
-                    except Exception:
-                        pass
+            elif fmt == "json":
+                try:
+                    data = json.loads(content)
+                    # Quilt schema: quilt_loader.depends[{id:"minecraft", versions:"..."}]
+                    quilt_loader = data.get('quilt_loader', {})
+                    if quilt_loader:
+                        for dep in quilt_loader.get('depends', []):
+                            if isinstance(dep, dict) and dep.get('id') == 'minecraft':
+                                versions = dep.get('versions')
+                                if versions:
+                                    return versions if isinstance(versions, str) else str(versions)
+                    # Fabric schema: depends.minecraft
+                    mc_dep = data.get('depends', {}).get('minecraft', '')
+                    if mc_dep:
+                        return mc_dep
+                except Exception:
+                    pass
 
         return None
 
@@ -117,29 +118,25 @@ class BranchValidator:
             if mc_match:
                 branch.minecraft_version = mc_match.group(1)
 
-            if target_loader == 'neoforge':
-                loader_match = re.search(r'neo(?:forge)?_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
+            # Try to match target loader version patterns
+            target_profile = get_profile(target_loader)
+            for pattern in target_profile["gradle_version_patterns"]:
+                loader_match = re.search(pattern, gradle_content)
                 if loader_match:
-                    branch.loader = 'neoforge'
+                    branch.loader = target_loader
                     branch.loader_version = loader_match.group(1)
-            elif target_loader == 'forge':
-                loader_match = re.search(r'forge_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
-                if loader_match:
-                    branch.loader = 'forge'
-                    branch.loader_version = loader_match.group(1)
-            elif target_loader == 'fabric':
-                loader_match = re.search(r'fabric_(?:loader|api)_version\s*=\s*["\']?([0-9.]+)["\']?', gradle_content)
-                if loader_match:
-                    branch.loader = 'fabric'
-                    branch.loader_version = loader_match.group(1)
+                    break
 
+            # If target not found, detect any loader via all profiles
             if not branch.loader:
-                if re.search(r'fabric_(?:loader|api)_version\s*=', gradle_content):
-                    branch.loader = 'fabric'
-                elif re.search(r'neo(?:forge)?_version\s*=', gradle_content):
-                    branch.loader = 'neoforge'
-                elif re.search(r'forge_version\s*=', gradle_content):
-                    branch.loader = 'forge'
+                from modforge.loaders import LOADER_PROFILES
+                for ldr_name, ldr_profile in LOADER_PROFILES.items():
+                    for pattern in ldr_profile["gradle_detection_patterns"]:
+                        if re.search(pattern, gradle_content):
+                            branch.loader = ldr_name
+                            break
+                    if branch.loader:
+                        break
 
             if branch.loader and branch.loader != target_loader:
                 branch.validation_error = f"Wrong loader: found {branch.loader}, need {target_loader}"
@@ -213,7 +210,8 @@ class BranchValidator:
                 branch.validation_error = f"Loader mismatch: {branch.loader} != {target_loader}"
                 return False
 
-            if target_loader in ['neoforge', 'forge']:
+            range_format = get_profile(target_loader)["version_range_format"]
+            if range_format == "maven":
                 is_compat = is_version_in_maven_range(self.config.mc_version, version_range)
             else:
                 is_compat = is_version_in_fabric_range(self.config.mc_version, version_range)
@@ -439,10 +437,17 @@ class BranchValidator:
                     else:
                         return False, f"minecraft_version is {found_version}, incompatible with {self.config.mc_version}"
 
-            if not skip_loader_validation and self.config.loader == 'neoforge':
-                neo_match = re.search(r'neo(?:forge)?_version\s*=\s*["\']?([0-9.]+)["\']?', content)
-                if not neo_match:
-                    return False, "neoforge_version not found in gradle.properties"
+            if not skip_loader_validation:
+                loader_profile = get_profile(self.config.loader)
+                if loader_profile.get("require_loader_version_in_gradle"):
+                    found_loader_ver = False
+                    for pattern in loader_profile["gradle_version_patterns"]:
+                        if re.search(pattern, content):
+                            found_loader_ver = True
+                            break
+                    if not found_loader_ver:
+                        display = loader_profile["display_name"]
+                        return False, f"{display} version not found in gradle.properties"
 
             return True, "gradle.properties validation passed"
 

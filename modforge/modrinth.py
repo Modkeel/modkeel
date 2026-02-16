@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 import requests
 
 from modforge.constants import MODRINTH_USER_AGENT
+from modforge.loaders import get_bridge_mods, get_cross_loader_chain
 from modforge.models import ModCompilerConfig
 
 logger = logging.getLogger("modforge")
@@ -20,37 +21,47 @@ class ModrinthClient:
         self.config = config
 
     def is_cross_loader_available(self) -> bool:
-        """Check if Sinytra Connector + Forgified Fabric API are available."""
+        """Check if cross-loader bridge mods are available on Modrinth."""
         if hasattr(self, '_cross_loader_available'):
             return self._cross_loader_available
+
+        fallback_loaders = get_cross_loader_chain(self.config.loader)
+        if not fallback_loaders:
+            self._cross_loader_available = False
+            return False
 
         base_url = "https://api.modrinth.com/v2"
         headers = {"User-Agent": MODRINTH_USER_AGENT}
         mc_version = self.config.mc_version
+        loader = self.config.loader.lower()
 
         available = True
-        for slug in ["connector", "forgified-fabric-api"]:
-            try:
-                resp = requests.get(
-                    f"{base_url}/project/{slug}/version",
-                    params={
-                        "game_versions": f'["{mc_version}"]',
-                        "loaders": '["neoforge"]'
-                    },
-                    headers=headers,
-                    timeout=10
-                )
-                if resp.status_code != 200 or not resp.json():
+        for target_loader in fallback_loaders:
+            bridge_slugs = get_bridge_mods(loader, target_loader)
+            for slug in bridge_slugs:
+                try:
+                    resp = requests.get(
+                        f"{base_url}/project/{slug}/version",
+                        params={
+                            "game_versions": f'["{mc_version}"]',
+                            "loaders": f'["{loader}"]'
+                        },
+                        headers=headers,
+                        timeout=10
+                    )
+                    if resp.status_code != 200 or not resp.json():
+                        available = False
+                        break
+                except Exception:
                     available = False
                     break
-            except Exception:
-                available = False
+            if not available:
                 break
 
         self._cross_loader_available = available
         if not available:
-            print(f"  \u26a0\ufe0f  Cross-loader unavailable: Sinytra Connector or "
-                  f"Forgified Fabric API not found for MC {mc_version}")
+            print(f"  \u26a0\ufe0f  Cross-loader unavailable: bridge mods "
+                  f"not found for MC {mc_version}")
         else:
             print(f"  \u2705 Cross-loader available for MC {mc_version}")
         return available
