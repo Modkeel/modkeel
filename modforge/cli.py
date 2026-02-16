@@ -16,6 +16,15 @@ from modforge.models import CompilationResult, FailureType, ModCompilerConfig
 from modforge.pipeline import Pipeline
 from modforge.utils import setup_logging, setup_windows_console
 
+BANNER = r"""    __  ___          ______
+   /  |/  /___  ____/ / __/___  _________ ____
+  / /|_/ / __ \/ __  / /_/ __ \/ ___/ __ `/ _ \
+ / /  / / /_/ / /_/ / __/ /_/ / /  / /_/ /  __/
+/_/  /_/\____/\__,_/_/  \____/_/   \__, /\___/
+                                  /____/"""
+
+TAGLINE = "Compile the mods Mojang left behind"
+
 setup_windows_console()
 console = Console()
 app = typer.Typer(
@@ -27,7 +36,8 @@ app = typer.Typer(
 
 def version_callback(value: bool):
     if value:
-        console.print(f"ModForge v{MODFORGE_VERSION}")
+        console.print(f"[bold cyan]{BANNER}[/bold cyan]")
+        console.print(f"\n  [bold]ModForge v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n")
         raise typer.Exit()
 
 
@@ -125,10 +135,11 @@ def compile(
 
     console.print(
         Panel(
-            f"[bold]ModForge v{MODFORGE_VERSION}[/bold]\n"
-            f"MC {mc_version} | {loader.capitalize()} {loader_version}\n"
-            f"{len(repo_urls)} repositories loaded from {repos_file}",
-            title="Compilation",
+            f"[bold cyan]{BANNER}[/bold cyan]\n\n"
+            f"  [bold]v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n\n"
+            f"  MC {mc_version} | {loader.capitalize()} {loader_version}\n"
+            f"  {len(repo_urls)} repositories loaded from {repos_file}",
+            title="ModForge",
             border_style="blue",
         )
     )
