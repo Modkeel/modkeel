@@ -32,6 +32,13 @@ temp_repos/
 compilation_report*.txt
 out/
 
+# Internal docs (kept locally, tracked in ModForge-Private)
+CLAUDE.md
+DESIGN.md
+ROADMAP.md
+IDEAS.md
+docs/
+
 # Virtual environments
 venv/
 .venv/
