@@ -1,8 +1,8 @@
-# Minecraft Mod Auto-Compiler
+# ModForge - Minecraft Mod Auto-Compiler
 
-Automatically detects, compiles, and installs Minecraft mods from GitHub repositories for specific versions and mod loaders.
+Automatically finds, compiles, and verifies unofficial Minecraft mod forks for versions the original authors don't support.
 
-## 🎯 Purpose
+## Purpose
 
 This tool solves a specific problem in the Minecraft modding community: **getting mods for intermediate patch versions** (like 1.21.10) that official mod authors don't support.
 
@@ -15,58 +15,45 @@ This tool solves a specific problem in the Minecraft modding community: **gettin
 - You have to manually find, clone, compile, and validate each one
 
 ### The Solution:
-This script **automatically**:
-1. ✅ Finds compatible branches from community forks
-2. ✅ Validates compatibility before compiling
-3. ✅ Compiles mods from source
-4. ✅ Verifies the compiled JAR works
-5. ✅ Installs directly to your Minecraft instance
-6. ✅ Generates detailed reports of success/failures
+ModForge **automatically**:
+1. Checks Modrinth for pre-compiled JARs first
+2. Finds compatible forks and branches on GitHub
+3. Validates compatibility before compiling
+4. Compiles mods from source with Gradle
+5. Verifies the compiled JAR works (including Docker server testing)
+6. Installs directly to your Minecraft instance
+7. Generates detailed reports of success/failures
 
 ---
 
-## 📋 Requirements
+## Requirements
 
 ### System Requirements:
-- **Python 3.8+**
+- **Python 3.10+**
 - **Git** (must be in PATH)
 - **Java Development Kit (JDK) 17 or 21** (required for Gradle compilation)
-
-### Python Dependencies:
-```bash
-pip install requests toml
-```
+- **Docker** (optional, for headless server testing with `--docker-test`)
 
 ### Verify Requirements:
 ```bash
-# Check Python
-python --version  # Should be 3.8+
-
-# Check Git
+python --version  # Should be 3.10+
 git --version
-
-# Check Java
-java -version  # Should be 17 or 21
-
-# Check Gradle (will be downloaded automatically by gradlew)
+java -version     # Should be 17 or 21
 ```
 
 ---
 
-## 🚀 Installation
+## Installation
 
-1. **Download the script:**
 ```bash
-git clone <this-repo>
-cd mod-auto-compiler
+git clone https://github.com/juanzab/ModForge.git
+cd ModForge
+pip install -e .
 ```
 
-2. **Install Python dependencies:**
-```bash
-pip install requests toml
-```
+This installs the `modforge` CLI command and all dependencies.
 
-3. **Create your repository list:**
+### Create your repository list:
 ```bash
 # Copy the example
 cp repos.txt my_mods.txt
@@ -77,68 +64,84 @@ nano my_mods.txt  # or notepad on Windows
 
 ---
 
-## 🔑 GitHub API Token (Recommended)
+## GitHub API Token (Recommended)
 
 Without a token, you're limited to **60 API requests per hour**. With a token, you get **5000/hour**.
 
 ### How to Generate a Token:
 
 1. Go to: https://github.com/settings/tokens
-2. Click **"Generate new token"** → **"Tokens (classic)"**
-3. Name it: `Mod Auto-Compiler`
+2. Click **"Generate new token"** -> **"Tokens (classic)"**
+3. Name it: `ModForge`
 4. Set expiration: `90 days` (or no expiration)
 5. Select scopes:
-   - ✅ **`public_repo`** (read public repositories)
+   - **`public_repo`** (read public repositories)
    - That's it! No other permissions needed.
 6. Click **"Generate token"**
 7. **Copy the token immediately** (you won't see it again!)
-8. Save it somewhere safe
-
-### Token Format:
-```
-ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+8. Save it to a file: `echo "ghp_xxx..." > github_token.txt`
 
 ---
 
-## 📝 Usage
+## Usage
 
-### Basic Command:
+### Compile Mods (main command):
 ```bash
-python mod_auto_compiler.py \
+modforge compile repos.txt \
   --mc-version 1.21.10 \
   --loader neoforge \
   --loader-version 64 \
-  --instance "C:\Users\Juan\AppData\Roaming\.minecraft\instances\NeoCreate_1.21.10" \
-  repos.txt
+  --github-token "$(cat github_token.txt)"
 ```
 
-### With GitHub Token (Recommended):
+### Compile and Install to Instance:
 ```bash
-python mod_auto_compiler.py \
+modforge compile repos.txt \
   --mc-version 1.21.10 \
   --loader neoforge \
   --loader-version 64 \
-  --instance "C:\Users\Juan\AppData\Roaming\.minecraft\instances\NeoCreate_1.21.10" \
-  --github-token ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  repos.txt
+  --instance "/path/to/minecraft/instance" \
+  --github-token "$(cat github_token.txt)"
 ```
 
-### With Report Output:
+### Compile and Test in Docker:
 ```bash
-python mod_auto_compiler.py \
+modforge compile repos.txt \
   --mc-version 1.21.10 \
   --loader neoforge \
   --loader-version 64 \
-  --instance "C:\Users\Juan\AppData\Roaming\.minecraft\instances\NeoCreate_1.21.10" \
-  --github-token ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  --docker-test \
+  --github-token "$(cat github_token.txt)"
+```
+
+### Search Without Compiling:
+```bash
+modforge search "Create" \
+  --mc-version 1.21.10 \
+  --loader neoforge \
+  --github-token "$(cat github_token.txt)"
+```
+
+### Check Status:
+```bash
+modforge status
+```
+
+### Save Report:
+```bash
+modforge compile repos.txt \
+  --mc-version 1.21.10 \
+  --loader neoforge \
+  --loader-version 64 \
   --output-report compilation_report.txt \
-  repos.txt
+  --github-token "$(cat github_token.txt)"
 ```
+
+> **Legacy usage:** `python mod_auto_compiler.py ...` still works but is deprecated. Use `modforge compile` instead.
 
 ---
 
-## 📁 Repository File Format
+## Repository File Format
 
 The `repos.txt` file contains one repository URL per line.
 
@@ -170,130 +173,59 @@ https://github.com/active/repo
 
 ---
 
-## 🔍 How It Works
+## How It Works
 
-### 1. Branch Detection & Scoring
-The script analyzes all branches in a repository and scores them:
+### Pipeline
+For each repository in your list, ModForge runs:
 
-**High Score (Highest Priority):**
-- Exact version match: `1.21.10` in branch name → +1000 points
-- Partial version match: `1.21` in branch name → +500 points
-- Loader mention: `neoforge` in branch name → +200 points
-
-**Medium Score:**
-- Common patterns: `mc-1.21` → +100 points
-- Development branches: `dev`, `feature` → +50 points
-
-**Low Score:**
-- Main/master branches → +10 points
-
-**Penalties:**
-- Branches older than 6 months → -100 points
-
-### 2. Validation Steps (Per Branch)
-For each candidate branch, the script:
-
-1. **Clones the repository** (shallow clone, single branch)
-2. **Validates `gradle.properties`**:
-   - Checks `minecraft_version = 1.21.10`
-   - Checks `neoforge_version` exists (for NeoForge)
-3. **Validates `build.gradle`**:
-   - Confirms target version is mentioned
-4. **Compiles with Gradle**:
-   - Runs `./gradlew build --no-daemon`
-   - Timeout: 10 minutes
-5. **Validates compiled JAR**:
-   - Extracts and parses `mods.toml`
-   - Verifies Minecraft version dependency
-   - Checks JAR size (>10KB minimum)
-6. **Installs to mods folder** if all checks pass
-
-### 3. Fallback Strategy
-If the first branch fails, the script tries the next one in order of score. It continues until:
-- ✅ A branch compiles successfully, OR
-- ❌ All relevant branches have been tried
+1. **Modrinth Check** - Search for a pre-compiled JAR on Modrinth first (skip compilation if found)
+2. **Fork Discovery** - Search GitHub for compatible forks and independent ports
+3. **Branch Scoring** - Rank branches by version match, loader match, and freshness
+4. **Pre-validation** - Check `gradle.properties` via GitHub API before cloning (saves time)
+5. **Cross-loader Fallback** - If no NeoForge match, try Fabric forks via Sinytra Connector
+6. **Compile** - Clone, run `gradlew build`, validate output JAR
+7. **Multi-pass Dependencies** - Retry failed mods with mavenLocal() after other mods succeed
+8. **Docker Testing** (opt-in) - Boot a headless MC server to verify mods load correctly
 
 ---
 
-## 📊 Output & Reports
+## Command-Line Reference
 
-### Console Output:
-```
-================================================================================
-📦 Processing: https://github.com/PepperCode1/Continuity
-================================================================================
-  📍 Repository: PepperCode1/Continuity
-  ⭐ Stars: 1234 | 🍴 Forks: 56
-  🔍 Fetching branches...
-  📊 Found 15 branches
-  🎯 Identified 5 relevant branches
-
-  🌿 Trying branch [1/5]: 1.21.10/dev (score: 1200)
-    📥 Cloning...
-    🔍 Validating gradle.properties...
-    ✅ gradle.properties validation passed
-    🔍 Validating build.gradle...
-    ✅ build.gradle checked (version in properties)
-    🔨 Compiling...
-    ✅ Compilation successful
-    🔍 Validating JAR...
-    ✅ JAR validation passed
-    📋 Mod: continuity v3.0.0
-    💾 Installed to: C:\...\mods\continuity-3.0.0.jar
-
-  ✅ SUCCESS: continuity v3.0.0 from branch '1.21.10/dev'
-```
-
-### Final Report:
-```
-================================================================================
-📊 COMPILATION REPORT
-================================================================================
-
-✅ Successful: 8/10
-❌ Failed: 2/10
-
---------------------------------------------------------------------------------
-✅ SUCCESSFULLY COMPILED MODS:
---------------------------------------------------------------------------------
-
-📦 https://github.com/PepperCode1/Continuity
-   🌿 Branch: 1.21.10/dev
-   📋 Mod: continuity v3.0.0
-   💾 JAR: C:\...\mods\continuity-3.0.0.jar
-
-[... more successful mods ...]
-
---------------------------------------------------------------------------------
-❌ FAILED COMPILATIONS:
---------------------------------------------------------------------------------
-
-📦 https://github.com/SomeAuthor/BrokenMod
-   ❌ Error: All 3 branches failed compilation/validation
-
-================================================================================
-🎯 Target: Minecraft 1.21.10 with Neoforge 64
-📁 Install Path: C:\...\mods
-================================================================================
-```
-
----
-
-## 🛠️ Command-Line Arguments
+### `modforge compile`
 
 | Argument | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `repos_file` | ✅ Yes | Text file with repository URLs | `repos.txt` |
-| `--mc-version` | ✅ Yes | Minecraft version | `1.21.10` |
-| `--loader` | ✅ Yes | Mod loader type | `neoforge`, `forge`, `fabric` |
-| `--loader-version` | ✅ Yes | Loader version | `64` |
-| `--instance` | ✅ Yes | Minecraft instance path | `C:\...\instances\MyInstance` |
-| `--github-token` | ❌ No | GitHub API token | `ghp_xxxxx` |
-| `--output-report` | ❌ No | Report file path | `report.txt` |
+| `repos_file` | Yes | Text file with repository URLs | `repos.txt` |
+| `--mc-version`, `-m` | Yes | Minecraft version | `1.21.10` |
+| `--loader`, `-l` | Yes | Mod loader type | `neoforge`, `forge`, `fabric` |
+| `--loader-version`, `-lv` | Yes | Loader version | `64` |
+| `--instance`, `-i` | No | Minecraft instance path | `/path/to/instance` |
+| `--output-dir`, `-o` | No | Output directory (default: `out`) | `build/mods` |
+| `--github-token`, `-t` | No | GitHub API token | `ghp_xxxxx` |
+| `--strict` | No | Require exact MC version match | |
+| `--no-cross-loader` | No | Disable Sinytra Connector fallback | |
+| `--docker-test` | No | Test mods in Docker server | |
+| `--docker-timeout` | No | Docker timeout seconds (default: 180) | `300` |
+| `--output-report` | No | Save report to file | `report.txt` |
+| `--log-file` | No | Write log to file | `modforge.log` |
+| `--no-share` | No | Skip anonymous data sharing | |
+
+### `modforge search`
+
+| Argument | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `query` | Yes | Mod name to search | `Create` |
+| `--mc-version`, `-m` | Yes | Minecraft version | `1.21.10` |
+| `--loader`, `-l` | No | Mod loader (default: neoforge) | `fabric` |
+| `--github-token`, `-t` | No | GitHub API token | `ghp_xxxxx` |
+
+### `modforge status`
+
+No arguments. Shows version, config, cached loaders, and known NeoForge versions.
 
 ---
 
-## ⚠️ Troubleshooting
+## Troubleshooting
 
 ### "gradle.properties not found"
 **Cause:** The branch doesn't have Gradle build files.  
@@ -321,20 +253,17 @@ If the first branch fails, the script tries the next one in order of score. It c
 
 ---
 
-## 🎓 Advanced Usage
-
-### Custom Branch Naming Patterns
-If you're working with forks that use unusual branch names, you can modify the `score_branch()` function in the script to match your patterns.
+## Advanced Usage
 
 ### Multiple Minecraft Versions
-Run the script multiple times with different `--mc-version` and `--instance` arguments:
+Run the compile command multiple times with different `--mc-version` and `--instance` arguments:
 
 ```bash
 # For 1.21.10
-python mod_auto_compiler.py --mc-version 1.21.10 --instance "instances/NeoCreate_1.21.10" repos.txt
+modforge compile repos.txt -m 1.21.10 -l neoforge -lv 64 -i "instances/NeoCreate_1.21.10"
 
 # For 1.21.11
-python mod_auto_compiler.py --mc-version 1.21.11 --instance "instances/NeoCreate_1.21.11" repos.txt
+modforge compile repos.txt -m 1.21.11 -l neoforge -lv 65 -i "instances/NeoCreate_1.21.11"
 ```
 
 ### Partial Repository Lists
@@ -342,46 +271,37 @@ You can split your repositories into multiple files:
 
 ```bash
 # Essential mods
-python mod_auto_compiler.py [...] essential_mods.txt
+modforge compile essential_mods.txt -m 1.21.10 -l neoforge -lv 64
 
 # Optional mods
-python mod_auto_compiler.py [...] optional_mods.txt
+modforge compile optional_mods.txt -m 1.21.10 -l neoforge -lv 64
 ```
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Found a bug? Have a feature request? Want to improve branch detection heuristics?
+Found a bug? Have a feature request?
 
 1. Fork the repository
 2. Create a feature branch
 3. Submit a pull request
 
+Issues: https://github.com/juanzab/ModForge/issues
+
 ---
 
-## 📜 License
+## License
 
 MIT License - Feel free to use, modify, and distribute.
 
 ---
 
-## 🙏 Acknowledgments
+## Tips
 
-- Minecraft modding community for creating amazing mods
-- GitHub for providing the API
-- NeoForge/Forge teams for maintaining the mod loader
-
----
-
-## 💡 Tips
-
-1. **Start with a small repository list** to test the script
+1. **Start with a small repository list** to test ModForge
 2. **Use GitHub tokens** to avoid rate limits
-3. **Check the report** to see which mods failed and why
-4. **Manually compile stubborn mods** if the script can't handle them
-5. **Keep your repos.txt updated** as new forks become available
-
----
-
-**Happy Modding! 🎮**
+3. **Use `modforge search`** to check Modrinth and GitHub before compiling
+4. **Check the report** to see which mods failed and why
+5. **Use `--docker-test`** to verify mods actually load in a server
+6. **Keep your repos.txt updated** as new forks become available

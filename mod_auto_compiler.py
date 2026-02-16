@@ -15,8 +15,16 @@ NOTE: This file is a backwards-compatible shim. All logic has been moved
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+warnings.warn(
+    "mod_auto_compiler.py is deprecated. Use 'modforge compile' instead. "
+    "Install with: pip install -e . (from the ModForge directory)",
+    DeprecationWarning,
+    stacklevel=1,
+)
 
 # ============================================================================
 # IMPORTS FROM modforge PACKAGE (re-exported for backwards compatibility)
