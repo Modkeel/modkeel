@@ -8,18 +8,15 @@ WITHOUT requiring Docker to be installed.
 import hashlib
 import json
 import os
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from mod_auto_compiler import (
-    ModAutoCompiler, ModCompilerConfig, CompilationResult,
-    DockerTestCache, FailureType,
+from mod_auto_compiler import ModAutoCompiler
+from modforge.models import (
+    ModCompilerConfig, CompilationResult, DockerTestCache, FailureType,
 )
 
 

@@ -6,18 +6,13 @@ to prevent regression on the substring-matching bugs fixed in Phase 1.
 """
 
 import re
-import sys
-import os
 import unittest
 from unittest.mock import MagicMock
 from pathlib import Path
 
-# Add parent dir to path so we can import the module
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from mod_auto_compiler import (
-    ModAutoCompiler, ModCompilerConfig, BranchCandidate, CompilationResult,
-    FailureType
+from mod_auto_compiler import ModAutoCompiler
+from modforge.models import (
+    ModCompilerConfig, BranchCandidate, CompilationResult, FailureType,
 )
 
 

@@ -6,27 +6,19 @@ Java detection, and report submission logic.
 import hashlib
 import hmac as hmac_lib
 import json
-import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-# Insert project root so we can import the monolith
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from mod_auto_compiler import (
-    CompilationResult,
-    FailureType,
-    ModAutoCompiler,
-    ModCompilerConfig,
-    ModForgeConfig,
-    MODFORGE_HMAC_KEY,
-    MODFORGE_VERSION,
-    prompt_sharing_preference,
-    sign_report,
+from mod_auto_compiler import ModAutoCompiler
+from modforge.config import ModForgeConfig, prompt_sharing_preference
+from modforge.constants import MODFORGE_HMAC_KEY, MODFORGE_VERSION
+from modforge.crowdsource import sign_report
+from modforge.models import (
+    CompilationResult, FailureType, ModCompilerConfig,
 )
 
 
