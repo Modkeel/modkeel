@@ -24,12 +24,14 @@ VHS also requires [ttyd](https://github.com/tsl0922/ttyd) and [ffmpeg](https://f
 # Generate all GIFs
 vhs demo/status.tape
 vhs demo/search.tape
+vhs demo/get.tape
 vhs demo/compile.tape
 
 # Or generate one at a time
 vhs demo/status.tape    # Fast, no token needed
-vhs demo/search.tape    # Fast, works without token (Modrinth only)
-vhs demo/compile.tape   # Slow, needs github_token.txt and repos.txt
+vhs demo/search.tape    # Fast, no token needed (Modrinth only)
+vhs demo/get.tape       # Fast, no token needed (downloads from Modrinth)
+vhs demo/compile.tape   # Slow, needs saved token and repos.txt
 ```
 
 ## Tape Files
@@ -37,8 +39,9 @@ vhs demo/compile.tape   # Slow, needs github_token.txt and repos.txt
 | File | Description | Requirements |
 |------|-------------|-------------|
 | `status.tape` | Shows `modforge --version` and `modforge status` | None |
-| `search.tape` | Shows `modforge search` with Rich tables | Optional: GitHub token |
-| `compile.tape` | Shows full compilation pipeline | `github_token.txt`, `repos.txt` |
+| `search.tape` | Smart search: Modrinth found, skips fork search | None |
+| `get.tape` | One-command download from Modrinth | None |
+| `compile.tape` | Full compilation pipeline | Saved token, `demo_repos.txt` |
 
 ## Output
 
