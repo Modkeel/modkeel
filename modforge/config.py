@@ -2,7 +2,7 @@
 
 import uuid
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import toml
 
@@ -63,6 +63,19 @@ class ModForgeConfig:
     @property
     def was_prompted(self) -> bool:
         return self._data.get("_prompted", False)
+
+    @property
+    def github_token(self) -> Optional[str]:
+        """Saved GitHub Personal Access Token."""
+        return self._data.get("github_token")
+
+    @github_token.setter
+    def github_token(self, value: Optional[str]) -> None:
+        if value:
+            self._data["github_token"] = value
+        else:
+            self._data.pop("github_token", None)
+        self._save()
 
 
 def prompt_sharing_preference(config: ModForgeConfig) -> str:

@@ -35,6 +35,23 @@ app = typer.Typer(
 )
 
 
+def resolve_github_token(
+    explicit: Optional[str], modforge_cfg: ModForgeConfig,
+) -> Optional[str]:
+    """Resolve GitHub token: CLI flag > saved config. Saves new tokens."""
+    if explicit:
+        if explicit != modforge_cfg.github_token:
+            modforge_cfg.github_token = explicit
+            console.print(
+                "[dim]  GitHub token saved to ~/.modforge/config.toml[/dim]"
+            )
+        return explicit
+    saved = modforge_cfg.github_token
+    if saved:
+        console.print("[dim]  Using saved GitHub token.[/dim]")
+    return saved
+
+
 def version_callback(value: bool):
     if value:
         console.print(f"[bold cyan]{BANNER}[/bold cyan]")
@@ -144,8 +161,9 @@ def compile(
         )
     )
 
-    # Load persistent config
+    # Load persistent config + resolve token
     modforge_cfg = ModForgeConfig()
+    github_token = resolve_github_token(github_token, modforge_cfg)
     if modforge_cfg.is_first_run and not modforge_cfg.was_prompted:
         prompt_sharing_preference(modforge_cfg)
 
@@ -236,6 +254,10 @@ def search(
     """Search Modrinth and GitHub for a mod. Offers to download or compile."""
     from modforge.github import GitHubClient
     from modforge.modrinth import ModrinthClient
+
+    # Resolve token
+    modforge_cfg = ModForgeConfig()
+    github_token = resolve_github_token(github_token, modforge_cfg)
 
     console.print(
         Panel(
@@ -417,7 +439,8 @@ def search(
             console.print("[yellow]No GitHub forks found.[/yellow]")
     else:
         console.print(
-            "\n[dim]Tip: Use --github-token to also search GitHub forks.[/dim]"
+            "\n[dim]Tip: Run 'modforge token --set TOKEN' to enable "
+            "GitHub fork search.[/dim]"
         )
 
 
@@ -463,6 +486,10 @@ def get(
     from modforge.validation import BranchValidator
 
     setup_logging()
+
+    # Resolve token
+    modforge_cfg = ModForgeConfig()
+    github_token = resolve_github_token(github_token, modforge_cfg)
 
     # Validate loader
     if loader.lower() not in ALL_LOADERS:
@@ -519,7 +546,8 @@ def get(
     if not github_token:
         console.print(
             "\n[red]Not found on Modrinth.[/red] "
-            "Use [bold]-t TOKEN[/bold] to search GitHub forks."
+            "Set a GitHub token to search forks:\n"
+            "  [bold]modforge token --set ghp_YOUR_TOKEN[/bold]"
         )
         raise typer.Exit(1)
 
@@ -624,6 +652,49 @@ def get(
 
 
 @app.command()
+def token(
+    set_token: Optional[str] = typer.Option(
+        None, "--set", help="Save a GitHub Personal Access Token.",
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove saved token.",
+    ),
+    show: bool = typer.Option(
+        False, "--show", help="Show the full saved token (unmasked).",
+    ),
+):
+    """Manage saved GitHub Personal Access Token."""
+    cfg = ModForgeConfig()
+
+    if set_token:
+        cfg.github_token = set_token
+        console.print("[green]GitHub token saved.[/green]")
+        return
+
+    if clear:
+        cfg.github_token = None
+        console.print("[green]GitHub token removed.[/green]")
+        return
+
+    saved = cfg.github_token
+    if not saved:
+        console.print(
+            "No GitHub token saved.\n\n"
+            "  Set one with: [bold]modforge token --set ghp_YOUR_TOKEN[/bold]\n"
+            "  Or pass it:   [bold]modforge get ... -t ghp_YOUR_TOKEN[/bold] "
+            "(auto-saves)"
+        )
+        return
+
+    if show:
+        console.print(f"GitHub token: [bold]{saved}[/bold]")
+    else:
+        masked = saved[:4] + "****" + saved[-4:] if len(saved) > 8 else "****"
+        console.print(f"GitHub token: [bold]{masked}[/bold]")
+        console.print("[dim]  Use --show to reveal full token.[/dim]")
+
+
+@app.command()
 def status():
     """Show ModForge status: version, config, and Docker cache info."""
     from modforge.models import DockerTestCache
@@ -654,6 +725,15 @@ def status():
         cfg = ModForgeConfig()
         table.add_row("Client ID", cfg.client_id[:8] + "...")
         table.add_row("Data sharing", str(cfg.sharing))
+        saved_token = cfg.github_token
+        if saved_token:
+            masked = (
+                saved_token[:4] + "****" + saved_token[-4:]
+                if len(saved_token) > 8 else "****"
+            )
+            table.add_row("GitHub token", masked)
+        else:
+            table.add_row("GitHub token", "[dim]not set[/dim]")
 
     console.print(table)
 
