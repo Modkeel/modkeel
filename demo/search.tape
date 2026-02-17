@@ -11,7 +11,7 @@ Set Height 800
 Set Padding 20
 Set TypingSpeed 50ms
 
-# Search for Create on MC 1.21.10 - shows Modrinth results + GitHub forks with trust analysis
-Type "modforge search 'Create' -m 1.21.10 -l neoforge -t $(cat github_token.txt)"
+# Search for JEI on MC 1.21.1 - shows Modrinth match + pre-filtered GitHub forks
+Type "modforge search 'JEI' -m 1.21.1 -l neoforge -t $(cat github_token.txt)"
 Enter
 Sleep 30s
