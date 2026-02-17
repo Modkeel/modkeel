@@ -2,10 +2,11 @@
 
 import json
 import hashlib
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from modforge.loaders import ALL_LOADERS, normalize_loader
 
@@ -181,3 +182,46 @@ class DockerTestCache:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._save()
+
+
+# ── Recommendation Models ────────────────────────────────────────────────────
+
+
+@dataclass
+class ScannedMod:
+    """A mod extracted from a JAR file in the user's mods folder."""
+    jar_path: str
+    jar_filename: str
+    mod_id: str
+    mod_name: str
+    mod_version: str
+    declared_loader: Optional[str]
+    declared_mc_range: Optional[str]
+    declared_mc_version: Optional[str]
+    sha1_hash: str
+    is_library: bool = False
+
+
+@dataclass
+class ModAvailability:
+    """What Modrinth knows about a mod's availability across versions/loaders."""
+    mod_id: str
+    mod_name: str
+    modrinth_slug: Optional[str] = None
+    modrinth_project_id: Optional[str] = None
+    available_combos: Set[Tuple[str, str]] = field(default_factory=set)
+    found_on_modrinth: bool = False
+    downloads: int = 0
+
+
+@dataclass
+class RecommendationResult:
+    """A scored recommendation for a (mc_version, loader) combination."""
+    mc_version: str
+    loader: str
+    available_mods: List[str] = field(default_factory=list)
+    missing_mods: List[str] = field(default_factory=list)
+    unknown_mods: List[str] = field(default_factory=list)
+    coverage_pct: float = 0.0
+    total_coverage_pct: float = 0.0
+    score: float = 0.0

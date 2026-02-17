@@ -20,4 +20,7 @@ from modforge.loaders import (  # noqa: F401
     normalize_loader,
 )
 
+from modforge.recommend import RecommendationEngine  # noqa: F401
+from modforge.scanner import detect_mods_folder, scan_mods_folder  # noqa: F401
+
 __version__ = MODFORGE_VERSION
