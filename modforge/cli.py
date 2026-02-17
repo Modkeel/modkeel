@@ -216,8 +216,24 @@ def search(
         None, "--github-token", "-t",
         help="GitHub Personal Access Token.",
     ),
+    output_dir: str = typer.Option(
+        "out", "--output-dir", "-o",
+        help="Directory for downloaded/compiled JARs.",
+    ),
+    instance: Optional[str] = typer.Option(
+        None, "--instance", "-i",
+        help="Path to Minecraft instance directory.",
+    ),
+    loader_version: Optional[str] = typer.Option(
+        None, "--loader-version", "-lv",
+        help="Mod loader version (required for compilation).",
+    ),
+    no_prompt: bool = typer.Option(
+        False, "--no-prompt",
+        help="Skip interactive prompts (for scripts/CI).",
+    ),
 ):
-    """Search Modrinth and GitHub for a mod without compiling."""
+    """Search Modrinth and GitHub for a mod. Offers to download or compile."""
     from modforge.github import GitHubClient
     from modforge.modrinth import ModrinthClient
 
@@ -230,13 +246,14 @@ def search(
         )
     )
 
-    # Minimal config for search
+    # Minimal config for search (use loader_version="0" as placeholder)
     config = ModCompilerConfig(
         mc_version=mc_version,
         loader=loader.lower(),
-        loader_version="0",
+        loader_version=loader_version or "0",
         github_token=github_token,
-        output_dir="out",
+        output_dir=output_dir,
+        instance_path=instance,
     )
 
     # Modrinth search
@@ -258,9 +275,29 @@ def search(
         table.add_row("File", result["filename"])
         if result.get("required_deps"):
             table.add_row("Dependencies", str(len(result["required_deps"])))
-    else:
-        table.add_row("Status", "[yellow]Not found on Modrinth[/yellow]")
+        console.print(table)
 
+        # Mod is on Modrinth -- skip fork search, offer download
+        is_interactive = not no_prompt and console.is_terminal
+        if is_interactive:
+            download = typer.confirm(
+                "\n  Available on Modrinth. Download?", default=True
+            )
+            if download:
+                jar = modrinth.download_modrinth_mod(
+                    result["slug"], mc_version, loader.lower()
+                )
+                if jar:
+                    modrinth.download_modrinth_deps(result)
+                    console.print(
+                        f"\n[green]Downloaded to {output_dir}/[/green]"
+                    )
+                else:
+                    console.print("[red]Download failed.[/red]")
+        return
+
+    # Not found on Modrinth
+    table.add_row("Status", "[yellow]Not found on Modrinth[/yellow]")
     console.print(table)
 
     # GitHub fork search with pre-filtering
@@ -317,6 +354,55 @@ def search(
             console.print(fork_table)
 
             if validated_forks:
+                # Offer compilation if interactive and loader_version provided
+                is_interactive = not no_prompt and console.is_terminal
+                if is_interactive and loader_version:
+                    compile_it = typer.confirm(
+                        "\n  Compile best fork?", default=False
+                    )
+                    if compile_it:
+                        best_fork = validated_forks[0]
+                        best_branch = best_fork["_best_branch"]
+                        fork_name = best_fork["fork"]["full_name"]
+                        repo_url = f"https://github.com/{fork_name}"
+
+                        full_config = ModCompilerConfig(
+                            mc_version=mc_version,
+                            loader=loader.lower(),
+                            loader_version=loader_version,
+                            github_token=github_token,
+                            output_dir=output_dir,
+                            instance_path=instance,
+                        )
+                        pipeline = Pipeline(full_config)
+                        pipeline.temp_dir = __import__("tempfile").mkdtemp(
+                            prefix="mod_compiler_"
+                        )
+                        try:
+                            comp_result = pipeline.clone_and_compile(
+                                repo_url,
+                                specific_branch=best_branch.name,
+                                skip_modrinth=True,
+                            )
+                            if comp_result.success:
+                                console.print(
+                                    f"\n[green]Compiled {comp_result.mod_name} "
+                                    f"v{comp_result.mod_version} to "
+                                    f"{output_dir}/[/green]"
+                                )
+                            else:
+                                console.print(
+                                    f"\n[red]Compilation failed:[/red] "
+                                    f"{comp_result.error}"
+                                )
+                        finally:
+                            import shutil
+                            if pipeline.temp_dir:
+                                shutil.rmtree(
+                                    pipeline.temp_dir, ignore_errors=True
+                                )
+                        return
+
                 console.print(
                     "\n[dim]  Pre-filtered via gradle.properties. "
                     "Use 'modforge compile' to build and "
@@ -333,6 +419,208 @@ def search(
         console.print(
             "\n[dim]Tip: Use --github-token to also search GitHub forks.[/dim]"
         )
+
+
+@app.command()
+def get(
+    query: str = typer.Argument(
+        ..., help="Mod name (e.g., 'JEI', 'Create')."
+    ),
+    mc_version: str = typer.Option(
+        ..., "--mc-version", "-m", help="Minecraft version (e.g., 1.21.1)."
+    ),
+    loader: str = typer.Option(
+        "neoforge", "--loader", "-l", help="Mod loader type.",
+        case_sensitive=False,
+    ),
+    loader_version: Optional[str] = typer.Option(
+        None, "--loader-version", "-lv",
+        help="Mod loader version (required for fork compilation).",
+    ),
+    github_token: Optional[str] = typer.Option(
+        None, "--github-token", "-t",
+        help="GitHub Personal Access Token.",
+    ),
+    output_dir: str = typer.Option(
+        "out", "--output-dir", "-o",
+        help="Directory for downloaded/compiled JARs.",
+    ),
+    instance: Optional[str] = typer.Option(
+        None, "--instance", "-i",
+        help="Path to Minecraft instance directory.",
+    ),
+    docker_test: bool = typer.Option(
+        False, "--docker-test",
+        help="Test compiled mod in Docker after compilation.",
+    ),
+):
+    """Find and download/compile a mod in one step."""
+    import shutil
+    import tempfile
+
+    from modforge.github import GitHubClient
+    from modforge.modrinth import ModrinthClient
+    from modforge.validation import BranchValidator
+
+    setup_logging()
+
+    # Validate loader
+    if loader.lower() not in ALL_LOADERS:
+        console.print(
+            f"[red]Error:[/red] Invalid loader '{loader}'. "
+            f"Must be one of: {', '.join(ALL_LOADERS)}"
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        Panel(
+            f"[bold cyan]{BANNER}[/bold cyan]\n\n"
+            f"  [bold]v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n\n"
+            f"  [bold]Get:[/bold] {query}\n"
+            f"  MC {mc_version} | {loader.capitalize()}"
+            + (f" {loader_version}" if loader_version else ""),
+            title="ModForge Get",
+            border_style="green",
+        )
+    )
+
+    # Step 1: Check Modrinth
+    config = ModCompilerConfig(
+        mc_version=mc_version,
+        loader=loader.lower(),
+        loader_version=loader_version or "0",
+        github_token=github_token,
+        output_dir=output_dir,
+        instance_path=instance,
+    )
+
+    modrinth = ModrinthClient(config)
+    result = modrinth.check_modrinth(query)
+
+    if result:
+        jar = modrinth.download_modrinth_mod(
+            result["slug"], mc_version, loader.lower()
+        )
+        if jar:
+            modrinth.download_modrinth_deps(result)
+            console.print(
+                f"\n[green]Done! {result['title']} "
+                f"v{result['version_number']} downloaded to "
+                f"{output_dir}/[/green]"
+            )
+            return
+        else:
+            console.print(
+                "[yellow]Modrinth download failed, "
+                "trying GitHub forks...[/yellow]"
+            )
+
+    # Step 2: Search GitHub forks
+    if not github_token:
+        console.print(
+            "\n[red]Not found on Modrinth.[/red] "
+            "Use [bold]-t TOKEN[/bold] to search GitHub forks."
+        )
+        raise typer.Exit(1)
+
+    console.print("\n[bold]Searching GitHub forks...[/bold]")
+    github = GitHubClient(config)
+    forks = github.search_compatible_repos(query, query, False)
+
+    if not forks:
+        console.print(
+            f"[red]Not found anywhere.[/red] No Modrinth results and "
+            f"no GitHub forks for '{query}'."
+        )
+        raise typer.Exit(1)
+
+    # Pre-filter forks
+    validator = BranchValidator(github, config)
+    validated_forks = []
+
+    for fork in forks[:10]:
+        fork_info = fork["fork"]
+        fork_owner = fork_info["owner"]
+        fork_repo = fork_info["repo"]
+
+        branches = github.get_branches(fork_owner, fork_repo)
+        if not branches:
+            continue
+
+        compatible = validator.pre_validate_branches(
+            fork_owner, fork_repo, branches
+        )
+        if compatible:
+            best = max(compatible, key=lambda b: validator.score_branch(b))
+            fork["_best_branch"] = best
+            validated_forks.append(fork)
+
+    if not validated_forks:
+        console.print(
+            f"[red]No compatible forks found[/red] for "
+            f"MC {mc_version} + {loader}."
+        )
+        raise typer.Exit(1)
+
+    best_fork = validated_forks[0]
+    best_branch = best_fork["_best_branch"]
+    fork_name = best_fork["fork"]["full_name"]
+
+    console.print(
+        f"\n  Best fork: [cyan]{fork_name}[/cyan] "
+        f"branch [blue]{best_branch.name}[/blue] "
+        f"(MC {best_branch.minecraft_version or '?'})"
+    )
+
+    # Step 3: Compile
+    if not loader_version:
+        console.print(
+            "\n[red]Fork found but [bold]-lv LOADER_VERSION[/bold] "
+            "is required to compile.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Rebuild config with real loader_version for compilation
+    full_config = ModCompilerConfig(
+        mc_version=mc_version,
+        loader=loader.lower(),
+        loader_version=loader_version,
+        github_token=github_token,
+        output_dir=output_dir,
+        instance_path=instance,
+        docker_test=docker_test,
+    )
+
+    repo_url = f"https://github.com/{fork_name}"
+    pipeline = Pipeline(full_config)
+    pipeline.temp_dir = tempfile.mkdtemp(prefix="mod_compiler_")
+
+    try:
+        comp_result = pipeline.clone_and_compile(
+            repo_url,
+            specific_branch=best_branch.name,
+            skip_modrinth=True,
+        )
+
+        if comp_result.success:
+            if docker_test:
+                pipeline.results = [comp_result]
+                pipeline.docker.test_mods_in_docker(pipeline.results)
+                comp_result = pipeline.results[0]
+
+            console.print(
+                f"\n[green]Done! {comp_result.mod_name} "
+                f"v{comp_result.mod_version} compiled to "
+                f"{output_dir}/[/green]"
+            )
+        else:
+            console.print(
+                f"\n[red]Compilation failed:[/red] {comp_result.error}"
+            )
+            raise typer.Exit(1)
+    finally:
+        if pipeline.temp_dir:
+            shutil.rmtree(pipeline.temp_dir, ignore_errors=True)
 
 
 @app.command()
