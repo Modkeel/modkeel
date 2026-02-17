@@ -761,5 +761,153 @@ class TestLoaderValidationInConfig(unittest.TestCase):
             self.assertEqual(config.loader, "neoforge")
 
 
+class TestFuzzyScore(unittest.TestCase):
+    """Test fuzzy_score() from modforge.utils."""
+
+    def setUp(self):
+        from modforge.utils import fuzzy_score as fs
+        self.fuzzy_score = fs
+
+    def test_exact_match_returns_100(self):
+        self.assertEqual(self.fuzzy_score("Sodium", "Sodium"), 100.0)
+
+    def test_case_insensitive_exact(self):
+        self.assertEqual(self.fuzzy_score("sodium", "Sodium"), 100.0)
+
+    def test_normalized_exact_with_separators(self):
+        """Hyphens, underscores, spaces removed before comparison."""
+        self.assertEqual(self.fuzzy_score("fabric-api", "fabric_api"), 100.0)
+        self.assertEqual(self.fuzzy_score("Just Enough Items", "justenoughitems"), 100.0)
+
+    def test_prefix_match_high_score(self):
+        score = self.fuzzy_score("sodium", "sodium-extra")
+        self.assertGreater(score, 60.0)
+
+    def test_typo_still_scores_well(self):
+        """'Sodum' (missing 'i') should still match 'Sodium' reasonably."""
+        score = self.fuzzy_score("Sodum", "Sodium")
+        self.assertGreater(score, 50.0)
+
+    def test_completely_different_scores_low(self):
+        score = self.fuzzy_score("Optifine", "Create")
+        self.assertLess(score, 30.0)
+
+    def test_empty_strings_return_zero(self):
+        self.assertEqual(self.fuzzy_score("", "Sodium"), 0.0)
+        self.assertEqual(self.fuzzy_score("Sodium", ""), 0.0)
+        self.assertEqual(self.fuzzy_score("", ""), 0.0)
+
+    def test_substring_match(self):
+        """Query contained in candidate should score decently."""
+        score = self.fuzzy_score("jei", "jei-integration")
+        self.assertGreater(score, 45.0)
+
+    def test_short_query_vs_long_candidate(self):
+        """Very short query vs very long candidate should be penalized."""
+        score = self.fuzzy_score("a", "abcdefghijklmnop")
+        self.assertLess(score, 50.0)
+
+    def test_camel_case_mod_name(self):
+        """CamelCase mod names should match their slug equivalents."""
+        score = self.fuzzy_score("JustEnoughItems", "just-enough-items")
+        self.assertEqual(score, 100.0)
+
+    def test_similar_but_different_mods(self):
+        """'Sodium' should score higher for 'Sodium' than 'Sodium Extra'."""
+        exact = self.fuzzy_score("Sodium", "Sodium")
+        partial = self.fuzzy_score("Sodium", "Sodium Extra")
+        self.assertGreater(exact, partial)
+
+    def test_reversed_query_candidate(self):
+        """Candidate prefix of query should still score."""
+        score = self.fuzzy_score("sodium-extra", "sodium")
+        self.assertGreater(score, 50.0)
+
+
+class TestFuzzyMatch(unittest.TestCase):
+    """Test fuzzy_match() from modforge.utils."""
+
+    def setUp(self):
+        from modforge.utils import fuzzy_match as fm
+        self.fuzzy_match = fm
+
+    def test_exact_match_first(self):
+        candidates = [
+            ("sodium-extra", "Sodium Extra"),
+            ("sodium", "Sodium"),
+            ("lithium", "Lithium"),
+        ]
+        results = self.fuzzy_match("sodium", candidates)
+        self.assertEqual(results[0][0], "sodium")
+
+    def test_threshold_filters(self):
+        candidates = [
+            ("create", "Create"),
+            ("xyz-unrelated", "Completely Different"),
+        ]
+        results = self.fuzzy_match("create", candidates, threshold=50.0)
+        ids = [r[0] for r in results]
+        self.assertIn("create", ids)
+        self.assertNotIn("xyz-unrelated", ids)
+
+    def test_max_results_limits(self):
+        candidates = [(f"mod{i}", f"Mod {i}") for i in range(20)]
+        results = self.fuzzy_match("mod", candidates, threshold=0.0, max_results=3)
+        self.assertLessEqual(len(results), 3)
+
+    def test_empty_candidates(self):
+        results = self.fuzzy_match("sodium", [])
+        self.assertEqual(results, [])
+
+    def test_matches_by_display_name(self):
+        """Should match against display name, not just ID."""
+        candidates = [
+            ("jei", "Just Enough Items"),
+        ]
+        results = self.fuzzy_match("Just Enough Items", candidates, threshold=50.0)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "jei")
+
+    def test_sorted_by_score_descending(self):
+        candidates = [
+            ("sodium-extra", "Sodium Extra"),
+            ("sodium", "Sodium"),
+            ("sodium-dynamic-lights", "Sodium Dynamic Lights"),
+        ]
+        results = self.fuzzy_match("sodium", candidates, threshold=0.0)
+        scores = [r[2] for r in results]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+
+class TestSubsequenceScore(unittest.TestCase):
+    """Test _subsequence_score() from modforge.utils."""
+
+    def setUp(self):
+        from modforge.utils import _subsequence_score as ss
+        self._subsequence_score = ss
+
+    def test_perfect_match(self):
+        score = self._subsequence_score("abc", "abc")
+        self.assertAlmostEqual(score, 1.0, places=1)
+
+    def test_subsequence_in_longer(self):
+        score = self._subsequence_score("ace", "abcde")
+        self.assertGreater(score, 0.5)
+
+    def test_no_match(self):
+        score = self._subsequence_score("xyz", "abc")
+        self.assertEqual(score, 0.0)
+
+    def test_empty_query(self):
+        score = self._subsequence_score("", "abc")
+        self.assertEqual(score, 0.0)
+
+    def test_consecutive_bonus(self):
+        """Consecutive matches should score higher or equal vs spread matches."""
+        tight = self._subsequence_score("abc", "xabcx")
+        spread = self._subsequence_score("abc", "xaxbxcx")
+        self.assertGreaterEqual(tight, spread)
+
+
 if __name__ == "__main__":
     unittest.main()

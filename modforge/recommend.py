@@ -14,6 +14,7 @@ import requests
 from modforge.constants import MODRINTH_USER_AGENT
 from modforge.loaders import ALL_LOADERS
 from modforge.models import ModAvailability, RecommendationResult, ScannedMod
+from modforge.utils import fuzzy_score
 
 logger = logging.getLogger("modforge")
 
@@ -148,27 +149,23 @@ class RecommendationEngine:
             if not hits:
                 return
 
-            mod_lower = mod.mod_id.lower()
-            mod_normalized = re.sub(r"[-_]", "", mod_lower)
-
             best = None
+            best_score = 0.0
             for hit in hits:
-                slug = hit.get("slug", "").lower()
-                title = hit.get("title", "").lower()
-                slug_norm = re.sub(r"[-_]", "", slug)
-                title_norm = re.sub(r"[-_ ]", "", title)
-                if (slug == mod_lower or slug_norm == mod_normalized
-                        or title_norm == mod_normalized):
+                slug = hit.get("slug", "")
+                title = hit.get("title", "")
+                score = max(
+                    fuzzy_score(mod.mod_id, slug),
+                    fuzzy_score(mod.mod_id, title),
+                    fuzzy_score(mod.mod_name, slug),
+                    fuzzy_score(mod.mod_name, title),
+                )
+                if score > best_score:
+                    best_score = score
                     best = hit
-                    break
 
-            if not best:
-                for hit in hits:
-                    title_lower = hit.get("title", "").lower()
-                    slug = hit.get("slug", "").lower()
-                    if mod_lower in title_lower or title_lower in mod_lower:
-                        best = hit
-                        break
+            if best and best_score < 50.0:
+                best = None
 
             if best:
                 avail.modrinth_slug = best["slug"]

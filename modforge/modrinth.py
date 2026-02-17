@@ -10,6 +10,7 @@ import requests
 from modforge.constants import MODRINTH_USER_AGENT
 from modforge.loaders import get_bridge_mods, get_cross_loader_chain
 from modforge.models import ModCompilerConfig
+from modforge.utils import fuzzy_score
 
 logger = logging.getLogger("modforge")
 
@@ -104,39 +105,22 @@ class ModrinthClient:
                 print(f"    \u2139\ufe0f  Not found on Modrinth")
                 return None
 
-            mod_lower = mod_name.lower()
-            mod_normalized = re.sub(r'[-_]', '', mod_lower)
-
             best = None
+            best_score = 0.0
             for hit in hits:
-                slug = hit.get("slug", "").lower()
-                title = hit.get("title", "").lower()
-                slug_normalized = re.sub(r'[-_]', '', slug)
-                title_normalized = re.sub(r'[-_ ]', '', title)
-                if (slug == mod_lower or title == mod_lower
-                        or slug_normalized == mod_normalized
-                        or title_normalized == mod_normalized):
+                slug = hit.get("slug", "")
+                title = hit.get("title", "")
+                score = max(
+                    fuzzy_score(mod_name, slug),
+                    fuzzy_score(mod_name, title),
+                )
+                if score > best_score:
+                    best_score = score
                     best = hit
-                    break
 
-            if not best:
-                words = search_query.lower().split()
-                for hit in hits:
-                    title_lower = hit.get("title", "").lower()
-                    slug = hit.get("slug", "").lower()
-                    slug_normalized = re.sub(r'[-_]', '', slug)
-                    if slug_normalized == mod_normalized:
-                        best = hit
-                        break
-                    if len(words) >= 2 and all(w in title_lower for w in words):
-                        best = hit
-                        break
-                    if len(words) == 1 and len(words[0]) >= 4:
-                        if (words[0] == slug
-                                or title_lower.startswith(words[0])
-                                or title_lower.startswith(mod_lower)):
-                            best = hit
-                            break
+            # Require a minimum match quality
+            if best and best_score < 50.0:
+                best = None
 
             if not best:
                 print(f"    \u2139\ufe0f  Modrinth results don't match '{mod_name}'")
