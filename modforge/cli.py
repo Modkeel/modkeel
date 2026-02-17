@@ -37,8 +37,16 @@ app = typer.Typer(
 
 def resolve_github_token(
     explicit: Optional[str], modforge_cfg: ModForgeConfig,
+    prompt_if_missing: bool = False,
 ) -> Optional[str]:
-    """Resolve GitHub token: CLI flag > saved config. Saves new tokens."""
+    """Resolve GitHub token: CLI flag > saved config > interactive prompt.
+
+    Args:
+        explicit: Token passed via -t flag.
+        modforge_cfg: Persistent config.
+        prompt_if_missing: If True and no token found, prompt the user
+            interactively. Only prompts if running in a terminal.
+    """
     if explicit:
         if explicit != modforge_cfg.github_token:
             modforge_cfg.github_token = explicit
@@ -49,7 +57,22 @@ def resolve_github_token(
     saved = modforge_cfg.github_token
     if saved:
         console.print("[dim]  Using saved GitHub token.[/dim]")
-    return saved
+        return saved
+    if prompt_if_missing and console.is_terminal:
+        console.print(
+            "\n[yellow]No GitHub token found.[/yellow] "
+            "A token is needed to search GitHub forks.\n"
+            "  Create one at: [bold]https://github.com/settings/tokens[/bold]\n"
+            "  Scopes needed: [dim]none (public repo access only)[/dim]\n"
+        )
+        token = typer.prompt("  GitHub token", hide_input=True, default="")
+        if token:
+            modforge_cfg.github_token = token
+            console.print(
+                "[green]Token saved to ~/.modforge/config.toml[/green]"
+            )
+            return token
+    return None
 
 
 def version_callback(value: bool):
@@ -163,7 +186,9 @@ def compile(
 
     # Load persistent config + resolve token
     modforge_cfg = ModForgeConfig()
-    github_token = resolve_github_token(github_token, modforge_cfg)
+    github_token = resolve_github_token(
+        github_token, modforge_cfg, prompt_if_missing=True
+    )
     if modforge_cfg.is_first_run and not modforge_cfg.was_prompted:
         prompt_sharing_preference(modforge_cfg)
 
@@ -321,6 +346,22 @@ def search(
     # Not found on Modrinth
     table.add_row("Status", "[yellow]Not found on Modrinth[/yellow]")
     console.print(table)
+
+    # Prompt for token if missing (only needed for fork search)
+    if not github_token:
+        github_token = resolve_github_token(
+            None, modforge_cfg, prompt_if_missing=True
+        )
+        if github_token:
+            # Rebuild config with token
+            config = ModCompilerConfig(
+                mc_version=mc_version,
+                loader=loader.lower(),
+                loader_version=loader_version or "0",
+                github_token=github_token,
+                output_dir=output_dir,
+                instance_path=instance,
+            )
 
     # GitHub fork search with pre-filtering
     if github_token:
@@ -542,7 +583,20 @@ def get(
                 "trying GitHub forks...[/yellow]"
             )
 
-    # Step 2: Search GitHub forks
+    # Step 2: Search GitHub forks (prompt for token if missing)
+    if not github_token:
+        github_token = resolve_github_token(
+            None, modforge_cfg, prompt_if_missing=True
+        )
+        if github_token:
+            config = ModCompilerConfig(
+                mc_version=mc_version,
+                loader=loader.lower(),
+                loader_version=loader_version or "0",
+                github_token=github_token,
+                output_dir=output_dir,
+                instance_path=instance,
+            )
     if not github_token:
         console.print(
             "\n[red]Not found on Modrinth.[/red] "
