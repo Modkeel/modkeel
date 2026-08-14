@@ -98,6 +98,11 @@ class Pipeline:
                 dest.unlink(missing_ok=True)
                 return None
 
+            # Level 0.5: metadata can claim any version; the bytecode cannot.
+            if not self._linkage_ok(dest):
+                dest.unlink(missing_ok=True)
+                return None
+
             if self.config.mods_path:
                 instance_dest = self.config.mods_path / jar_name
                 instance_dest.write_bytes(payload)
@@ -118,6 +123,37 @@ class Pipeline:
         except Exception as e:
             print(f"    ⚠️  Pre-built download failed: {e}")
             return None
+
+    def _linkage_ok(self, jar_path: Path) -> bool:
+        """Verify a downloaded JAR's bytecode actually targets the requested version.
+
+        Returns True whenever the check cannot run -- an unreadable naming scheme, no
+        symbol table -- so an inconclusive check never costs the user a working JAR.
+        """
+        if not getattr(self.config, "symbol_check", True):
+            return True
+
+        from modforge.linkage import check_jar
+        from modforge.mappings import load_index
+
+        index = load_index(self.config.mc_version)
+        if index is None:
+            return True
+
+        report = check_jar(jar_path, index)
+        if not report.checked:
+            print(f"    \U0001f50e Linkage: {report.summary}")
+            return True
+
+        if report.is_clean:
+            print(f"    ✓ Linkage: {report.summary}")
+            return True
+
+        print(f"    ⚠️  Linkage: {report.summary} -- JAR targets a different version")
+        for finding in report.findings[:3]:
+            print(f"        - {finding}")
+        print(f"    ℹ️  Rejecting pre-built JAR, compiling instead")
+        return False
 
     @staticmethod
     def _extract_jar_from_zip(payload: bytes):
