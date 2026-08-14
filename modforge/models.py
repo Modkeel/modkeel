@@ -28,6 +28,7 @@ class ModCompilerConfig:
         docker_timeout: int = 180,
         prebuild_gate: bool = True,
         use_prebuilt: bool = True,
+        symbol_check: bool = True,
     ):
         self.mc_version = mc_version
         self.loader = normalize_loader(loader)
@@ -39,6 +40,7 @@ class ModCompilerConfig:
         self.docker_timeout = docker_timeout
         self.prebuild_gate = prebuild_gate
         self.use_prebuilt = use_prebuilt
+        self.symbol_check = symbol_check
 
         # Output directory (always used)
         self.output_dir = Path(output_dir)
@@ -84,6 +86,7 @@ class BranchCandidate:
         # Pre-build gate fields (populated by modforge.prebuild)
         self.prebuild_verdict = None  # PreBuildVerdict
         self.ci_status = None  # CIStatus
+        self.symbol_report = None  # SymbolReport
 
     def __repr__(self):
         return (

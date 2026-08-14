@@ -44,7 +44,12 @@ class Pipeline:
         self.validator = BranchValidator(self.github, config)
         self.modrinth = ModrinthClient(config)
         self.docker = DockerTester(config)
-        self.prebuild = PreBuildGate(self.github)
+        # getattr: configs built before the symbol check existed (the deprecated shim,
+        # partial test doubles) must keep working.
+        symbol_check = getattr(config, "symbol_check", True)
+        self.prebuild = PreBuildGate(
+            self.github, config=config if symbol_check else None
+        )
         self.results: List[CompilationResult] = []
         self.temp_dir = None
 

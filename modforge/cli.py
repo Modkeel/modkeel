@@ -177,6 +177,10 @@ def compile(
         "--no-prebuilt",
         help="Always compile, even when a published JAR already exists.",
     ),
+    no_symbol_check: bool = typer.Option(
+        False, "--no-symbol-check",
+        help="Skip verifying Minecraft symbols against official mappings.",
+    ),
 ):
     """Compile mods from a list of GitHub repositories."""
     setup_logging(log_file)
@@ -233,6 +237,7 @@ def compile(
             docker_timeout=docker_timeout,
             prebuild_gate=not no_prebuild_gate,
             use_prebuilt=not no_prebuilt,
+            symbol_check=not no_symbol_check,
         )
     except ValueError as e:
         console.print(f"[red]Configuration error:[/red] {e}")

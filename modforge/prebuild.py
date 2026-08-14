@@ -18,8 +18,11 @@ long-tail forks.
 
 import logging
 import re
+import shutil
+import tempfile
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -489,12 +492,70 @@ class StaticBuildCheck:
                 )
 
 
+class SymbolChecker:
+    """Level 1.5: verify Minecraft symbols exist at the target version, without compiling.
+
+    Costs one tarball download plus a cached mappings lookup, so it runs only on the top
+    few surviving candidates. See docs/symbol-check-design.md.
+    """
+
+    BUILD_FILES = (
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "gradle.properties",
+        "gradle/libs.versions.toml",
+    )
+
+    def __init__(self, github_client, config):
+        self.github = github_client
+        self.config = config
+
+    def check(self, owner: str, repo: str, branch: str):
+        """Return a SymbolReport for a branch. Never raises."""
+        from modforge.javascan import fetch_source_tree, scan_tree
+        from modforge.mappings import detect_flavor, load_index
+        from modforge.symbols import SymbolReport
+
+        scripts = [
+            self.github.get_file_from_repo(owner, repo, branch, name)
+            for name in self.BUILD_FILES
+        ]
+        flavor = detect_flavor(scripts, loader=self.config.loader)
+
+        index = load_index(self.config.mc_version, flavor)
+        if index is None:
+            return SymbolReport.skipped(
+                f"no symbol table for {self.config.mc_version} ({flavor})"
+            )
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="modforge-symbols-"))
+        try:
+            root = fetch_source_tree(owner, repo, branch, temp_dir)
+            if root is None:
+                return SymbolReport.skipped("source tarball unavailable")
+
+            from modforge.symbols import check_references
+
+            return check_references(scan_tree(root), index)
+        except Exception as e:  # noqa: BLE001 - advisory layer must never break a build
+            logger.debug("symbol check failed for %s/%s@%s: %s", owner, repo, branch, e)
+            return SymbolReport.skipped(f"symbol check error: {e}")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 class PreBuildGate:
     """Runs Level 0 and Level 1 over branch candidates before any build is attempted."""
 
-    def __init__(self, github_client, jdk_major=AUTO_DETECT_JDK):
+    # Each symbol check downloads a source tarball, so it is bounded to the best few
+    # candidates. Anything dropped is logged rather than silently ignored.
+    SYMBOL_CHECK_LIMIT = 3
+
+    def __init__(self, github_client, jdk_major=AUTO_DETECT_JDK, config=None):
         self.finder = PrebuiltFinder(github_client)
         self.checker = StaticBuildCheck(github_client, jdk_major=jdk_major)
+        self.symbols = SymbolChecker(github_client, config) if config else None
 
     def find_prebuilt(
         self, owner: str, repo: str, branch: str, mc_version: Optional[str] = None
@@ -504,6 +565,36 @@ class PreBuildGate:
         if artifact:
             return artifact
         return self.finder.find_ci_artifact(owner, repo, branch)
+
+    def _apply_symbol_checks(
+        self, owner: str, repo: str, survivors: List, verbose: bool
+    ) -> None:
+        """Score the top candidates by symbol resolution, then re-sort in place.
+
+        Advisory only: a symbol finding never removes a candidate, it only reorders.
+        """
+        if self.symbols is None or not survivors:
+            return
+
+        checked = survivors[: self.SYMBOL_CHECK_LIMIT]
+        if verbose and len(survivors) > len(checked):
+            print(
+                f"  \U0001f50e Symbol check on top {len(checked)} of "
+                f"{len(survivors)} candidates"
+            )
+
+        for branch in checked:
+            report = self.symbols.check(owner, repo, branch.name)
+            branch.symbol_report = report
+            branch.score += report.score_delta
+
+            if verbose and report.checked:
+                mark = "✓" if report.is_clean else "⚠"
+                print(f"     {mark} {branch.name}: {report.summary}")
+                for finding in report.findings[:3]:
+                    print(f"        - {finding}")
+
+        survivors.sort(key=lambda b: b.score, reverse=True)
 
     def filter_branches(
         self, owner: str, repo: str, branches: List, verbose: bool = True
@@ -546,6 +637,7 @@ class PreBuildGate:
             return branches
 
         survivors.sort(key=lambda b: b.score, reverse=True)
+        self._apply_symbol_checks(owner, repo, survivors, verbose)
 
         if verbose:
             for branch in survivors[:3]:
