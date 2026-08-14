@@ -22,6 +22,14 @@ import requests
 logger = logging.getLogger("modforge")
 
 IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", re.MULTILINE)
+PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+# Mods sometimes declare their own types inside net.minecraft.* packages (duck interfaces,
+# accessor mixins). Those are not missing Minecraft classes, they are the mod's own code.
+TYPE_DECL_RE = re.compile(
+    r"^\s*(?:(?:public|final|abstract|sealed|non-sealed|static)\s+)*"
+    r"(?:class|interface|enum|record|@interface)\s+(\w+)",
+    re.MULTILINE,
+)
 
 # @Mixin(Foo.class) / @Mixin({A.class, B.class}) / @Mixin(value = Foo.class, priority = 1)
 MIXIN_CLASS_RE = re.compile(r"@Mixin\s*\(([^)]*)\)", re.DOTALL)
@@ -46,6 +54,7 @@ class SourceRefs:
     """Minecraft references extracted from a source tree."""
 
     imports: Set[str] = field(default_factory=set)
+    declared_classes: Set[str] = field(default_factory=set)
     mixin_targets: Set[str] = field(default_factory=set)
     # (ownerFqcn, memberName, descriptor) -- descriptor is "" for field targets.
     at_targets: Set[Tuple[str, str, str]] = field(default_factory=set)
@@ -70,6 +79,7 @@ class SourceRefs:
 
     def merge(self, other: "SourceRefs") -> None:
         self.imports |= other.imports
+        self.declared_classes |= other.declared_classes
         self.mixin_targets |= other.mixin_targets
         self.at_targets |= other.at_targets
         self.static_refs |= other.static_refs
@@ -84,6 +94,13 @@ def scan_source(text: str) -> SourceRefs:
 
     refs.imports = set(IMPORT_RE.findall(text))
     refs.uses_preprocessor = bool(PREPROCESSOR_RE.search(text))
+
+    package_match = PACKAGE_RE.search(text)
+    if package_match:
+        package = package_match.group(1)
+        refs.declared_classes = {
+            f"{package}.{name}" for name in TYPE_DECL_RE.findall(text)
+        }
 
     for block in MIXIN_CLASS_RE.findall(text):
         refs.mixin_targets |= set(CLASS_LITERAL_RE.findall(block))

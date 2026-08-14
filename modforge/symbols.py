@@ -348,7 +348,11 @@ def check_references(refs, index: SymbolIndex) -> SymbolReport:
     if not checkable_imports:
         return SymbolReport.skipped("no checkable Minecraft imports found")
 
-    missing = [c for c in checkable_imports if not index.has_class(c)]
+    missing = [
+        c
+        for c in checkable_imports
+        if not index.has_class(c) and c not in refs.declared_classes
+    ]
 
     # Wholesale absence means we are reading the wrong mapping set, not that the mod
     # references hundreds of nonexistent classes.
@@ -364,18 +368,26 @@ def check_references(refs, index: SymbolIndex) -> SymbolReport:
         fqcn = refs.resolve(target)
         if not fqcn or not is_candidate(fqcn) or not index.covers(fqcn):
             continue
+        if fqcn in refs.declared_classes:
+            continue
         report.mixins_checked += 1
         if not index.has_class(fqcn):
             report.missing_mixin_targets.append(fqcn)
 
-    for owner, name, descriptor in sorted(refs.at_targets):
+    # Only the owner class is checked, never the member. Mixin resolves @At targets
+    # through the class hierarchy at runtime, so pointing at a method a supertype
+    # declares is both legal and common -- and ProGuard mappings carry no hierarchy.
+    # Measured against Create mc1.21.1/dev: descriptor checking produced 12 findings,
+    # all inherited (LivingEntity.isInLava from Entity, Registry.forEach from Iterable)
+    # or added by NeoForge patches to vanilla classes.
+    for owner, name, _descriptor in sorted(refs.at_targets):
         if not is_candidate(owner) or not index.covers(owner):
+            continue
+        if owner in refs.declared_classes:
             continue
         report.mixins_checked += 1
         if not index.has_class(owner):
             report.missing_at_targets.append(f"{owner}.{name}")
-        elif descriptor and not index.has_descriptor(owner, name, descriptor):
-            report.missing_at_targets.append(f"{owner}.{name}{descriptor}")
 
     for fqcn, member in sorted(refs.static_refs):
         if not is_candidate(fqcn) or not index.has_class(fqcn):

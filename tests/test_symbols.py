@@ -276,6 +276,22 @@ class TestScanSource:
         owners = {owner for owner, _, _ in refs.at_targets}
         assert "net.minecraft.core.BlockPos" in owners
 
+    def test_records_declared_classes(self):
+        refs = scan_source(
+            "package net.minecraft.core;\n"
+            "public interface DuckHelper { }\n"
+        )
+        assert "net.minecraft.core.DuckHelper" in refs.declared_classes
+
+    def test_records_multiple_declared_types(self):
+        refs = scan_source(
+            "package com.example;\npublic class A {}\nenum B {}\nrecord C() {}\n"
+        )
+        assert {"com.example.A", "com.example.B", "com.example.C"} <= refs.declared_classes
+
+    def test_no_package_means_no_declared_classes(self):
+        assert scan_source("public class Loose {}").declared_classes == set()
+
     def test_detects_preprocessor(self):
         refs = scan_source("//#if MC>=11904\nimport net.minecraft.X;\n//#endif")
         assert refs.uses_preprocessor
@@ -425,14 +441,44 @@ class TestCheckReferences:
         )
         assert check_references(refs, index).is_clean
 
-    def test_wrong_at_descriptor_is_reported(self, index):
+    def test_at_descriptor_mismatch_is_not_reported(self, index):
+        # Mixin resolves @At targets through the class hierarchy at runtime, so a target
+        # naming a method declared on a supertype is legal. ProGuard mappings carry no
+        # hierarchy, making member-level verdicts undecidable -- only the owner class is
+        # checked. Measured on Create mc1.21.1/dev: descriptor checking produced 12
+        # findings, every one inherited or NeoForge-patched.
         refs = SourceRefs(
             imports={"net.minecraft.world.level.Level"},
-            at_targets={("net.minecraft.world.level.Level", "isInWorldBounds", "()Z")},
+            at_targets={
+                ("net.minecraft.world.level.Level", "inheritedFromEntity", "()V")
+            },
+        )
+        assert check_references(refs, index).is_clean
+
+    def test_at_target_on_missing_class_is_reported(self, index):
+        refs = SourceRefs(
+            imports={"net.minecraft.core.BlockPos"},
+            at_targets={("net.minecraft.core.Vanished", "whatever", "()V")},
         )
         report = check_references(refs, index)
-        assert report.missing_at_targets
-        assert not report.is_clean
+        assert report.missing_at_targets == ["net.minecraft.core.Vanished.whatever"]
+
+    def test_self_declared_class_is_not_missing(self, index):
+        # Duck interfaces and accessors are routinely declared inside net.minecraft.*
+        # packages by the mod itself; they are the mod's own code, not absent Minecraft.
+        refs = SourceRefs(
+            imports={"net.minecraft.core.BlockPos", "net.minecraft.core.DuckHelper"},
+            declared_classes={"net.minecraft.core.DuckHelper"},
+        )
+        assert check_references(refs, index).is_clean
+
+    def test_self_declared_mixin_target_is_ignored(self, index):
+        refs = SourceRefs(
+            imports={"net.minecraft.core.BlockPos"},
+            mixin_targets={"net.minecraft.core.OwnDuck"},
+            declared_classes={"net.minecraft.core.OwnDuck"},
+        )
+        assert check_references(refs, index).is_clean
 
     def test_unresolvable_mixin_name_is_ignored(self, index):
         refs = SourceRefs(
