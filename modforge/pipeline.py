@@ -1,11 +1,13 @@
 """Pipeline orchestrator for ModForge."""
 
+import io
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,6 +26,7 @@ from modforge.docker import DockerTester
 from modforge.github import GitHubClient, parse_repo_url
 from modforge.models import CompilationResult, FailureType, ModCompilerConfig
 from modforge.modrinth import ModrinthClient
+from modforge.prebuild import PreBuildGate
 from modforge.utils import safe_rmtree
 from modforge.loaders import get_bridge_mods, get_cross_loader_chain, get_profile
 from modforge.validation import BranchValidator
@@ -41,18 +44,108 @@ class Pipeline:
         self.validator = BranchValidator(self.github, config)
         self.modrinth = ModrinthClient(config)
         self.docker = DockerTester(config)
+        self.prebuild = PreBuildGate(self.github)
         self.results: List[CompilationResult] = []
         self.temp_dir = None
 
+    def _try_prebuilt(
+        self, repo_url: str, owner: str, repo: str, branch
+    ) -> Optional[CompilationResult]:
+        """Download an already-built JAR instead of compiling, if one exists.
+
+        Returns None whenever nothing usable is found, so the caller falls through to
+        the normal build path.
+        """
+        artifact = self.prebuild.find_prebuilt(
+            owner, repo, branch.name, self.config.mc_version
+        )
+        if not artifact:
+            return None
+
+        print(
+            f"\n  \U0001f4e5 Found pre-built JAR ({artifact.source}): {artifact.name}"
+        )
+        print(f"     Skipping compilation entirely.")
+
+        try:
+            headers = self.config.github_headers if artifact.requires_auth else {}
+            response = requests.get(artifact.url, headers=headers, timeout=180)
+            response.raise_for_status()
+            payload = response.content
+
+            if artifact.is_zip:
+                jar_name, payload = self._extract_jar_from_zip(payload)
+                if not payload:
+                    print(f"    ⚠️  Artifact contained no usable JAR")
+                    return None
+            else:
+                jar_name = artifact.name
+
+            dest = self.config.output_dir / jar_name
+            dest.write_bytes(payload)
+            print(f"    \U0001f4be Saved: {dest}")
+
+            is_valid, mod_name, mod_version, message = validate_jar(
+                dest, self.config.mc_version
+            )
+            if not is_valid:
+                print(f"    ⚠️  Pre-built JAR rejected ({message}), compiling instead")
+                dest.unlink(missing_ok=True)
+                return None
+
+            if self.config.mods_path:
+                instance_dest = self.config.mods_path / jar_name
+                instance_dest.write_bytes(payload)
+                print(f"    \U0001f4be Installed: {instance_dest}")
+
+            print(f"\n  ✅ SUCCESS: {mod_name} v{mod_version} [pre-built, no compile]")
+
+            return CompilationResult(
+                repo_url=repo_url,
+                success=True,
+                branch=branch.name,
+                jar_path=str(dest),
+                mod_name=mod_name,
+                mod_version=mod_version,
+                compiled_mc_version=branch.minecraft_version or self.config.mc_version,
+            )
+
+        except Exception as e:
+            print(f"    ⚠️  Pre-built download failed: {e}")
+            return None
+
+    @staticmethod
+    def _extract_jar_from_zip(payload: bytes):
+        """Pull the largest non-sources JAR out of an Actions artifact ZIP."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                candidates = [
+                    info
+                    for info in archive.infolist()
+                    if info.filename.lower().endswith(".jar")
+                    and not any(
+                        s in info.filename.lower()
+                        for s in ("sources", "javadoc", "-dev", "-slim")
+                    )
+                ]
+                if not candidates:
+                    return None, None
+                best = max(candidates, key=lambda i: i.file_size)
+                return Path(best.filename).name, archive.read(best)
+        except (zipfile.BadZipFile, OSError):
+            return None, None
+
     def clone_and_compile(
-        self, repo_url: str, specific_branch: Optional[str] = None,
+        self,
+        repo_url: str,
+        specific_branch: Optional[str] = None,
         extra_gradle_args: Optional[List[str]] = None,
-        skip_modrinth: bool = False
+        skip_modrinth: bool = False,
     ) -> CompilationResult:
         """Clone a repository, find compatible branch, compile, and validate."""
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"\U0001f4e6 Processing: {repo_url}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         is_cross_loader_attempt = False
         saved_fork_candidates = []
@@ -67,8 +160,8 @@ class Pipeline:
 
             repo_info = self.github.get_repo_info(owner, repo)
             if repo_info:
-                stars = repo_info.get('stargazers_count', 0)
-                forks = repo_info.get('forks_count', 0)
+                stars = repo_info.get("stargazers_count", 0)
+                forks = repo_info.get("forks_count", 0)
                 print(f"  \u2b50 Stars: {stars} | \U0001f374 Forks: {forks}")
 
             # Step 0: Check Modrinth
@@ -76,14 +169,18 @@ class Pipeline:
                 modrinth_result = self.modrinth.check_modrinth(repo)
 
                 fallback_loaders = get_cross_loader_chain(self.config.loader)
-                if (not modrinth_result
-                        and self.config.cross_loader
-                        and fallback_loaders
-                        and self.modrinth.is_cross_loader_available()):
+                if (
+                    not modrinth_result
+                    and self.config.cross_loader
+                    and fallback_loaders
+                    and self.modrinth.is_cross_loader_available()
+                ):
                     saved_loader = self.config.loader
                     for fallback in fallback_loaders:
                         self.config.loader = fallback
-                        print(f"  \U0001f504 CROSS-LOADER: Checking Modrinth for {fallback.capitalize()} version...")
+                        print(
+                            f"  \U0001f504 CROSS-LOADER: Checking Modrinth for {fallback.capitalize()} version..."
+                        )
                         modrinth_result = self.modrinth.check_modrinth(repo)
                         if modrinth_result:
                             modrinth_result["_cross_loader"] = True
@@ -92,12 +189,14 @@ class Pipeline:
                     self.config.loader = saved_loader
 
                 if modrinth_result:
-                    print(f"\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)...")
+                    print(
+                        f"\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)..."
+                    )
                     try:
                         dl_resp = requests.get(
                             modrinth_result["download_url"],
                             headers={"User-Agent": MODRINTH_USER_AGENT},
-                            timeout=120
+                            timeout=120,
                         )
                         dl_resp.raise_for_status()
 
@@ -114,10 +213,14 @@ class Pipeline:
                         self.modrinth.download_modrinth_deps(modrinth_result)
 
                         is_cross = modrinth_result.get("_cross_loader", False)
-                        cross_note = " [Fabric via Sinytra Connector]" if is_cross else ""
-                        print(f"\n  \u2705 SUCCESS: {modrinth_result['title']} "
-                              f"v{modrinth_result['version_number']} "
-                              f"from Modrinth [pre-compiled]{cross_note}")
+                        cross_note = (
+                            " [Fabric via Sinytra Connector]" if is_cross else ""
+                        )
+                        print(
+                            f"\n  \u2705 SUCCESS: {modrinth_result['title']} "
+                            f"v{modrinth_result['version_number']} "
+                            f"from Modrinth [pre-compiled]{cross_note}"
+                        )
 
                         return CompilationResult(
                             repo_url=repo_url,
@@ -131,7 +234,9 @@ class Pipeline:
                         )
                     except Exception as e:
                         print(f"    \u26a0\ufe0f  Modrinth download failed: {e}")
-                        print(f"    \u2139\ufe0f  Falling back to GitHub compilation...")
+                        print(
+                            f"    \u2139\ufe0f  Falling back to GitHub compilation..."
+                        )
 
             # Step 1+: GitHub fork search + compilation
             repo_temp_dir = Path(self.temp_dir) / repo
@@ -143,42 +248,60 @@ class Pipeline:
                 return CompilationResult(
                     repo_url=repo_url,
                     success=False,
-                    error="Could not fetch branches from repository"
+                    error="Could not fetch branches from repository",
                 )
 
             print(f"  \U0001f4ca Found {len(all_branches)} branches")
 
             if specific_branch:
-                target_branch = next((b for b in all_branches if b.name == specific_branch), None)
+                target_branch = next(
+                    (b for b in all_branches if b.name == specific_branch), None
+                )
                 if not target_branch:
                     return CompilationResult(
                         repo_url=repo_url,
                         success=False,
-                        error=f"Specified branch '{specific_branch}' not found"
+                        error=f"Specified branch '{specific_branch}' not found",
                     )
 
                 print(f"  \U0001f50d Validating specified branch via GitHub API...")
-                is_compatible = self.validator.pre_validate_branch(owner, repo, target_branch)
+                is_compatible = self.validator.pre_validate_branch(
+                    owner, repo, target_branch
+                )
 
                 if not is_compatible:
                     return CompilationResult(
                         repo_url=repo_url,
                         success=False,
-                        error=f"Branch '{specific_branch}' is not compatible: {target_branch.validation_error}"
+                        error=f"Branch '{specific_branch}' is not compatible: {target_branch.validation_error}",
                     )
 
                 branches_to_try = [target_branch]
             else:
-                all_branches = self.validator.filter_branches_by_version_proximity(all_branches)
-                compatible_branches = self.validator.pre_validate_branches(owner, repo, all_branches)
+                all_branches = self.validator.filter_branches_by_version_proximity(
+                    all_branches
+                )
+                compatible_branches = self.validator.pre_validate_branches(
+                    owner, repo, all_branches
+                )
 
-                exact_matches = [b for b in compatible_branches if b.minecraft_version == self.config.mc_version]
-                close_matches = [b for b in compatible_branches if b.minecraft_version != self.config.mc_version]
+                exact_matches = [
+                    b
+                    for b in compatible_branches
+                    if b.minecraft_version == self.config.mc_version
+                ]
+                close_matches = [
+                    b
+                    for b in compatible_branches
+                    if b.minecraft_version != self.config.mc_version
+                ]
 
                 if not compatible_branches:
                     should_search_forks = True
                 elif not exact_matches and close_matches:
-                    print(f"  \u26a0\ufe0f  Only found close version matches ({close_matches[0].minecraft_version}), searching for exact {self.config.mc_version}...")
+                    print(
+                        f"  \u26a0\ufe0f  Only found close version matches ({close_matches[0].minecraft_version}), searching for exact {self.config.mc_version}..."
+                    )
                     should_search_forks = True
                 else:
                     should_search_forks = False
@@ -197,55 +320,81 @@ class Pipeline:
                     if not fork_candidates:
                         pass
                     else:
-                        print(f"\n  \U0001f3af Trying top {len(fork_candidates)} community forks...")
+                        print(
+                            f"\n  \U0001f3af Trying top {len(fork_candidates)} community forks..."
+                        )
 
                         found_in_fork = False
                         for fork_result in fork_candidates:
-                            fork_info = fork_result['fork']
-                            fork_owner = fork_info['owner']
-                            fork_repo = fork_info['repo']
+                            fork_info = fork_result["fork"]
+                            fork_owner = fork_info["owner"]
+                            fork_repo = fork_info["repo"]
 
-                            print(f"\n  \U0001f4e6 Checking fork: {fork_info['full_name']}")
-                            print(f"     Score: {fork_result['score']}, Signals: {', '.join(fork_result['signals'])}")
+                            print(
+                                f"\n  \U0001f4e6 Checking fork: {fork_info['full_name']}"
+                            )
+                            print(
+                                f"     Score: {fork_result['score']}, Signals: {', '.join(fork_result['signals'])}"
+                            )
 
-                            fork_branches = self.github.get_branches(fork_owner, fork_repo)
-                            fork_compatible = self.validator.pre_validate_branches(fork_owner, fork_repo, fork_branches)
+                            fork_branches = self.github.get_branches(
+                                fork_owner, fork_repo
+                            )
+                            fork_compatible = self.validator.pre_validate_branches(
+                                fork_owner, fork_repo, fork_branches
+                            )
 
-                            fork_exact = [b for b in fork_compatible if b.minecraft_version == self.config.mc_version]
+                            fork_exact = [
+                                b
+                                for b in fork_compatible
+                                if b.minecraft_version == self.config.mc_version
+                            ]
 
                             if fork_exact:
-                                print(f"  \u2705 Found EXACT version {self.config.mc_version} in fork!")
+                                print(
+                                    f"  \u2705 Found EXACT version {self.config.mc_version} in fork!"
+                                )
 
                                 for fb in fork_exact:
-                                    is_clean, diff_bonus, diff_desc = self.validator.analyze_fork_diff(
-                                        owner, repo, fork_owner, fork_repo, fb.name
+                                    is_clean, diff_bonus, diff_desc = (
+                                        self.validator.analyze_fork_diff(
+                                            owner, repo, fork_owner, fork_repo, fb.name
+                                        )
                                     )
                                     fb.score += diff_bonus
                                     if is_clean or diff_bonus > 0:
-                                        print(f"  \U0001f50d Diff analysis: {diff_desc}")
+                                        print(
+                                            f"  \U0001f50d Diff analysis: {diff_desc}"
+                                        )
 
-                                trust_score = fork_result.get('trust_score', 50)
-                                trust_analysis = fork_info.get('trust_analysis', {})
+                                trust_score = fork_result.get("trust_score", 50)
+                                trust_analysis = fork_info.get("trust_analysis", {})
 
-                                print(f"\n  \u26a0\ufe0f  SECURITY NOTICE: Using community fork (not official)")
+                                print(
+                                    f"\n  \u26a0\ufe0f  SECURITY NOTICE: Using community fork (not official)"
+                                )
                                 print(f"      Trust Score: {trust_score}% - ", end="")
 
                                 if trust_score >= 80:
                                     print("HIGH confidence (established contributors)")
                                 elif trust_score >= 60:
-                                    print("MEDIUM confidence (some established contributors)")
+                                    print(
+                                        "MEDIUM confidence (some established contributors)"
+                                    )
                                 elif trust_score >= 40:
                                     print("LOW confidence (new/unknown contributors)")
                                 else:
                                     print("CRITICAL - Multiple red flags detected")
 
-                                if trust_analysis.get('warnings'):
+                                if trust_analysis.get("warnings"):
                                     print(f"      Warnings:")
-                                    for warning in trust_analysis['warnings']:
+                                    for warning in trust_analysis["warnings"]:
                                         print(f"      - {warning}")
 
-                                if trust_analysis.get('signals'):
-                                    print(f"      Signals: {', '.join(trust_analysis['signals'])}")
+                                if trust_analysis.get("signals"):
+                                    print(
+                                        f"      Signals: {', '.join(trust_analysis['signals'])}"
+                                    )
 
                                 print(f"      Review fork: {fork_info['url']}")
                                 print(f"      Compiling code from: {fork_owner}")
@@ -256,62 +405,99 @@ class Pipeline:
                                 found_in_fork = True
                                 break
 
-                            fork_close = [b for b in fork_compatible if b.minecraft_version != self.config.mc_version]
+                            fork_close = [
+                                b
+                                for b in fork_compatible
+                                if b.minecraft_version != self.config.mc_version
+                            ]
 
                             if fork_close:
-                                print(f"  \u2139\ufe0f  No exact match, checking if close matches support {self.config.mc_version}...")
+                                print(
+                                    f"  \u2139\ufe0f  No exact match, checking if close matches support {self.config.mc_version}..."
+                                )
 
                                 best_branch = fork_close[0]
-                                version_range = self.validator.parse_version_range_from_metadata(
-                                    fork_owner, fork_repo, best_branch.name, self.config.loader
+                                version_range = (
+                                    self.validator.parse_version_range_from_metadata(
+                                        fork_owner,
+                                        fork_repo,
+                                        best_branch.name,
+                                        self.config.loader,
+                                    )
                                 )
 
                                 if version_range:
-                                    range_format = get_profile(self.config.loader)["version_range_format"]
+                                    range_format = get_profile(self.config.loader)[
+                                        "version_range_format"
+                                    ]
                                     if range_format == "maven":
-                                        is_compat = is_version_in_maven_range(self.config.mc_version, version_range)
+                                        is_compat = is_version_in_maven_range(
+                                            self.config.mc_version, version_range
+                                        )
                                     else:
-                                        is_compat = is_version_in_fabric_range(self.config.mc_version, version_range)
+                                        is_compat = is_version_in_fabric_range(
+                                            self.config.mc_version, version_range
+                                        )
 
                                     if is_compat:
-                                        print(f"  \u2705 Fork branch '{best_branch.name}' supports range {version_range}")
-                                        print(f"     \u2192 Covers target {self.config.mc_version}!")
+                                        print(
+                                            f"  \u2705 Fork branch '{best_branch.name}' supports range {version_range}"
+                                        )
+                                        print(
+                                            f"     \u2192 Covers target {self.config.mc_version}!"
+                                        )
 
                                         for b in fork_close:
                                             b.version_range = version_range
-                                            b.validation_method = 'fork_metadata_range'
+                                            b.validation_method = "fork_metadata_range"
 
                                         owner = fork_owner
                                         repo = fork_repo
                                         compatible_branches = fork_close
                                         found_in_fork = True
-                                        print(f"  \u2705 Using fork with validated version range support!")
+                                        print(
+                                            f"  \u2705 Using fork with validated version range support!"
+                                        )
                                         break
                                     else:
-                                        print(f"  \u274c Range {version_range} does not cover {self.config.mc_version}")
+                                        print(
+                                            f"  \u274c Range {version_range} does not cover {self.config.mc_version}"
+                                        )
                                 else:
-                                    print(f"  \u26a0\ufe0f  Could not determine version range from metadata")
+                                    print(
+                                        f"  \u26a0\ufe0f  Could not determine version range from metadata"
+                                    )
 
                             if fork_compatible and not close_matches:
                                 owner = fork_owner
                                 repo = fork_repo
                                 compatible_branches = fork_compatible
                                 found_in_fork = True
-                                print(f"  \u2705 Found {len(compatible_branches)} compatible branches in fork!")
+                                print(
+                                    f"  \u2705 Found {len(compatible_branches)} compatible branches in fork!"
+                                )
                                 break
 
                         if not found_in_fork and close_matches:
-                            print(f"\n  \u2139\ufe0f  No exact version in forks, using close matches from original repo")
+                            print(
+                                f"\n  \u2139\ufe0f  No exact version in forks, using close matches from original repo"
+                            )
                             compatible_branches = close_matches
 
                 if not compatible_branches:
-                    fallback_loaders_compile = get_cross_loader_chain(self.config.loader)
-                    if (self.config.cross_loader
-                            and fallback_loaders_compile
-                            and self.modrinth.is_cross_loader_available()):
+                    fallback_loaders_compile = get_cross_loader_chain(
+                        self.config.loader
+                    )
+                    if (
+                        self.config.cross_loader
+                        and fallback_loaders_compile
+                        and self.modrinth.is_cross_loader_available()
+                    ):
                         fallback_label = fallback_loaders_compile[0].capitalize()
-                        print(f"\n  \U0001f504 CROSS-LOADER: No {self.config.loader.capitalize()} branches found, "
-                              f"trying {fallback_label} fallback via bridge mods...")
+                        print(
+                            f"\n  \U0001f504 CROSS-LOADER: No {self.config.loader.capitalize()} branches found, "
+                            f"trying {fallback_label} fallback via bridge mods..."
+                        )
 
                         fallback_found = False
                         for fallback_loader in fallback_loaders_compile:
@@ -322,22 +508,30 @@ class Pipeline:
 
                             if not fb_branches and saved_fork_candidates:
                                 for fork_result in saved_fork_candidates:
-                                    fi = fork_result['fork']
-                                    print(f"  \U0001f504 Checking fork {fi['full_name']} "
-                                          f"for {fallback_loader.capitalize()} branches...")
-                                    fork_b = self.github.get_branches(fi['owner'], fi['repo'])
+                                    fi = fork_result["fork"]
+                                    print(
+                                        f"  \U0001f504 Checking fork {fi['full_name']} "
+                                        f"for {fallback_loader.capitalize()} branches..."
+                                    )
+                                    fork_b = self.github.get_branches(
+                                        fi["owner"], fi["repo"]
+                                    )
                                     fb_branches = self.validator.pre_validate_branches(
-                                        fi['owner'], fi['repo'], fork_b,
-                                        override_loader=fallback_loader
+                                        fi["owner"],
+                                        fi["repo"],
+                                        fork_b,
+                                        override_loader=fallback_loader,
                                     )
                                     if fb_branches:
-                                        owner = fi['owner']
-                                        repo = fi['repo']
+                                        owner = fi["owner"]
+                                        repo = fi["repo"]
                                         break
 
                             if fb_branches:
-                                print(f"  \u2705 Found {len(fb_branches)} {fallback_loader.capitalize()} "
-                                      f"branches for cross-loader compilation")
+                                print(
+                                    f"  \u2705 Found {len(fb_branches)} {fallback_loader.capitalize()} "
+                                    f"branches for cross-loader compilation"
+                                )
                                 compatible_branches = fb_branches
                                 is_cross_loader_attempt = True
                                 fallback_found = True
@@ -348,21 +542,27 @@ class Pipeline:
                             return CompilationResult(
                                 repo_url=repo_url,
                                 success=False,
-                                error=(f"No compatible branches in original repo "
-                                       f"or forks for MC {self.config.mc_version}"
-                                       f" + {self.config.loader} (also tried "
-                                       f"{tried} cross-loader fallback)")
+                                error=(
+                                    f"No compatible branches in original repo "
+                                    f"or forks for MC {self.config.mc_version}"
+                                    f" + {self.config.loader} (also tried "
+                                    f"{tried} cross-loader fallback)"
+                                ),
                             )
                     else:
                         return CompilationResult(
                             repo_url=repo_url,
                             success=False,
-                            error=(f"No compatible branches in original repo "
-                                   f"or forks for MC {self.config.mc_version}"
-                                   f" + {self.config.loader}")
+                            error=(
+                                f"No compatible branches in original repo "
+                                f"or forks for MC {self.config.mc_version}"
+                                f" + {self.config.loader}"
+                            ),
                         )
 
-                print(f"  \U0001f3af Found {len(compatible_branches)} compatible branches")
+                print(
+                    f"  \U0001f3af Found {len(compatible_branches)} compatible branches"
+                )
 
                 for branch in compatible_branches:
                     branch.score = self.validator.score_branch(branch)
@@ -370,23 +570,48 @@ class Pipeline:
                 compatible_branches.sort(key=lambda b: b.score, reverse=True)
 
                 print(f"\n  \U0001f4cb Top candidates:")
-                for i, branch in enumerate(compatible_branches[:min(3, len(compatible_branches))], 1):
-                    exact_indicator = "\u2713" if branch.minecraft_version == self.config.mc_version else "~"
+                for i, branch in enumerate(
+                    compatible_branches[: min(3, len(compatible_branches))], 1
+                ):
+                    exact_indicator = (
+                        "\u2713"
+                        if branch.minecraft_version == self.config.mc_version
+                        else "~"
+                    )
                     days_old = ""
                     if branch.commit_date:
                         try:
-                            commit_time = datetime.fromisoformat(branch.commit_date.replace('Z', '+00:00'))
+                            commit_time = datetime.fromisoformat(
+                                branch.commit_date.replace("Z", "+00:00")
+                            )
                             now = datetime.now(timezone.utc)
                             days = (now - commit_time).days
                             if days < 30:
                                 days_old = f", {days}d ago"
                             elif days < 365:
-                                days_old = f", {days//30}mo ago"
+                                days_old = f", {days // 30}mo ago"
                         except Exception:
                             pass
-                    print(f"    {i}. {branch.name} (MC {branch.minecraft_version} {exact_indicator}, score: {branch.score}{days_old})")
+                    print(
+                        f"    {i}. {branch.name} (MC {branch.minecraft_version} {exact_indicator}, score: {branch.score}{days_old})"
+                    )
 
                 branches_to_try = compatible_branches
+
+            # Level 1: drop branches with deterministic build failures before cloning
+            if self.config.prebuild_gate and branches_to_try:
+                print(f"\n  ⚡ Pre-build gate ({len(branches_to_try)} candidates)...")
+                branches_to_try = self.prebuild.filter_branches(
+                    owner, repo, branches_to_try
+                )
+
+            # Level 0: a published JAR means the build already happened elsewhere
+            if self.config.use_prebuilt and branches_to_try:
+                prebuilt_result = self._try_prebuilt(
+                    repo_url, owner, repo, branches_to_try[0]
+                )
+                if prebuilt_result:
+                    return prebuilt_result
 
             # Try each branch
             branch_errors = []
@@ -394,9 +619,17 @@ class Pipeline:
             last_missing_deps: List[str] = []
             last_fail_clone_dir: Optional[Path] = None
             for i, branch in enumerate(branches_to_try, 1):
-                print(f"\n  \U0001f33f Attempting [{i}/{len(branches_to_try)}]: {branch.name}")
-                version_match = "exact" if branch.minecraft_version == self.config.mc_version else "close"
-                print(f"     MC: {branch.minecraft_version} ({version_match}), Loader: {branch.loader} {branch.loader_version}")
+                print(
+                    f"\n  \U0001f33f Attempting [{i}/{len(branches_to_try)}]: {branch.name}"
+                )
+                version_match = (
+                    "exact"
+                    if branch.minecraft_version == self.config.mc_version
+                    else "close"
+                )
+                print(
+                    f"     MC: {branch.minecraft_version} ({version_match}), Loader: {branch.loader} {branch.loader_version}"
+                )
 
                 if repo_temp_dir.exists():
                     shutil.rmtree(repo_temp_dir)
@@ -406,10 +639,19 @@ class Pipeline:
 
                 try:
                     result = subprocess.run(
-                        ["git", "clone", "-b", branch.name, "--depth", "1", clone_url, str(repo_temp_dir)],
+                        [
+                            "git",
+                            "clone",
+                            "-b",
+                            branch.name,
+                            "--depth",
+                            "1",
+                            clone_url,
+                            str(repo_temp_dir),
+                        ],
                         capture_output=True,
                         text=True,
-                        timeout=300
+                        timeout=300,
                     )
 
                     if result.returncode != 0:
@@ -432,8 +674,7 @@ class Pipeline:
 
                 print(f"    \U0001f50d Validating gradle.properties...")
                 is_valid, message = self.validator.validate_gradle_properties(
-                    repo_temp_dir,
-                    skip_loader_validation=is_cross_loader_attempt
+                    repo_temp_dir, skip_loader_validation=is_cross_loader_attempt
                 )
                 if not is_valid:
                     print(f"    \u274c {message}")
@@ -451,8 +692,9 @@ class Pipeline:
                     continue
                 print(f"    \u2705 {message}")
 
-                success, jar_path, message, fail_type, missing_deps = \
-                    compile_mod(repo_temp_dir, extra_gradle_args)
+                success, jar_path, message, fail_type, missing_deps = compile_mod(
+                    repo_temp_dir, extra_gradle_args
+                )
                 if not success:
                     print(f"    \u274c {message}")
                     branch_errors.append(f"{branch.name}: {message[:200]}")
@@ -489,7 +731,9 @@ class Pipeline:
                 if is_cross_loader_attempt:
                     cross_note = " [Fabric via Sinytra Connector]"
 
-                print(f"\n  \u2705 SUCCESS: {mod_name} v{mod_version} from branch '{branch.name}'{version_note}{cross_note}")
+                print(
+                    f"\n  \u2705 SUCCESS: {mod_name} v{mod_version} from branch '{branch.name}'{version_note}{cross_note}"
+                )
 
                 return CompilationResult(
                     repo_url=repo_url,
@@ -500,7 +744,7 @@ class Pipeline:
                     mod_version=mod_version,
                     compiled_mc_version=branch.minecraft_version,
                     clone_dir=repo_temp_dir,
-                    is_cross_loader=is_cross_loader_attempt
+                    is_cross_loader=is_cross_loader_attempt,
                 )
 
             error_detail = f"All {len(branches_to_try)} branches failed:\n"
@@ -512,14 +756,12 @@ class Pipeline:
                 error=error_detail.strip(),
                 failure_type=last_fail_type,
                 missing_dependencies=last_missing_deps,
-                clone_dir=last_fail_clone_dir
+                clone_dir=last_fail_clone_dir,
             )
 
         except Exception as e:
             return CompilationResult(
-                repo_url=repo_url,
-                success=False,
-                error=f"Unexpected error: {e}"
+                repo_url=repo_url, success=False, error=f"Unexpected error: {e}"
             )
 
     def process_repos(self, repo_urls: List[str]):
@@ -528,9 +770,9 @@ class Pipeline:
         print(f"\U0001f5c2\ufe0f  Using temporary directory: {self.temp_dir}")
 
         try:
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"\U0001f4cb PASS 1: Compiling {len(repo_urls)} repositories")
-            print(f"{'='*80}")
+            print(f"{'=' * 80}")
 
             pass1_results: Dict[str, CompilationResult] = {}
             for repo_url in repo_urls:
@@ -539,9 +781,7 @@ class Pipeline:
                 except Exception as e:
                     logger.error(f"Unhandled error processing {repo_url}: {e}")
                     result = CompilationResult(
-                        repo_url=repo_url,
-                        success=False,
-                        error=f"Unhandled error: {e}"
+                        repo_url=repo_url, success=False, error=f"Unhandled error: {e}"
                     )
                 pass1_results[repo_url] = result
 
@@ -551,21 +791,24 @@ class Pipeline:
                 time.sleep(1)
 
             dep_failures = [
-                url for url, r in pass1_results.items()
-                if not r.success
-                and r.failure_type == FailureType.DEPENDENCY_RESOLUTION
+                url
+                for url, r in pass1_results.items()
+                if not r.success and r.failure_type == FailureType.DEPENDENCY_RESOLUTION
             ]
 
             if dep_failures:
                 modrinth_only = [
-                    url for url, r in pass1_results.items()
+                    url
+                    for url, r in pass1_results.items()
                     if r.success and r.modrinth_download
                 ]
                 if modrinth_only:
-                    print(f"\n{'='*80}")
-                    print(f"\U0001f4e4 MAVEN PUBLISH: Compiling {len(modrinth_only)} "
-                          f"Modrinth-downloaded mods for mavenLocal")
-                    print(f"{'='*80}")
+                    print(f"\n{'=' * 80}")
+                    print(
+                        f"\U0001f4e4 MAVEN PUBLISH: Compiling {len(modrinth_only)} "
+                        f"Modrinth-downloaded mods for mavenLocal"
+                    )
+                    print(f"{'=' * 80}")
 
                     for repo_url in modrinth_only:
                         print(f"\n  \U0001f4e4 Compiling for mavenLocal: {repo_url}")
@@ -573,22 +816,24 @@ class Pipeline:
                             compile_result = self.clone_and_compile(
                                 repo_url, skip_modrinth=True
                             )
-                            if (compile_result.success
-                                    and compile_result.clone_dir
-                                    and compile_result.clone_dir.exists()):
-                                publish_to_maven_local(
-                                    compile_result.clone_dir
-                                )
+                            if (
+                                compile_result.success
+                                and compile_result.clone_dir
+                                and compile_result.clone_dir.exists()
+                            ):
+                                publish_to_maven_local(compile_result.clone_dir)
                         except Exception as e:
                             print(f"    \u26a0\ufe0f  Maven publish failed: {e}")
 
                         time.sleep(1)
 
             if dep_failures:
-                print(f"\n{'='*80}")
-                print(f"\U0001f504 PASS 2: Retrying {len(dep_failures)} repos with "
-                      f"dependency failures (mavenLocal injection)")
-                print(f"{'='*80}")
+                print(f"\n{'=' * 80}")
+                print(
+                    f"\U0001f504 PASS 2: Retrying {len(dep_failures)} repos with "
+                    f"dependency failures (mavenLocal injection)"
+                )
+                print(f"{'=' * 80}")
 
                 init_script = create_maven_local_init_script(self.temp_dir)
                 maven_args = ["--init-script", str(init_script)]
@@ -597,49 +842,53 @@ class Pipeline:
                     prev = pass1_results[repo_url]
                     print(f"\n  \U0001f504 Retrying: {repo_url}")
                     if prev.missing_dependencies:
-                        print(f"     Previously missing: "
-                              f"{', '.join(prev.missing_dependencies)}")
+                        print(
+                            f"     Previously missing: "
+                            f"{', '.join(prev.missing_dependencies)}"
+                        )
 
                     try:
                         result = self.clone_and_compile(
                             repo_url, extra_gradle_args=maven_args
                         )
                     except Exception as e:
-                        logger.error(
-                            f"Unhandled error retrying {repo_url}: {e}"
-                        )
+                        logger.error(f"Unhandled error retrying {repo_url}: {e}")
                         result = CompilationResult(
                             repo_url=repo_url,
                             success=False,
-                            error=f"Unhandled error (pass 2): {e}"
+                            error=f"Unhandled error (pass 2): {e}",
                         )
 
                     pass1_results[repo_url] = result
 
-                    if result.success and result.clone_dir \
-                            and result.clone_dir.exists():
-                        publish_to_maven_local(
-                            result.clone_dir, maven_args
-                        )
+                    if (
+                        result.success
+                        and result.clone_dir
+                        and result.clone_dir.exists()
+                    ):
+                        publish_to_maven_local(result.clone_dir, maven_args)
 
                     time.sleep(1)
 
             self.results = list(pass1_results.values())
 
             cross_loader_mods = [
-                r for r in self.results
-                if r.success and r.is_cross_loader
+                r for r in self.results if r.success and r.is_cross_loader
             ]
             if cross_loader_mods:
                 fallback_loaders_dl = get_cross_loader_chain(self.config.loader)
-                print(f"\n{'='*80}")
-                print(f"\U0001f504 CROSS-LOADER: {len(cross_loader_mods)} mod(s) "
-                      f"need bridge mods to run on {self.config.loader.capitalize()}")
-                print(f"{'='*80}")
+                print(f"\n{'=' * 80}")
+                print(
+                    f"\U0001f504 CROSS-LOADER: {len(cross_loader_mods)} mod(s) "
+                    f"need bridge mods to run on {self.config.loader.capitalize()}"
+                )
+                print(f"{'=' * 80}")
                 for target in fallback_loaders_dl:
                     bridge_slugs = get_bridge_mods(self.config.loader, target)
                     if bridge_slugs:
-                        print(f"  Downloading bridge mods for {target.capitalize()} compatibility...")
+                        print(
+                            f"  Downloading bridge mods for {target.capitalize()} compatibility..."
+                        )
                         for slug in bridge_slugs:
                             self.modrinth.download_modrinth_mod(
                                 slug, self.config.mc_version, self.config.loader
@@ -656,60 +905,84 @@ class Pipeline:
     def generate_report(self) -> str:
         """Generate a detailed report of compilation results."""
         report_lines = []
-        report_lines.append("\n" + "="*80)
+        report_lines.append("\n" + "=" * 80)
         report_lines.append("\U0001f4ca COMPILATION REPORT")
-        report_lines.append("="*80)
+        report_lines.append("=" * 80)
 
         successful = [r for r in self.results if r.success]
         failed = [r for r in self.results if not r.success]
-        version_mismatches = [r for r in successful if r.compiled_mc_version and r.compiled_mc_version != self.config.mc_version]
+        version_mismatches = [
+            r
+            for r in successful
+            if r.compiled_mc_version and r.compiled_mc_version != self.config.mc_version
+        ]
         cross_loader_mods = [r for r in successful if r.is_cross_loader]
 
-        report_lines.append(f"\n\u2705 Successful: {len(successful)}/{len(self.results)}")
+        report_lines.append(
+            f"\n\u2705 Successful: {len(successful)}/{len(self.results)}"
+        )
         report_lines.append(f"\u274c Failed: {len(failed)}/{len(self.results)}")
         if version_mismatches:
-            report_lines.append(f"\u26a0\ufe0f  Version warnings: {len(version_mismatches)}")
+            report_lines.append(
+                f"\u26a0\ufe0f  Version warnings: {len(version_mismatches)}"
+            )
         if cross_loader_mods:
-            report_lines.append(f"\U0001f504 Cross-loader (Fabric via Connector): {len(cross_loader_mods)}")
+            report_lines.append(
+                f"\U0001f504 Cross-loader (Fabric via Connector): {len(cross_loader_mods)}"
+            )
 
         if successful:
-            report_lines.append("\n" + "-"*80)
+            report_lines.append("\n" + "-" * 80)
             report_lines.append("\u2705 SUCCESSFULLY COMPILED MODS:")
-            report_lines.append("-"*80)
+            report_lines.append("-" * 80)
 
             for result in successful:
                 report_lines.append(f"\n\U0001f4e6 {result.repo_url}")
                 report_lines.append(f"   \U0001f33f Branch: {result.branch}")
-                report_lines.append(f"   \U0001f4cb Mod: {result.mod_name} v{result.mod_version}")
+                report_lines.append(
+                    f"   \U0001f4cb Mod: {result.mod_name} v{result.mod_version}"
+                )
 
                 if result.compiled_mc_version == self.config.mc_version:
-                    report_lines.append(f"   \u2705 Version: {result.compiled_mc_version} (exact match)")
+                    report_lines.append(
+                        f"   \u2705 Version: {result.compiled_mc_version} (exact match)"
+                    )
                 else:
-                    report_lines.append(f"   \u26a0\ufe0f  Version: {result.compiled_mc_version} (target was {self.config.mc_version})")
+                    report_lines.append(
+                        f"   \u26a0\ufe0f  Version: {result.compiled_mc_version} (target was {self.config.mc_version})"
+                    )
 
                 if result.is_cross_loader:
-                    report_lines.append(f"   \U0001f504 Fabric mod via Sinytra Connector")
+                    report_lines.append(
+                        f"   \U0001f504 Fabric mod via Sinytra Connector"
+                    )
 
                 report_lines.append(f"   \U0001f4be JAR: {result.jar_path}")
 
         if version_mismatches:
-            report_lines.append("\n" + "-"*80)
+            report_lines.append("\n" + "-" * 80)
             report_lines.append("\u26a0\ufe0f  VERSION WARNINGS:")
-            report_lines.append("-"*80)
-            report_lines.append("Some mods were compiled for slightly different Minecraft versions.")
-            report_lines.append("These will likely work, but TEST IN-GAME before using in production:")
+            report_lines.append("-" * 80)
+            report_lines.append(
+                "Some mods were compiled for slightly different Minecraft versions."
+            )
+            report_lines.append(
+                "These will likely work, but TEST IN-GAME before using in production:"
+            )
             report_lines.append("")
 
             for result in version_mismatches:
-                report_lines.append(f"  \u2022 {result.mod_name} v{result.mod_version}: Compiled for {result.compiled_mc_version} (you're using {self.config.mc_version})")
+                report_lines.append(
+                    f"  \u2022 {result.mod_name} v{result.mod_version}: Compiled for {result.compiled_mc_version} (you're using {self.config.mc_version})"
+                )
 
             report_lines.append("")
             report_lines.append("To require exact version matches, use --strict flag.")
 
         if failed:
-            report_lines.append("\n" + "-"*80)
+            report_lines.append("\n" + "-" * 80)
             report_lines.append("\u274c FAILED COMPILATIONS:")
-            report_lines.append("-"*80)
+            report_lines.append("-" * 80)
 
             for result in failed:
                 report_lines.append(f"\n\U0001f4e6 {result.repo_url}")
@@ -721,34 +994,48 @@ class Pipeline:
                             report_lines.append(f"      - {dep}")
 
         if cross_loader_mods:
-            report_lines.append("\n" + "-"*80)
-            report_lines.append("\U0001f504 CROSS-LOADER MODS (Fabric via Sinytra Connector):")
-            report_lines.append("-"*80)
-            report_lines.append("These Fabric mods were compiled because no NeoForge version was found.")
-            report_lines.append("They require Sinytra Connector + Forgified Fabric API to run on NeoForge.")
-            report_lines.append("Compatibility is ~85% - some mods may have issues. TEST IN-GAME.")
+            report_lines.append("\n" + "-" * 80)
+            report_lines.append(
+                "\U0001f504 CROSS-LOADER MODS (Fabric via Sinytra Connector):"
+            )
+            report_lines.append("-" * 80)
+            report_lines.append(
+                "These Fabric mods were compiled because no NeoForge version was found."
+            )
+            report_lines.append(
+                "They require Sinytra Connector + Forgified Fabric API to run on NeoForge."
+            )
+            report_lines.append(
+                "Compatibility is ~85% - some mods may have issues. TEST IN-GAME."
+            )
             report_lines.append("")
             for result in cross_loader_mods:
-                report_lines.append(f"  \u2022 {result.mod_name} v{result.mod_version} ({result.repo_url})")
+                report_lines.append(
+                    f"  \u2022 {result.mod_name} v{result.mod_version} ({result.repo_url})"
+                )
             report_lines.append("")
             report_lines.append("Sinytra Connector: https://modrinth.com/mod/connector")
-            report_lines.append("Forgified Fabric API: https://modrinth.com/mod/forgified-fabric-api")
+            report_lines.append(
+                "Forgified Fabric API: https://modrinth.com/mod/forgified-fabric-api"
+            )
 
         docker_tested = [r for r in self.results if r.docker_tested]
         if docker_tested:
             docker_passed = [r for r in docker_tested if r.docker_test_passed is True]
             docker_failed = [r for r in docker_tested if r.docker_test_passed is False]
-            docker_inconclusive = [r for r in docker_tested if r.docker_test_passed is None]
-            report_lines.append("\n" + "-"*80)
+            docker_inconclusive = [
+                r for r in docker_tested if r.docker_test_passed is None
+            ]
+            report_lines.append("\n" + "-" * 80)
             report_lines.append("\U0001f433 DOCKER TEST RESULTS:")
-            report_lines.append("-"*80)
+            report_lines.append("-" * 80)
             docker_client_only = [
-                r for r in docker_inconclusive
+                r
+                for r in docker_inconclusive
                 if r.docker_error and "[CLIENT-ONLY]" in r.docker_error
             ]
             docker_loader_err = [
-                r for r in docker_inconclusive
-                if r not in docker_client_only
+                r for r in docker_inconclusive if r not in docker_client_only
             ]
             parts = [
                 f"Tested: {len(docker_tested)}",
@@ -771,27 +1058,28 @@ class Pipeline:
             if docker_loader_err:
                 report_lines.append("")
                 report_lines.append(
-                    "  \u26a0\ufe0f  LOADER/INFRASTRUCTURE ERROR "
-                    "(not caused by mods):"
+                    "  \u26a0\ufe0f  LOADER/INFRASTRUCTURE ERROR (not caused by mods):"
                 )
-                report_lines.append(
-                    f"     {docker_loader_err[0].docker_error}"
-                )
+                report_lines.append(f"     {docker_loader_err[0].docker_error}")
             if docker_failed:
                 report_lines.append("")
                 for r in docker_failed:
                     label = r.mod_name or r.repo_url
                     report_lines.append(f"  \u274c {label}: {r.docker_error}")
 
-        report_lines.append("\n" + "="*80)
-        report_lines.append(f"\U0001f3af Target: Minecraft {self.config.mc_version} with {self.config.loader.capitalize()} {self.config.loader_version}")
+        report_lines.append("\n" + "=" * 80)
+        report_lines.append(
+            f"\U0001f3af Target: Minecraft {self.config.mc_version} with {self.config.loader.capitalize()} {self.config.loader_version}"
+        )
         if self.config.strict_version:
             report_lines.append(f"\U0001f512 Mode: STRICT (exact version matches only)")
         else:
-            report_lines.append(f"\U0001f513 Mode: LENIENT (allows same major.minor versions)")
+            report_lines.append(
+                f"\U0001f513 Mode: LENIENT (allows same major.minor versions)"
+            )
         report_lines.append(f"\U0001f4c1 Output: {self.config.output_dir}")
         if self.config.mods_path:
             report_lines.append(f"\U0001f4c1 Instance Mods: {self.config.mods_path}")
-        report_lines.append("="*80)
+        report_lines.append("=" * 80)
 
-        return '\n'.join(report_lines)
+        return "\n".join(report_lines)

@@ -14,11 +14,21 @@ from modforge.loaders import ALL_LOADERS, normalize_loader
 class ModCompilerConfig:
     """Configuration for the mod compilation process."""
 
-    def __init__(self, mc_version: str, loader: str, loader_version: str,
-                 instance_path: Optional[str] = None, github_token: Optional[str] = None,
-                 strict_version: bool = False, output_dir: str = "out",
-                 cross_loader: bool = True, docker_test: bool = False,
-                 docker_timeout: int = 180):
+    def __init__(
+        self,
+        mc_version: str,
+        loader: str,
+        loader_version: str,
+        instance_path: Optional[str] = None,
+        github_token: Optional[str] = None,
+        strict_version: bool = False,
+        output_dir: str = "out",
+        cross_loader: bool = True,
+        docker_test: bool = False,
+        docker_timeout: int = 180,
+        prebuild_gate: bool = True,
+        use_prebuilt: bool = True,
+    ):
         self.mc_version = mc_version
         self.loader = normalize_loader(loader)
         self.loader_version = loader_version
@@ -27,6 +37,8 @@ class ModCompilerConfig:
         self.cross_loader = cross_loader
         self.docker_test = docker_test
         self.docker_timeout = docker_timeout
+        self.prebuild_gate = prebuild_gate
+        self.use_prebuilt = use_prebuilt
 
         # Output directory (always used)
         self.output_dir = Path(output_dir)
@@ -44,9 +56,7 @@ class ModCompilerConfig:
             self.mods_path = None
 
         # GitHub API headers
-        self.github_headers = {
-            "Accept": "application/vnd.github.v3+json"
-        }
+        self.github_headers = {"Accept": "application/vnd.github.v3+json"}
         if github_token:
             self.github_headers["Authorization"] = f"token {github_token}"
 
@@ -71,14 +81,21 @@ class BranchCandidate:
         self.version_range = None  # e.g., "[1.21,1.22)" or "~1.21.0"
         self.validation_method = None  # 'metadata_range' or 'gradle_properties'
 
+        # Pre-build gate fields (populated by modforge.prebuild)
+        self.prebuild_verdict = None  # PreBuildVerdict
+        self.ci_status = None  # CIStatus
+
     def __repr__(self):
-        return (f"BranchCandidate(name={self.name}, mc={self.minecraft_version}, "
-                f"range={self.version_range}, loader={self.loader}, "
-                f"compatible={self.is_compatible}, score={self.score})")
+        return (
+            f"BranchCandidate(name={self.name}, mc={self.minecraft_version}, "
+            f"range={self.version_range}, loader={self.loader}, "
+            f"compatible={self.is_compatible}, score={self.score})"
+        )
 
 
 class FailureType(Enum):
     """Classification of build failures for dependency-aware retries."""
+
     NONE = "none"
     DEPENDENCY_RESOLUTION = "dependency_resolution"
     BUILD_ERROR = "build_error"
@@ -94,15 +111,22 @@ class FailureType(Enum):
 class CompilationResult:
     """Result of attempting to compile a mod."""
 
-    def __init__(self, repo_url: str, success: bool, branch: Optional[str] = None,
-                 jar_path: Optional[str] = None, error: Optional[str] = None,
-                 mod_name: Optional[str] = None, mod_version: Optional[str] = None,
-                 compiled_mc_version: Optional[str] = None,
-                 failure_type: "FailureType" = None,
-                 missing_dependencies: Optional[List[str]] = None,
-                 clone_dir: Optional[Path] = None,
-                 is_cross_loader: bool = False,
-                 modrinth_download: bool = False):
+    def __init__(
+        self,
+        repo_url: str,
+        success: bool,
+        branch: Optional[str] = None,
+        jar_path: Optional[str] = None,
+        error: Optional[str] = None,
+        mod_name: Optional[str] = None,
+        mod_version: Optional[str] = None,
+        compiled_mc_version: Optional[str] = None,
+        failure_type: "FailureType" = None,
+        missing_dependencies: Optional[List[str]] = None,
+        clone_dir: Optional[Path] = None,
+        is_cross_loader: bool = False,
+        modrinth_download: bool = False,
+    ):
         self.repo_url = repo_url
         self.success = success
         self.branch = branch
@@ -156,24 +180,19 @@ class DockerTestCache:
                 for chunk in iter(lambda: f.read(8192), b""):
                     h.update(chunk)
             file_hashes.append(h.hexdigest())
-        combined = hashlib.sha256(
-            "|".join(sorted(file_hashes)).encode()
-        )
+        combined = hashlib.sha256("|".join(sorted(file_hashes)).encode())
         return combined.hexdigest()
 
-    def get(self, jar_hash: str, mc_version: str,
-            loader: str) -> Optional[bool]:
+    def get(self, jar_hash: str, mc_version: str, loader: str) -> Optional[bool]:
         """Return cached pass/fail or None if not cached / invalidated."""
         entry = self._data.get(jar_hash)
         if entry is None:
             return None
-        if (entry.get("mc_version") != mc_version
-                or entry.get("loader") != loader):
+        if entry.get("mc_version") != mc_version or entry.get("loader") != loader:
             return None
         return entry.get("passed")
 
-    def set(self, jar_hash: str, passed: bool,
-            mc_version: str, loader: str) -> None:
+    def set(self, jar_hash: str, passed: bool, mc_version: str, loader: str) -> None:
         """Store a Docker test result."""
         self._data[jar_hash] = {
             "passed": passed,
@@ -190,6 +209,7 @@ class DockerTestCache:
 @dataclass
 class ScannedMod:
     """A mod extracted from a JAR file in the user's mods folder."""
+
     jar_path: str
     jar_filename: str
     mod_id: str
@@ -205,6 +225,7 @@ class ScannedMod:
 @dataclass
 class ModAvailability:
     """What Modrinth knows about a mod's availability across versions/loaders."""
+
     mod_id: str
     mod_name: str
     modrinth_slug: Optional[str] = None
@@ -217,6 +238,7 @@ class ModAvailability:
 @dataclass
 class RecommendationResult:
     """A scored recommendation for a (mc_version, loader) combination."""
+
     mc_version: str
     loader: str
     available_mods: List[str] = field(default_factory=list)

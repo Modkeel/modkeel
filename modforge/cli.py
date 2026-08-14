@@ -36,7 +36,8 @@ app = typer.Typer(
 
 
 def resolve_github_token(
-    explicit: Optional[str], modforge_cfg: ModForgeConfig,
+    explicit: Optional[str],
+    modforge_cfg: ModForgeConfig,
     prompt_if_missing: bool = False,
 ) -> Optional[str]:
     """Resolve GitHub token: CLI flag > saved config > interactive prompt.
@@ -50,9 +51,7 @@ def resolve_github_token(
     if explicit:
         if explicit != modforge_cfg.github_token:
             modforge_cfg.github_token = explicit
-            console.print(
-                "[dim]  GitHub token saved to ~/.modforge/config.toml[/dim]"
-            )
+            console.print("[dim]  GitHub token saved to ~/.modforge/config.toml[/dim]")
         return explicit
     saved = modforge_cfg.github_token
     if saved:
@@ -68,9 +67,7 @@ def resolve_github_token(
         token = typer.prompt("  GitHub token", hide_input=True, default="")
         if token:
             modforge_cfg.github_token = token
-            console.print(
-                "[green]Token saved to ~/.modforge/config.toml[/green]"
-            )
+            console.print("[green]Token saved to ~/.modforge/config.toml[/green]")
             return token
     return None
 
@@ -85,7 +82,9 @@ def version_callback(value: bool):
 @app.callback()
 def main(
     version: bool = typer.Option(
-        False, "--version", "-V",
+        False,
+        "--version",
+        "-V",
         help="Show version and exit.",
         callback=version_callback,
         is_eager=True,
@@ -97,58 +96,86 @@ def main(
 @app.command()
 def compile(
     repos_file: Path = typer.Argument(
-        ..., help="Text file containing GitHub repository URLs (one per line).",
-        exists=True, readable=True,
+        ...,
+        help="Text file containing GitHub repository URLs (one per line).",
+        exists=True,
+        readable=True,
     ),
     mc_version: str = typer.Option(
         ..., "--mc-version", "-m", help="Minecraft version (e.g., 1.21.10)."
     ),
     loader: str = typer.Option(
-        ..., "--loader", "-l", help="Mod loader type.",
+        ...,
+        "--loader",
+        "-l",
+        help="Mod loader type.",
         case_sensitive=False,
     ),
     loader_version: str = typer.Option(
         ..., "--loader-version", "-lv", help="Mod loader version (e.g., 64)."
     ),
     instance: Optional[str] = typer.Option(
-        None, "--instance", "-i",
+        None,
+        "--instance",
+        "-i",
         help="Path to Minecraft instance directory.",
     ),
     output_dir: str = typer.Option(
-        "out", "--output-dir", "-o",
+        "out",
+        "--output-dir",
+        "-o",
         help="Directory for compiled JARs.",
     ),
     github_token: Optional[str] = typer.Option(
-        None, "--github-token", "-t",
+        None,
+        "--github-token",
+        "-t",
         help="GitHub Personal Access Token.",
     ),
     strict: bool = typer.Option(
-        False, "--strict",
+        False,
+        "--strict",
         help="Require exact Minecraft version match.",
     ),
     no_cross_loader: bool = typer.Option(
-        False, "--no-cross-loader",
+        False,
+        "--no-cross-loader",
         help="Disable Fabric fallback via Sinytra Connector.",
     ),
     output_report: Optional[str] = typer.Option(
-        None, "--output-report",
+        None,
+        "--output-report",
         help="Path to save the compilation report.",
     ),
     log_file: Optional[str] = typer.Option(
-        None, "--log-file",
+        None,
+        "--log-file",
         help="Path to write a log file.",
     ),
     docker_test: bool = typer.Option(
-        False, "--docker-test",
+        False,
+        "--docker-test",
         help="Test compiled mods in a headless Docker Minecraft server.",
     ),
     docker_timeout: int = typer.Option(
-        180, "--docker-timeout",
+        180,
+        "--docker-timeout",
         help="Seconds to wait for Docker server startup.",
     ),
     no_share: bool = typer.Option(
-        False, "--no-share",
+        False,
+        "--no-share",
         help="Skip anonymous data sharing for this run.",
+    ),
+    no_prebuild_gate: bool = typer.Option(
+        False,
+        "--no-prebuild-gate",
+        help="Do not skip branches with deterministic build failures.",
+    ),
+    no_prebuilt: bool = typer.Option(
+        False,
+        "--no-prebuilt",
+        help="Always compile, even when a published JAR already exists.",
     ),
 ):
     """Compile mods from a list of GitHub repositories."""
@@ -163,10 +190,9 @@ def compile(
         raise typer.Exit(1)
 
     # Read repository URLs
-    with open(repos_file, 'r', encoding='utf-8') as f:
+    with open(repos_file, "r", encoding="utf-8") as f:
         repo_urls = [
-            line.strip() for line in f
-            if line.strip() and not line.startswith('#')
+            line.strip() for line in f if line.strip() and not line.startswith("#")
         ]
 
     if not repo_urls:
@@ -205,6 +231,8 @@ def compile(
             cross_loader=not no_cross_loader,
             docker_test=docker_test,
             docker_timeout=docker_timeout,
+            prebuild_gate=not no_prebuild_gate,
+            use_prebuilt=not no_prebuilt,
         )
     except ValueError as e:
         console.print(f"[red]Configuration error:[/red] {e}")
@@ -220,7 +248,7 @@ def compile(
 
     # Save report if requested
     if output_report:
-        with open(output_report, 'w', encoding='utf-8') as f:
+        with open(output_report, "w", encoding="utf-8") as f:
             f.write(report)
         console.print(f"\nReport saved to: {output_report}")
 
@@ -229,15 +257,17 @@ def compile(
         try:
             from modforge.crowdsource import submit_reports
             from modforge.github import parse_repo_url
+
             submit_reports(
-                pipeline.results, modforge_cfg,
-                mc_version, loader.lower(), loader_version,
+                pipeline.results,
+                modforge_cfg,
+                mc_version,
+                loader.lower(),
+                loader_version,
                 parse_repo_url,
             )
         except Exception as e:
-            logging.getLogger("modforge").debug(
-                "Crowdsource submission error: %s", e
-            )
+            logging.getLogger("modforge").debug("Crowdsource submission error: %s", e)
 
     # Exit with error code if all mods failed
     if pipeline.results and not any(r.success for r in pipeline.results):
@@ -253,26 +283,38 @@ def search(
         ..., "--mc-version", "-m", help="Minecraft version."
     ),
     loader: str = typer.Option(
-        "neoforge", "--loader", "-l", help="Mod loader type.",
+        "neoforge",
+        "--loader",
+        "-l",
+        help="Mod loader type.",
     ),
     github_token: Optional[str] = typer.Option(
-        None, "--github-token", "-t",
+        None,
+        "--github-token",
+        "-t",
         help="GitHub Personal Access Token.",
     ),
     output_dir: str = typer.Option(
-        "out", "--output-dir", "-o",
+        "out",
+        "--output-dir",
+        "-o",
         help="Directory for downloaded/compiled JARs.",
     ),
     instance: Optional[str] = typer.Option(
-        None, "--instance", "-i",
+        None,
+        "--instance",
+        "-i",
         help="Path to Minecraft instance directory.",
     ),
     loader_version: Optional[str] = typer.Option(
-        None, "--loader-version", "-lv",
+        None,
+        "--loader-version",
+        "-lv",
         help="Mod loader version (required for compilation).",
     ),
     no_prompt: bool = typer.Option(
-        False, "--no-prompt",
+        False,
+        "--no-prompt",
         help="Skip interactive prompts (for scripts/CI).",
     ),
 ):
@@ -286,8 +328,7 @@ def search(
 
     console.print(
         Panel(
-            f"[bold]Search:[/bold] {query}\n"
-            f"MC {mc_version} | {loader.capitalize()}",
+            f"[bold]Search:[/bold] {query}\nMC {mc_version} | {loader.capitalize()}",
             title="ModForge Search",
             border_style="cyan",
         )
@@ -336,9 +377,7 @@ def search(
                 )
                 if jar:
                     modrinth.download_modrinth_deps(result)
-                    console.print(
-                        f"\n[green]Downloaded to {output_dir}/[/green]"
-                    )
+                    console.print(f"\n[green]Downloaded to {output_dir}/[/green]")
                 else:
                     console.print("[red]Download failed.[/red]")
         return
@@ -349,9 +388,7 @@ def search(
 
     # Prompt for token if missing (only needed for fork search)
     if not github_token:
-        github_token = resolve_github_token(
-            None, modforge_cfg, prompt_if_missing=True
-        )
+        github_token = resolve_github_token(None, modforge_cfg, prompt_if_missing=True)
         if github_token:
             # Rebuild config with token
             config = ModCompilerConfig(
@@ -420,9 +457,7 @@ def search(
                 # Offer compilation if interactive and loader_version provided
                 is_interactive = not no_prompt and console.is_terminal
                 if is_interactive and loader_version:
-                    compile_it = typer.confirm(
-                        "\n  Compile best fork?", default=False
-                    )
+                    compile_it = typer.confirm("\n  Compile best fork?", default=False)
                     if compile_it:
                         best_fork = validated_forks[0]
                         best_branch = best_fork["_best_branch"]
@@ -460,10 +495,9 @@ def search(
                                 )
                         finally:
                             import shutil
+
                             if pipeline.temp_dir:
-                                shutil.rmtree(
-                                    pipeline.temp_dir, ignore_errors=True
-                                )
+                                shutil.rmtree(pipeline.temp_dir, ignore_errors=True)
                         return
 
                 console.print(
@@ -487,34 +521,44 @@ def search(
 
 @app.command()
 def get(
-    query: str = typer.Argument(
-        ..., help="Mod name (e.g., 'JEI', 'Create')."
-    ),
+    query: str = typer.Argument(..., help="Mod name (e.g., 'JEI', 'Create')."),
     mc_version: str = typer.Option(
         ..., "--mc-version", "-m", help="Minecraft version (e.g., 1.21.1)."
     ),
     loader: str = typer.Option(
-        "neoforge", "--loader", "-l", help="Mod loader type.",
+        "neoforge",
+        "--loader",
+        "-l",
+        help="Mod loader type.",
         case_sensitive=False,
     ),
     loader_version: Optional[str] = typer.Option(
-        None, "--loader-version", "-lv",
+        None,
+        "--loader-version",
+        "-lv",
         help="Mod loader version (required for fork compilation).",
     ),
     github_token: Optional[str] = typer.Option(
-        None, "--github-token", "-t",
+        None,
+        "--github-token",
+        "-t",
         help="GitHub Personal Access Token.",
     ),
     output_dir: str = typer.Option(
-        "out", "--output-dir", "-o",
+        "out",
+        "--output-dir",
+        "-o",
         help="Directory for downloaded/compiled JARs.",
     ),
     instance: Optional[str] = typer.Option(
-        None, "--instance", "-i",
+        None,
+        "--instance",
+        "-i",
         help="Path to Minecraft instance directory.",
     ),
     docker_test: bool = typer.Option(
-        False, "--docker-test",
+        False,
+        "--docker-test",
         help="Test compiled mod in Docker after compilation.",
     ),
 ):
@@ -566,9 +610,7 @@ def get(
     result = modrinth.check_modrinth(query)
 
     if result:
-        jar = modrinth.download_modrinth_mod(
-            result["slug"], mc_version, loader.lower()
-        )
+        jar = modrinth.download_modrinth_mod(result["slug"], mc_version, loader.lower())
         if jar:
             modrinth.download_modrinth_deps(result)
             console.print(
@@ -579,15 +621,12 @@ def get(
             return
         else:
             console.print(
-                "[yellow]Modrinth download failed, "
-                "trying GitHub forks...[/yellow]"
+                "[yellow]Modrinth download failed, trying GitHub forks...[/yellow]"
             )
 
     # Step 2: Search GitHub forks (prompt for token if missing)
     if not github_token:
-        github_token = resolve_github_token(
-            None, modforge_cfg, prompt_if_missing=True
-        )
+        github_token = resolve_github_token(None, modforge_cfg, prompt_if_missing=True)
         if github_token:
             config = ModCompilerConfig(
                 mc_version=mc_version,
@@ -629,9 +668,7 @@ def get(
         if not branches:
             continue
 
-        compatible = validator.pre_validate_branches(
-            fork_owner, fork_repo, branches
-        )
+        compatible = validator.pre_validate_branches(fork_owner, fork_repo, branches)
         if compatible:
             best = max(compatible, key=lambda b: validator.score_branch(b))
             fork["_best_branch"] = best
@@ -639,8 +676,7 @@ def get(
 
     if not validated_forks:
         console.print(
-            f"[red]No compatible forks found[/red] for "
-            f"MC {mc_version} + {loader}."
+            f"[red]No compatible forks found[/red] for MC {mc_version} + {loader}."
         )
         raise typer.Exit(1)
 
@@ -696,9 +732,7 @@ def get(
                 f"{output_dir}/[/green]"
             )
         else:
-            console.print(
-                f"\n[red]Compilation failed:[/red] {comp_result.error}"
-            )
+            console.print(f"\n[red]Compilation failed:[/red] {comp_result.error}")
             raise typer.Exit(1)
     finally:
         if pipeline.temp_dir:
@@ -708,13 +742,19 @@ def get(
 @app.command()
 def token(
     set_token: Optional[str] = typer.Option(
-        None, "--set", help="Save a GitHub Personal Access Token.",
+        None,
+        "--set",
+        help="Save a GitHub Personal Access Token.",
     ),
     clear: bool = typer.Option(
-        False, "--clear", help="Remove saved token.",
+        False,
+        "--clear",
+        help="Remove saved token.",
     ),
     show: bool = typer.Option(
-        False, "--show", help="Show the full saved token (unmasked).",
+        False,
+        "--show",
+        help="Show the full saved token (unmasked).",
     ),
 ):
     """Manage saved GitHub Personal Access Token."""
@@ -783,7 +823,8 @@ def status():
         if saved_token:
             masked = (
                 saved_token[:4] + "****" + saved_token[-4:]
-                if len(saved_token) > 8 else "****"
+                if len(saved_token) > 8
+                else "****"
             )
             table.add_row("GitHub token", masked)
         else:
@@ -803,10 +844,9 @@ def status():
             if loader_dir.is_dir():
                 for version_dir in sorted(loader_dir.iterdir()):
                     if version_dir.is_dir():
-                        has_run = (
-                            (version_dir / "run.sh").exists()
-                            or (version_dir / "run.bat").exists()
-                        )
+                        has_run = (version_dir / "run.sh").exists() or (
+                            version_dir / "run.bat"
+                        ).exists()
                         status_str = (
                             "[green]installed[/green]"
                             if has_run
@@ -825,11 +865,10 @@ def status():
     cache_file = config_dir / "docker_cache.json"
     if cache_file.exists():
         import json
+
         try:
             data = json.loads(cache_file.read_text())
-            console.print(
-                f"\nDocker test cache: [green]{len(data)} entries[/green]"
-            )
+            console.print(f"\nDocker test cache: [green]{len(data)} entries[/green]")
         except Exception:
             pass
 
@@ -838,6 +877,7 @@ def status():
         if not versions:
             continue
         from modforge.loaders import get_profile
+
         display_name = get_profile(loader_name)["display_name"]
         ver_table = Table(title=f"Known {display_name} Versions")
         ver_table.add_column("MC Version", style="cyan")
@@ -850,19 +890,27 @@ def status():
 @app.command()
 def recommend(
     mods_dir: Optional[str] = typer.Option(
-        None, "--mods-dir", "-d",
+        None,
+        "--mods-dir",
+        "-d",
         help="Path to Minecraft mods folder. Auto-detects if not set.",
     ),
     mc_version: Optional[str] = typer.Option(
-        None, "--mc-version", "-m",
+        None,
+        "--mc-version",
+        "-m",
         help="Filter to MC version family (e.g., 1.21).",
     ),
     loader: Optional[str] = typer.Option(
-        None, "--loader", "-l",
+        None,
+        "--loader",
+        "-l",
         help="Filter to a specific loader.",
     ),
     top: int = typer.Option(
-        5, "--top", "-n",
+        5,
+        "--top",
+        "-n",
         help="Number of top recommendations to show.",
     ),
 ):
@@ -1004,12 +1052,9 @@ def recommend(
     )
     if unknown_count > 0:
         unknown_ids = [
-            a.mod_name for a in engine.availability.values()
-            if not a.found_on_modrinth
+            a.mod_name for a in engine.availability.values() if not a.found_on_modrinth
         ]
-        console.print(
-            f"  Not found: [yellow]{', '.join(unknown_ids)}[/yellow]"
-        )
+        console.print(f"  Not found: [yellow]{', '.join(unknown_ids)}[/yellow]")
 
     if not recommendations:
         console.print(
