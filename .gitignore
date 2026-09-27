@@ -47,3 +47,6 @@ env/
 
 # Research caches
 research/.cache/
+research/.runtime/
+research/.overnight/
+research/.overnight.console
