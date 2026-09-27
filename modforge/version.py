@@ -97,6 +97,8 @@ def is_version_in_fabric_range(version: str, range_str: str) -> bool:
         return False
 
     range_str = re.sub(r'([<>=~^]+)\s+', r'\1', range_str.strip())
+    if range_str in ('*', 'x', 'X'):
+        return True
     if '||' in range_str:
         return any(is_version_in_fabric_range(version, part)
                    for part in range_str.split('||') if part.strip())

@@ -734,7 +734,7 @@ class Pipeline:
                 print(f"    \u2705 {message}")
 
                 success, jar_path, message, fail_type, missing_deps = compile_mod(
-                    repo_temp_dir, extra_gradle_args
+                    repo_temp_dir, extra_gradle_args, self.config.mc_version
                 )
                 if not success:
                     print(f"    \u274c {message}")

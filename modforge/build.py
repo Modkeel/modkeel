@@ -84,9 +84,136 @@ def find_output_jars(repo_path: Path, max_depth: int = 3) -> List[Path]:
     return mod_jars or candidates
 
 
+# The lines that say why a build failed; Gradle's own tail only says that it did
+_KEY_ERROR = re.compile(r"\berror:|\[ERROR\]|^\s*ERROR\b|Caused by:|cannot find symbol"
+                        r"|What went wrong|OutOfMemoryError|Not enough memory", re.I)
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def key_error_lines(output: str, limit: int = 12) -> List[str]:
+    """First distinct error lines of a build's output, colour codes stripped."""
+    out: List[str] = []
+    for line in _ANSI.sub("", output).splitlines():
+        line = line.strip()
+        if line and _KEY_ERROR.search(line) and line not in out:
+            out.append(line[:300])
+            if len(out) >= limit:
+                break
+    return out
+
+
+GRADLE_DISTS = Path.home() / ".modforge" / "gradle"
+_WRAPPER_URL = re.compile(r"^distributionUrl\s*=\s*(\S+)", re.M)
+_LOADER_DIR_ORDER = ("fabric", "neoforge", "forge", "quilt")
+
+
+def _gradle_script(root: Path) -> Path:
+    return root / ("gradlew.bat" if os.name == 'nt' else "gradlew")
+
+
+def ensure_gradle_distribution(url: str) -> Optional[Path]:
+    """Download and unpack a Gradle distribution once; return its gradle executable."""
+    import requests  # local: nothing else in build.py touches the network
+
+    name = url.rsplit("/", 1)[-1].removesuffix(".zip")
+    home = GRADLE_DISTS / name
+    exe_name = "gradle.bat" if os.name == 'nt' else "gradle"
+    found = list(home.glob(f"*/bin/{exe_name}")) if home.exists() else []
+    if found:
+        return found[0]
+    home.mkdir(parents=True, exist_ok=True)
+    archive = home / "dist.zip"
+    try:
+        with requests.get(url, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            with open(archive, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(home)
+    except Exception as e:  # noqa: BLE001 - the caller reports a missing wrapper
+        logger.debug(f"Gradle distribution download failed ({url}): {e}")
+        return None
+    finally:
+        archive.unlink(missing_ok=True)
+    found = list(home.glob(f"*/bin/{exe_name}"))
+    if found and os.name != 'nt':
+        os.chmod(found[0], 0o755)
+    return found[0] if found else None
+
+
+def resolve_gradle(repo_path: Path, loader: Optional[str] = None
+                   ) -> Tuple[Optional[Path], Optional[Path]]:
+    """(build root, gradle executable) for a repo.
+
+    The wrapper script wins. A repo that ships only gradle-wrapper.properties gets the
+    distribution it names. Repos whose loaders are separate Gradle projects in subfolders
+    (``Fabric/``, ``NeoForge/``) build the folder of ``loader``, else the first known one.
+    """
+    script = _gradle_script(repo_path)
+    if script.exists():
+        if os.name != 'nt':
+            os.chmod(script, 0o755)
+        return repo_path, script
+    props = repo_path / "gradle" / "wrapper" / "gradle-wrapper.properties"
+    has_settings = any((repo_path / f).exists()
+                       for f in ("settings.gradle", "settings.gradle.kts",
+                                 "build.gradle", "build.gradle.kts"))
+    if props.exists() and has_settings:
+        m = _WRAPPER_URL.search(props.read_text(encoding="utf-8", errors="replace"))
+        if m:
+            exe = ensure_gradle_distribution(m.group(1).replace("\\:", ":"))
+            if exe:
+                return repo_path, exe
+    subs = {d.name.lower(): d for d in repo_path.iterdir()
+            if d.is_dir() and (_gradle_script(d).exists()
+                               or (d / "gradle" / "wrapper" / "gradle-wrapper.properties")
+                               .exists())}
+    for name in ([loader.lower()] if loader else []) + list(_LOADER_DIR_ORDER):
+        if name in subs:
+            return resolve_gradle(subs[name])
+    return None, None
+
+
+def loader_subproject(root: Path, loader: str) -> Optional[str]:
+    """Gradle path of a multi-loader repo's subproject for ``loader`` (``:Fabric``), if any."""
+    for d in root.iterdir():
+        if d.is_dir() and d.name.lower() == loader.lower() and \
+                any((d / f).exists() for f in ("build.gradle", "build.gradle.kts")):
+            return f":{d.name}"
+    return None
+
+
+def build_tasks(root: Path, mc_version: Optional[str], loader: Optional[str] = None) -> List[str]:
+    """Tasks to build. Stonecutter builds every version it knows, and a multi-loader
+    build fails as a whole when one loader breaks: narrow to the target (and ``loader``)."""
+    sub = loader_subproject(root, loader) if loader else None
+    if sub:
+        return [f"{sub}:build"]
+    versions = root / "versions"
+    stonecutter = any((root / f).exists()
+                      for f in ("stonecutter.gradle.kts", "stonecutter.gradle"))
+    if not (mc_version and stonecutter and versions.is_dir()):
+        return ["build"]
+    names = [d.name for d in versions.iterdir()
+             if d.is_dir() and (d.name == mc_version or d.name.startswith(mc_version + "-"))]
+    return [f":{n}:build" for n in sorted(names)] or ["build"]
+
+
+def select_main_jar(jar_files: List[Path], mc_version: Optional[str] = None) -> Path:
+    """Fat jar, else the largest. Jars that validate for ``mc_version`` go first, so a
+    multi-version build does not hand back another version's jar."""
+    if mc_version:
+        jar_files = [j for j in jar_files if validate_jar(j, mc_version)[0]] or jar_files
+    fat_jars = [j for j in jar_files if j.name.endswith(('-all.jar', '-shadow.jar'))]
+    return max(fat_jars or jar_files, key=lambda j: j.stat().st_size)
+
+
 def compile_mod(
     repo_path: Path,
-    extra_gradle_args: Optional[List[str]] = None
+    extra_gradle_args: Optional[List[str]] = None,
+    mc_version: Optional[str] = None,
+    loader: Optional[str] = None,
 ) -> Tuple[bool, Optional[Path], str, FailureType, List[str]]:
     """
     Compile the mod using Gradle.
@@ -94,17 +221,11 @@ def compile_mod(
     """
     print(f"    \U0001f528 Compiling...")
 
-    if os.name == 'nt':
-        gradlew = repo_path / "gradlew.bat"
-    else:
-        gradlew = repo_path / "gradlew"
-
-    if not gradlew.exists():
+    root, gradlew = resolve_gradle(repo_path, loader)
+    if not gradlew:
         return (False, None, "Gradle wrapper not found",
                 FailureType.BUILD_ERROR, [])
-
-    if os.name != 'nt':
-        os.chmod(gradlew, 0o755)
+    repo_path = root
 
     # Quick dependency resolution check
     try:
@@ -139,7 +260,7 @@ def compile_mod(
         print(f"    \u26a0\ufe0f  Dep check error ({e}), continuing with full build...")
 
     try:
-        cmd = [str(gradlew), "build", "--no-daemon"]
+        cmd = [str(gradlew), *build_tasks(repo_path, mc_version, loader), "--no-daemon"]
         if extra_gradle_args:
             cmd.extend(extra_gradle_args)
 
@@ -163,6 +284,9 @@ def compile_mod(
                 result.stdout.split('\n')[-15:]
             ) if result.stdout else ''
             error_detail = f"Gradle build failed (exit code {result.returncode}):\n"
+            causes = key_error_lines(result.stdout + "\n" + result.stderr)
+            if causes:
+                error_detail += "--- errors ---\n" + "\n".join(causes) + "\n"
             if stderr_tail.strip():
                 error_detail += f"--- stderr ---\n{stderr_tail}\n"
             if stdout_tail.strip():
@@ -182,14 +306,7 @@ def compile_mod(
             return (False, None, "No mod JAR found in any build/libs",
                     FailureType.BUILD_ERROR, [])
 
-        fat_jars = [
-            j for j in jar_files
-            if j.name.endswith(('-all.jar', '-shadow.jar'))
-        ]
-        if fat_jars:
-            main_jar = max(fat_jars, key=lambda j: j.stat().st_size)
-        else:
-            main_jar = max(jar_files, key=lambda j: j.stat().st_size)
+        main_jar = select_main_jar(jar_files, mc_version)
 
         return True, main_jar, "Compilation successful", FailureType.NONE, []
 
@@ -319,16 +436,10 @@ def publish_to_maven_local(
     extra_gradle_args: Optional[List[str]] = None
 ) -> bool:
     """Run publishToMavenLocal on a successfully compiled repo."""
-    if os.name == 'nt':
-        gradlew = repo_path / "gradlew.bat"
-    else:
-        gradlew = repo_path / "gradlew"
-
-    if not gradlew.exists():
+    root, gradlew = resolve_gradle(repo_path)
+    if not gradlew:
         return False
-
-    if os.name != 'nt':
-        os.chmod(gradlew, 0o755)
+    repo_path = root
 
     # Release builds often GPG-sign their publications; a local publish needs no signature
     # and would otherwise fail with "no configured signatory".
