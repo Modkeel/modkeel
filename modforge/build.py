@@ -54,6 +54,36 @@ def classify_build_failure(
     return FailureType.BUILD_ERROR, []
 
 
+_EXCLUDED_JAR_SUFFIXES = ('-sources.jar', '-dev.jar', '-javadoc.jar', '-slim.jar', '-api.jar')
+_MOD_METADATA = ('META-INF/neoforge.mods.toml', 'META-INF/mods.toml', 'fabric.mod.json',
+                 'quilt.mod.json')
+
+
+def _is_mod_jar(jar: Path) -> bool:
+    try:
+        with zipfile.ZipFile(jar) as z:
+            names = set(z.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return any(m in names for m in _MOD_METADATA)
+
+
+def find_output_jars(repo_path: Path, max_depth: int = 3) -> List[Path]:
+    """Built JARs from the root and subprojects (multi-loader builds put them in
+    ``neoforge/build/libs`` and similar). Jars carrying mod metadata win; when none
+    do, fall back to every candidate so single-module builds keep working."""
+    candidates = []
+    for depth in range(max_depth + 1):
+        pattern = "/".join(["*"] * depth + ["build", "libs", "*.jar"])
+        for jar in repo_path.glob(pattern):
+            rel = jar.relative_to(repo_path).parts
+            if rel[0] == "buildSrc" or jar.name.endswith(_EXCLUDED_JAR_SUFFIXES):
+                continue
+            candidates.append(jar)
+    mod_jars = [j for j in candidates if _is_mod_jar(j)]
+    return mod_jars or candidates
+
+
 def compile_mod(
     repo_path: Path,
     extra_gradle_args: Optional[List[str]] = None
@@ -146,25 +176,10 @@ def compile_mod(
 
             return False, None, error_detail, failure_type, missing_deps
 
-        # Find the compiled JAR
-        build_libs = repo_path / "build" / "libs"
-
-        if not build_libs.exists():
-            return (False, None,
-                    "build/libs directory not found after compilation",
-                    FailureType.BUILD_ERROR, [])
-
-        exclude_suffixes = (
-            '-sources.jar', '-dev.jar', '-javadoc.jar',
-            '-slim.jar', '-api.jar'
-        )
-        jar_files = [
-            f for f in build_libs.glob("*.jar")
-            if not any(f.name.endswith(s) for s in exclude_suffixes)
-        ]
+        jar_files = find_output_jars(repo_path)
 
         if not jar_files:
-            return (False, None, "No JAR file found in build/libs",
+            return (False, None, "No mod JAR found in any build/libs",
                     FailureType.BUILD_ERROR, [])
 
         fat_jars = [
