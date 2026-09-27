@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from modforge.linkage import (TAG_FIELDREF, TAG_INTERFACE_METHODREF, TAG_METHODREF,
+from modforge.linkage import (TAG_CLASS, TAG_FIELDREF, TAG_INTERFACE_METHODREF, TAG_METHODREF,
                               TAG_NAME_AND_TYPE, ClassFileError, _class_internal_name,
                               _parse_pool, _utf8)
 
@@ -160,11 +160,22 @@ def _mixin_targets(attr: bytes, pool) -> List[str]:
 
 
 def member_refs(data: bytes) -> Tuple[str, Set[Tuple[str, str, str, str]]]:
-    """(this class, {(kind, owner, name, descriptor)}) for every field/method reference."""
+    """(this class, {(kind, owner, name, descriptor)}) for every field/method reference, plus
+    ("class", name, "", "") for every class the pool names (types, supertypes, casts,
+    class literals): a missing one is a NoClassDefFoundError."""
     pool, offset = _parse_pool(data)
     this = _class_internal_name(pool, struct.unpack_from(">H", data, offset + 2)[0]) or ""
     refs = set()
-    for entry in pool:
+    for i, entry in enumerate(pool):
+        if entry and entry[0] == TAG_CLASS:
+            name = _class_internal_name(pool, i)
+            if name:
+                name = name.lstrip("[")
+                if name.startswith("L") and name.endswith(";"):
+                    name = name[1:-1]
+                if "/" in name:
+                    refs.add(("class", name, "", ""))
+            continue
         if not entry or entry[0] not in (TAG_FIELDREF, TAG_METHODREF, TAG_INTERFACE_METHODREF):
             continue
         class_index, nat_index = struct.unpack(">HH", entry[1])
@@ -346,6 +357,8 @@ def check_jar_members(jar: Path, db: ClassDB, patched_only: Optional[Set[str]] =
                 missing_classes.add(owner)
                 report.sites[owner] = sorted(sites)[:3]
             continue
+        if kind == "class":
+            continue
         verdict = db.resolve(kind, owner, name, desc, overlay)
         if verdict == FOUND:
             continue
@@ -365,9 +378,22 @@ def check_jar_members(jar: Path, db: ClassDB, patched_only: Optional[Set[str]] =
     return report
 
 
+JDK_CLASSES = Path.home() / ".modforge" / "jdk-classes"
+
+
+def add_jdk(db: ClassDB) -> bool:
+    """Add java.base so enums, records and JDK supertypes resolve instead of stopping the
+    walk as unknown. Built once with ``jimage extract`` (see research/member_check.py)."""
+    jars = sorted(JDK_CLASSES.glob("java.base-*.jar"))
+    if jars:
+        db.add_jar(jars[-1], track_packages=False)
+    return bool(jars)
+
+
 def build_db(game_jars: Iterable[Path], other_jars: Iterable[Path]) -> ClassDB:
     """Reference database: game jars first (patched before vanilla), then loader + deps."""
     db = ClassDB()
+    add_jdk(db)
     for jar in game_jars:
         db.add_jar(Path(jar))
     for jar in other_jars:

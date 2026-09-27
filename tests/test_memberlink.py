@@ -96,7 +96,8 @@ def test_member_refs_lists_field_and_method_refs():
                                      ("field", "net/minecraft/Base", "level", "I")])
     this, refs = member_refs(data)
     assert this == "mod/X"
-    assert refs == {("method", "net/minecraft/Block", "place", "(I)Z"),
+    assert ("class", "net/minecraft/Block", "", "") in refs
+    assert {r for r in refs if r[0] != "class"} == {("method", "net/minecraft/Block", "place", "(I)Z"),
                     ("field", "net/minecraft/Base", "level", "I")}
 
 
@@ -123,7 +124,8 @@ def test_check_jar_flags_missing_member_and_class(tmp_path):
     assert rep.missing_members == ["method net/minecraft/Block.remove()V"]
     assert rep.missing_classes == ["net/minecraft/Removed"]
     assert rep.sites["net/minecraft/Removed"] == ["mod/X"]
-    assert rep.refs_checked == 3
+    # 3 member refs + the 2 game classes named in the pool
+    assert rep.refs_checked == 5
 
 
 def test_mixin_members_count_as_added_to_target(tmp_path):
@@ -145,3 +147,21 @@ def test_patched_loader_miss_on_unpatched_class_is_unverified(tmp_path):
     rep = check_jar_members(mod, db, patched_only={"net/minecraft/Base"})
     assert rep.missing_members == [] and rep.unverified == [
         "method net/minecraft/Block.neoOnly()V"]
+
+
+def test_missing_supertype_is_a_missing_class(tmp_path):
+    db = ClassDB()
+    db.add_jar(game(tmp_path))
+    mod = jar(tmp_path / "mod.jar", {"mod/Trigger": class_file(
+        "mod/Trigger", interfaces=["net/minecraft/CriterionTrigger"])})
+    assert check_jar_members(mod, db).missing_classes == ["net/minecraft/CriterionTrigger"]
+
+
+def test_enum_field_resolves_through_jdk_super(tmp_path):
+    db = ClassDB()
+    jdk = jar(tmp_path / "jdk.jar", {"java/lang/Enum": class_file("java/lang/Enum")})
+    db.add_jar(jdk, track_packages=False)
+    db.add_jar(jar(tmp_path / "g.jar", {"net/minecraft/Type": class_file(
+        "net/minecraft/Type", "java/lang/Enum", fields=[("KEYBOARD", "Lnet/minecraft/Type;")])}))
+    assert db.resolve("field", "net/minecraft/Type", "KEYSYM", "Lnet/minecraft/Type;") == MISSING
+    assert db.resolve("field", "net/minecraft/Type", "KEYBOARD", "Lnet/minecraft/Type;") == FOUND
