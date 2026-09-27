@@ -80,3 +80,9 @@ def test_key_error_lines_extracts_causes():
            "BUILD FAILED\n")
     assert key_error_lines(out) == ["Caused by: java.io.IOException: boom",
                                     "Foo.java:3: error: cannot find symbol"]
+
+
+def test_key_error_lines_takes_gradle_cause():
+    out = "* What went wrong:\nCould not resolve all files for configuration ':compileClasspath'.\n"
+    assert key_error_lines(out) == [
+        "Could not resolve all files for configuration ':compileClasspath'."]

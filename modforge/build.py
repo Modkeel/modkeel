@@ -93,9 +93,14 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 def key_error_lines(output: str, limit: int = 12) -> List[str]:
     """First distinct error lines of a build's output, colour codes stripped."""
     out: List[str] = []
-    for line in _ANSI.sub("", output).splitlines():
-        line = line.strip()
-        if line and _KEY_ERROR.search(line) and line not in out:
+    lines = [ln.strip() for ln in _ANSI.sub("", output).splitlines()]
+    for i, line in enumerate(lines):
+        if not line or not _KEY_ERROR.search(line):
+            continue
+        if line.startswith("* What went wrong"):
+            # Gradle puts the cause on the next line
+            line = next((ln for ln in lines[i + 1:] if ln), line)
+        if line not in out:
             out.append(line[:300])
             if len(out) >= limit:
                 break
