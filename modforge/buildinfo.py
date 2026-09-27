@@ -23,7 +23,8 @@ VERSION = r"\d+\.\d+(?:\.\d+)?"
 # MINECRAFT_VERSION, minecraft-version. The lookbehind rejects prefixed keys such as
 # parchmentMinecraftVersion; the lookahead rejects suffixed ones such as
 # minecraftVersionRange.
-_MC_KEY = r"(?<![A-Za-z0-9_])(?:minecraft|mc|game)[_\-.]?version(?![A-Za-z0-9_])"
+_MC_KEY = (r"(?<![A-Za-z0-9_])(?:(?:neo|fabric|forge|quilt|loom)[_\-.]?)?"
+           r"(?:minecraft|mc|game)(?:[_\-.]?compile)?[_\-.]?version(?![A-Za-z0-9_])")
 
 _MC_DECLARATIONS = [
     # key = 1.21.10 / key: "1.21.10" / key = "1.21.10"
@@ -42,6 +43,14 @@ _LOADER_KEYS = {
     "fabric": re.compile(r"fabric[_\-.]?(?:loader|api)[_\-.]?version|deps\.fabric",
                          re.IGNORECASE),
     "quilt": re.compile(r"quilt[_\-.]?loader[_\-.]?version", re.IGNORECASE),
+}
+
+# Gradle plugin ids name the loader toolchain even when no metadata file is in the tree
+_PLUGIN_LOADERS = {
+    "neoforge": re.compile(r"net\.neoforged\.(?:gradle|moddev)"),
+    "forge": re.compile(r"net\.minecraftforge\.gradle"),
+    "fabric": re.compile(r"fabric-loom|net\.fabricmc\.fabric-loom"),
+    "quilt": re.compile(r"org\.quiltmc\.loom"),
 }
 
 _METADATA_LOADER = {
@@ -140,6 +149,7 @@ def find_mc_versions(content: str) -> Set[str]:
 
 def find_loaders(content: str) -> Set[str]:
     found = {name for name, pattern in _LOADER_KEYS.items() if pattern.search(content)}
+    found.update(name for name, pattern in _PLUGIN_LOADERS.items() if pattern.search(content))
     return found
 
 
@@ -197,8 +207,9 @@ def extract_build_info(paths: Iterable[str], files: Dict[str, str]) -> BuildInfo
             continue
 
         if path == "gradle/libs.versions.toml":
-            match = re.search(r"^\s*(?:minecraft|minecraft-version|game-version)\s*=\s*[\"']("
-                              + VERSION + r")[\"']", content, re.MULTILINE)
+            match = re.search(r"^\s*(?:minecraft|minecraft-version|game-version|loom-mc)\s*=\s*"
+                              r"(?:\{[^}\n]*?prefer\s*=\s*)?[\"'](" + VERSION + r")[\"']",
+                              content, re.MULTILINE)
             if match:
                 info.mc_versions.add(match.group(1))
                 info.sources.append(path)

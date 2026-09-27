@@ -230,3 +230,26 @@ class TestRangeOnlyAndPairs:
                  "versions/26.1-neoforge/gradle.properties"]
         ok, b = judge(paths, {})
         assert not ok and "only for fabric" in b.validation_error
+
+
+class TestSecondRoundLayouts:
+    """Gaps found by jev-lab exp16 on the 40 most-downloaded GitHub-hosted mods."""
+
+    @pytest.mark.parametrize("content,expected", [
+        ("neoMcVersion=1.21", {"1.21"}),
+        ('val MINECRAFT_COMPILE_VERSION by extra { "26.2" }', {"26.2"}),
+    ])
+    def test_prefixed_keys(self, content, expected):
+        assert find_mc_versions(content) == expected
+
+    def test_catalog_prefer(self):
+        info = extract_build_info(["gradle/libs.versions.toml"], {"gradle/libs.versions.toml":
+                                  '[versions]\nminecraft = { strictly = "[26.1.2,)", prefer = "26.1.2" }\n'})
+        assert info.mc_versions == {"26.1.2"}
+
+    def test_loader_from_plugin_id(self):
+        paths = ["build.gradle", "gradle.properties"]
+        files = {"build.gradle": "plugins { id 'net.neoforged.gradle.userdev' version '7.1.38' }",
+                 "gradle.properties": "minecraft_version=26.2\n"}
+        ok, b = judge(paths, files, mc="26.2", name="26.2-neoforge")
+        assert ok and b.loader == "neoforge"
