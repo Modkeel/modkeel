@@ -10,12 +10,14 @@ they are downloaded at runtime and cached under the user's home, never vendored.
 
 import logging
 import re
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
 
-from modforge.symbols import SymbolIndex, parse_proguard_mappings
+from modforge.linkage import ClassFileError, parse_class_members
+from modforge.symbols import SymbolIndex, is_candidate, parse_proguard_mappings
 
 logger = logging.getLogger("modforge")
 
@@ -76,6 +78,81 @@ def detect_flavor(build_scripts: List[str], loader: Optional[str] = None) -> str
     return FLAVOR_MOJMAP
 
 
+def _param_count(descriptor: str) -> int:
+    """Number of parameters in a JVM method descriptor such as (ILjava/lang/String;[J)V."""
+    params = descriptor[1:descriptor.index(")")]
+    count, i = 0, 0
+    while i < len(params):
+        while params[i] == "[":
+            i += 1
+        i = params.index(";", i) + 1 if params[i] == "L" else i + 1
+        count += 1
+    return count
+
+
+def index_from_jar(jar_path: Path, mc_version: str) -> SymbolIndex:
+    """Build a SymbolIndex from an unobfuscated client JAR (Minecraft 26.1 and later).
+
+    From 26.1 Mojang ships the game with its real names and stops publishing mappings, so
+    the class files themselves are the symbol table.
+    """
+    index = SymbolIndex(flavor=FLAVOR_MOJMAP, mc_version=mc_version)
+    with zipfile.ZipFile(jar_path) as jar:
+        for entry in jar.namelist():
+            if not entry.endswith(".class"):
+                continue
+            fqcn = entry[:-6].replace("/", ".")
+            if not is_candidate(fqcn):
+                continue
+            try:
+                _name, fields, methods = parse_class_members(jar.read(entry))
+            except ClassFileError as e:
+                logger.debug("skipping %s: %s", entry, e)
+                continue
+            index.classes.add(fqcn)
+            for name, _desc in fields:
+                index.fields.setdefault(fqcn, set()).add(name)
+            for name, desc in methods:
+                if name in ("<init>", "<clinit>"):
+                    continue
+                index.methods.setdefault(fqcn, set()).add((name, _param_count(desc)))
+                index.descriptors.setdefault(fqcn, set()).add(f"{name}{desc}")
+    return index
+
+
+def _version_details(mc_version: str, timeout: int = 15) -> Optional[Dict]:
+    try:
+        manifest = requests.get(VERSION_MANIFEST_URL, timeout=timeout).json()
+        entry = next(
+            (v for v in manifest.get("versions", []) if v.get("id") == mc_version), None
+        )
+        return requests.get(entry["url"], timeout=timeout).json() if entry else None
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        logger.debug("version detail fetch failed for %s: %s", mc_version, e)
+        return None
+
+
+def _index_from_client_jar(mc_version: str) -> Optional[SymbolIndex]:
+    details = _version_details(mc_version)
+    client = (details or {}).get("downloads", {}).get("client")
+    if not client or (details or {}).get("downloads", {}).get("client_mappings"):
+        return None  # unknown version, or obfuscated (use the mappings instead)
+    jar_path = CACHE_DIR / f"client-{mc_version}.jar"
+    try:
+        jar_path.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(client["url"], timeout=300, stream=True) as r:
+            r.raise_for_status()
+            with open(jar_path, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+        return index_from_jar(jar_path, mc_version)
+    except (requests.RequestException, OSError, zipfile.BadZipFile) as e:
+        logger.debug("client jar index failed for %s: %s", mc_version, e)
+        return None
+    finally:
+        jar_path.unlink(missing_ok=True)
+
+
 def resolve_mappings_url(mc_version: str, timeout: int = 15) -> Optional[str]:
     """Resolve the client mappings URL for a Minecraft version, or None."""
     try:
@@ -118,19 +195,30 @@ def load_index(
     Returns None when the flavor is unsupported or the mappings cannot be fetched. The
     caller must treat None as "cannot check", never as "nothing found".
     """
-    if flavor != FLAVOR_MOJMAP:
-        logger.debug("symbol index unavailable for flavor %s", flavor)
-        return None
-
-    path = cache_path(mc_version, flavor)
+    path = cache_path(mc_version, FLAVOR_MOJMAP)
 
     if not refresh:
         cached = SymbolIndex.load(path)
         if cached is not None:
-            return cached
+            # Only unobfuscated versions are cached without mappings; there every
+            # flavor sees Mojang's names.
+            if flavor == FLAVOR_MOJMAP or cached.flavor == "unobfuscated":
+                return cached
 
     url = resolve_mappings_url(mc_version)
     if not url:
+        index = _index_from_client_jar(mc_version)
+        if index is None:
+            return None
+        index.flavor = "unobfuscated"
+        try:
+            index.save(path)
+        except OSError as e:
+            logger.debug("could not cache jar index: %s", e)
+        return index
+
+    if flavor != FLAVOR_MOJMAP:
+        logger.debug("symbol index unavailable for flavor %s", flavor)
         return None
 
     try:

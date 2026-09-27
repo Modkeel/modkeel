@@ -124,6 +124,11 @@ def internal_to_fqcn(internal: str) -> Optional[str]:
 
 def parse_constant_pool(data: bytes) -> List[Optional[Tuple[int, object]]]:
     """Parse a class file's constant pool. Everything after it is left unread."""
+    return _parse_pool(data)[0]
+
+
+def _parse_pool(data: bytes) -> Tuple[List[Optional[Tuple[int, object]]], int]:
+    """Constant pool plus the offset of the first byte after it."""
     if len(data) < 10 or data[:4] != CLASS_FILE_MAGIC:
         raise ClassFileError("not a class file")
 
@@ -164,7 +169,42 @@ def parse_constant_pool(data: bytes) -> List[Optional[Tuple[int, object]]]:
         # historical mistake; it still has to be honoured.
         index += 2 if tag in (TAG_LONG, TAG_DOUBLE) else 1
 
-    return pool
+    return pool, offset
+
+
+def parse_class_members(data: bytes) -> Tuple[str, List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """Internal class name plus (name, descriptor) of every declared field and method."""
+    pool, offset = _parse_pool(data)
+
+    def u2(at: int) -> int:
+        if at + 2 > len(data):
+            raise ClassFileError("truncated class body")
+        return struct.unpack_from(">H", data, at)[0]
+
+    this_name = _class_internal_name(pool, u2(offset + 2))
+    if not this_name:
+        raise ClassFileError("unresolvable this_class")
+    offset += 6
+    offset += 2 + 2 * u2(offset)  # interfaces
+
+    def members(at: int) -> Tuple[List[Tuple[str, str]], int]:
+        # member_info: access u2, name u2, descriptor u2, attributes_count u2, attributes
+        found = []
+        count, at = u2(at), at + 2
+        for _ in range(count):
+            name, desc = _utf8(pool, u2(at + 2)), _utf8(pool, u2(at + 4))
+            if name and desc:
+                found.append((name, desc))
+            attrs, at = u2(at + 6), at + 8
+            for _ in range(attrs):
+                if at + 6 > len(data):
+                    raise ClassFileError("truncated attribute")
+                at += 6 + struct.unpack_from(">I", data, at + 2)[0]
+        return found, at
+
+    fields, offset = members(offset)
+    methods, _ = members(offset)
+    return this_name, fields, methods
 
 
 def _utf8(pool, index: int) -> Optional[str]:

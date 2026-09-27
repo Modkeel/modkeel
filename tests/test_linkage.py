@@ -423,3 +423,20 @@ class TestLinkageReport:
     def test_findings_are_human_readable(self):
         report = LinkageReport(mc_version="1.21.1", missing_classes=["net.minecraft.X"])
         assert report.findings == ["class not in 1.21.1: net.minecraft.X"]
+
+
+class TestParseClassMembers:
+    """Real javac output (tests/fixtures/Sample.class): a long constant, fields, methods."""
+
+    def test_members(self):
+        from modforge.linkage import parse_class_members
+        from modforge.mappings import _param_count
+
+        data = (Path(__file__).parent / "fixtures" / "Sample.class").read_bytes()
+        name, fields, methods = parse_class_members(data)
+        assert name == "Sample"
+        assert ("BIG", "J") in fields and ("name", "Ljava/lang/String;") in fields
+        assert ("count", "(ILjava/lang/String;[J)I") in methods
+        assert ("noArgs", "()V") in methods
+        assert _param_count("(ILjava/lang/String;[J)I") == 3
+        assert _param_count("()V") == 0
