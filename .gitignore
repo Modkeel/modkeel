@@ -44,3 +44,6 @@ docs/
 venv/
 .venv/
 env/
+
+# Research caches
+research/.cache/
