@@ -1,5 +1,6 @@
 """Modrinth API client for ModForge."""
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -67,8 +68,14 @@ class ModrinthClient:
             print(f"  \u2705 Cross-loader available for MC {mc_version}")
         return available
 
-    def check_modrinth(self, mod_name: str) -> Optional[Dict]:
-        """Search Modrinth for a mod matching mod_name + target loader + MC version."""
+    def check_modrinth(self, mod_name: str,
+                       source_repo: Optional[str] = None) -> Optional[Dict]:
+        """Search Modrinth for a mod matching mod_name + target loader + MC version.
+
+        With source_repo ("owner/repo"), a hit whose source_url names that repo wins
+        outright, and hits whose source_url names a different GitHub repo are dropped,
+        since the name alone confuses a mod with its addons and compat patches.
+        """
         base_url = "https://api.modrinth.com/v2"
         headers = {"User-Agent": MODRINTH_USER_AGENT}
         loader = self.config.loader
@@ -105,6 +112,15 @@ class ModrinthClient:
                 print(f"    \u2139\ufe0f  Not found on Modrinth")
                 return None
 
+            if source_repo:
+                hits = self._filter_hits_by_source(hits, source_repo, headers)
+                exact = [h for h in hits if h.get("_source_match")]
+                if exact:
+                    hits = exact[:1]
+                if not hits:
+                    print(f"    ℹ️  Modrinth results belong to other repositories")
+                    return None
+
             best = None
             best_score = 0.0
             for hit in hits:
@@ -118,8 +134,8 @@ class ModrinthClient:
                     best_score = score
                     best = hit
 
-            # Require a minimum match quality
-            if best and best_score < 50.0:
+            # Require a minimum match quality (a source_url match needs none)
+            if best and best_score < 50.0 and not best.get("_source_match"):
                 best = None
 
             if not best:
@@ -195,6 +211,33 @@ class ModrinthClient:
         except Exception as e:
             print(f"    \u26a0\ufe0f  Modrinth search error: {e}")
             return None
+
+    @staticmethod
+    def _github_repo_of(url: Optional[str]) -> Optional[str]:
+        match = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", url or "")
+        if not match:
+            return None
+        return f"{match.group(1)}/{match.group(2).removesuffix('.git')}".lower()
+
+    def _filter_hits_by_source(self, hits: List[Dict], source_repo: str,
+                               headers: Dict) -> List[Dict]:
+        """Tag hits whose project source_url is source_repo; drop other GitHub repos."""
+        ids = [h["project_id"] for h in hits if h.get("project_id")]
+        try:
+            resp = requests.get("https://api.modrinth.com/v2/projects",
+                                params={"ids": json.dumps(ids)}, headers=headers, timeout=15)
+            projects = {p["id"]: p for p in resp.json()} if resp.status_code == 200 else {}
+        except (requests.RequestException, ValueError):
+            return hits
+        wanted = source_repo.lower()
+        kept = []
+        for hit in hits:
+            repo = self._github_repo_of(projects.get(hit.get("project_id"), {}).get("source_url"))
+            if repo == wanted:
+                kept.append({**hit, "_source_match": True})
+            elif repo is None:
+                kept.append(hit)
+        return kept
 
     def download_modrinth_deps(
         self, modrinth_result: Dict, _seen: Optional[set] = None,

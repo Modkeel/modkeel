@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
+from modforge.buildinfo import BuildInfo, extract_build_info, select_build_files
 from modforge.loaders import get_profile
 from modforge.models import BranchCandidate, ModCompilerConfig
 from modforge.version import (
@@ -19,6 +20,23 @@ from modforge.version import (
 )
 
 logger = logging.getLogger("modforge")
+
+NON_CODE_BRANCH = re.compile(
+    r'(?:^|[/_\-])(?:l10n|i18n|crowdin|translations?|dependabot|renovate|gh-pages|docs?|'
+    r'vitepress-docs)(?:$|[/_\-])',
+    re.IGNORECASE,
+)
+
+
+def is_bounded_range(version_range: str) -> bool:
+    """True if a Minecraft range has an upper bound (an open range proves nothing)."""
+    r = version_range.strip()
+    if r.startswith(("[", "(")):
+        inner = r[1:-1]
+        return "," not in inner or bool(inner.split(",", 1)[1].strip())
+    if r.startswith((">", "*")):
+        return "<" in r
+    return True
 
 
 class BranchValidator:
@@ -102,10 +120,108 @@ class BranchValidator:
         override_loader: Optional[str] = None
     ) -> bool:
         """
-        Pre-validate a branch by downloading only gradle.properties.
+        Pre-validate a branch from its build files, without cloning.
         Updates branch object with validation results.
         """
         target_loader = override_loader or self.config.loader
+
+        if NON_CODE_BRANCH.search(branch.name):
+            branch.validation_error = "Not a code branch (translations/docs/bots)"
+            return False
+
+        paths = self.github.get_tree(owner, repo, branch.name)
+        if paths is None:
+            return self._pre_validate_by_fixed_paths(owner, repo, branch, target_loader)
+
+        wanted = select_build_files(paths)
+        files = {}
+        for path in wanted:
+            content = self.github.get_raw_file(owner, repo, branch.name, path)
+            if content is not None:
+                files[path] = content
+        info = extract_build_info(paths, files)
+        return self.judge_build_info(branch, info, target_loader)
+
+    def judge_build_info(
+        self, branch: BranchCandidate, info: BuildInfo, target_loader: str
+    ) -> bool:
+        """Decide compatibility from what the branch declares. Updates branch in place."""
+        mc = self.config.mc_version
+        branch.build_info = info
+
+        if target_loader in info.loaders:
+            branch.loader = target_loader
+        elif info.loaders:
+            branch.loader = sorted(info.loaders)[0]
+            others = ", ".join(sorted(info.loaders))
+            if target_loader in ("neoforge", "forge") and info.loaders <= {"fabric", "quilt"}:
+                branch.validation_error = f"Fabric-only mod (no {target_loader} version)"
+            else:
+                branch.validation_error = f"Loader mismatch: {others} != {target_loader}"
+            return False
+
+        ranges = info.ranges_for(target_loader) or [
+            r for rs in info.ranges.values() for r in rs]
+        range_format = get_profile(target_loader)["version_range_format"]
+
+        def covers(version_range: str) -> bool:
+            if range_format == "maven" and version_range.lstrip().startswith(("[", "(")):
+                return is_version_in_maven_range(mc, version_range)
+            return is_version_in_fabric_range(mc, version_range)
+
+        if info.targets and any(v == mc for v, _ in info.targets)                 and (mc, target_loader) not in info.targets:
+            others = ", ".join(sorted(ldr for v, ldr in info.targets if v == mc))
+            branch.validation_error = f"MC {mc} is built only for {others}, not {target_loader}"
+            return False
+
+        if mc in info.mc_versions:
+            branch.minecraft_version = mc
+            branch.validation_method = 'build_target'
+        elif info.mc_versions:
+            same_family = sorted(
+                v for v in info.mc_versions
+                if is_version_compatible(v, mc, strict=self.config.strict_version))
+            if not same_family:
+                found = ", ".join(sorted(info.mc_versions))
+                branch.validation_error = f"MC version mismatch: {found} != {mc}"
+                return False
+            branch.minecraft_version = same_family[-1]
+            bounded = [r for r in ranges if is_bounded_range(r)]
+            covering = [r for r in bounded if covers(r)]
+            if covering:
+                branch.version_range = covering[0]
+                branch.validation_method = 'metadata_range'
+            elif bounded:
+                branch.version_range = bounded[0]
+                branch.validation_error = f"MC {mc} not in declared range {bounded[0]}"
+                return False
+            else:
+                branch.validation_method = 'build_target'
+        elif ranges and not any(covers(r) for r in ranges):
+            branch.version_range = ranges[0]
+            branch.validation_error = f"MC {mc} not in range {ranges[0]}"
+            return False
+        elif any(covers(r) and is_bounded_range(r) for r in ranges):
+            # An open range such as [1.21.3,) covers everything later and proves nothing
+            branch.version_range = next(r for r in ranges if covers(r) and is_bounded_range(r))
+            branch.validation_method = 'metadata_range'
+        elif re.search(r'(?:^|[^.\d])' + re.escape(mc) + r'(?:[^.\d]|$)', branch.name):
+            branch.validation_method = 'branch_name'
+        else:
+            branch.validation_error = 'Undetermined: no Minecraft version declared in build files'
+            return False
+
+        if not branch.loader:
+            branch.validation_error = 'Undetermined: no loader declared in build files'
+            return False
+
+        branch.is_compatible = True
+        return True
+
+    def _pre_validate_by_fixed_paths(
+        self, owner: str, repo: str, branch: BranchCandidate, target_loader: str
+    ) -> bool:
+        """Fallback when the tree listing is unavailable: probe well-known paths."""
 
         # STEP 1: Extract MC version and loader from gradle.properties
         gradle_content = self.github.get_file_from_repo(owner, repo, branch.name, 'gradle.properties')
@@ -203,7 +319,7 @@ class BranchValidator:
         # STEP 2: Read metadata files for AUTHORITATIVE version range validation
         version_range = self.parse_version_range_from_metadata(owner, repo, branch.name, target_loader)
 
-        if version_range:
+        if version_range and "${" not in version_range:
             branch.version_range = version_range
 
             if branch.loader and branch.loader != target_loader:
@@ -258,6 +374,8 @@ class BranchValidator:
               f" (loader={loader_label})...")
 
         compatible_branches = []
+        if not branches:
+            return compatible_branches
         max_workers = min(10, len(branches))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

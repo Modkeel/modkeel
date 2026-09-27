@@ -207,7 +207,7 @@ class Pipeline:
 
             # Step 0: Check Modrinth
             if not specific_branch and not skip_modrinth:
-                modrinth_result = self.modrinth.check_modrinth(repo)
+                modrinth_result = self.modrinth.check_modrinth(repo, source_repo=f"{owner}/{repo}")
 
                 fallback_loaders = get_cross_loader_chain(self.config.loader)
                 if (
@@ -222,7 +222,7 @@ class Pipeline:
                         print(
                             f"  \U0001f504 CROSS-LOADER: Checking Modrinth for {fallback.capitalize()} version..."
                         )
-                        modrinth_result = self.modrinth.check_modrinth(repo)
+                        modrinth_result = self.modrinth.check_modrinth(repo, source_repo=f"{owner}/{repo}")
                         if modrinth_result:
                             modrinth_result["_cross_loader"] = True
                             modrinth_result["_fallback_loader"] = fallback

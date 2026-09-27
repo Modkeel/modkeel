@@ -81,7 +81,8 @@ class BranchCandidate:
 
         # Metadata validation fields
         self.version_range = None  # e.g., "[1.21,1.22)" or "~1.21.0"
-        self.validation_method = None  # 'metadata_range' or 'gradle_properties'
+        self.validation_method = None  # 'build_target', 'metadata_range', 'branch_name', ...
+        self.build_info = None  # BuildInfo from modforge.buildinfo
 
         # Pre-build gate fields (populated by modforge.prebuild)
         self.prebuild_verdict = None  # PreBuildVerdict

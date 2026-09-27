@@ -661,6 +661,27 @@ class GitHubClient:
             print(f"  \u26a0\ufe0f  Error fetching branches: {e}")
             return branches
 
+    def get_tree(self, owner: str, repo: str, branch: str) -> Optional[List[str]]:
+        """List every file path in a branch with one API call (None on failure)."""
+        url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}"
+        try:
+            response = requests.get(url, headers=self.config.github_headers,
+                                    params={"recursive": "1"}, timeout=15)
+        except requests.RequestException:
+            return None
+        if response.status_code != 200:
+            return None
+        return [e["path"] for e in response.json().get("tree", []) if e.get("type") == "blob"]
+
+    def get_raw_file(self, owner: str, repo: str, branch: str, path: str) -> Optional[str]:
+        """Fetch one file at an exact path via raw.githubusercontent (no API quota)."""
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+        try:
+            response = requests.get(url, timeout=10)
+        except requests.RequestException:
+            return None
+        return response.text if response.status_code == 200 else None
+
     def get_file_from_repo(self, owner: str, repo: str, branch: str,
                            filepath: str) -> Optional[str]:
         """

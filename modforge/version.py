@@ -1,5 +1,7 @@
 """Version parsing and comparison for Minecraft mod loaders."""
 
+import re
+
 
 def compare_versions(v1: str, v2: str) -> int:
     """
@@ -93,6 +95,13 @@ def is_version_in_fabric_range(version: str, range_str: str) -> bool:
     """
     if not range_str:
         return False
+
+    range_str = re.sub(r'([<>=~^]+)\s+', r'\1', range_str.strip())
+    if '||' in range_str:
+        return any(is_version_in_fabric_range(version, part)
+                   for part in range_str.split('||') if part.strip())
+    if ' ' in range_str:
+        return all(is_version_in_fabric_range(version, part) for part in range_str.split())
 
     try:
         if range_str.startswith('~'):
