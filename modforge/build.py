@@ -330,7 +330,18 @@ def publish_to_maven_local(
     if os.name != 'nt':
         os.chmod(gradlew, 0o755)
 
-    cmd = [str(gradlew), "publishToMavenLocal", "--no-daemon"]
+    # Release builds often GPG-sign their publications; a local publish needs no signature
+    # and would otherwise fail with "no configured signatory".
+    no_signing = repo_path / ".modforge-no-signing.gradle"
+    no_signing.write_text(
+        "allprojects {\n"
+        "    tasks.withType(Sign).configureEach { enabled = false }\n"
+        "}\n",
+        encoding="utf-8"
+    )
+
+    cmd = [str(gradlew), "publishToMavenLocal", "--no-daemon", "-x", "test",
+           "--init-script", str(no_signing)]
     if extra_gradle_args:
         cmd.extend(extra_gradle_args)
 

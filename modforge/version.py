@@ -105,8 +105,8 @@ def is_version_in_fabric_range(version: str, range_str: str) -> bool:
 
     try:
         if range_str.startswith('~'):
-            # ~1.21.0 means 1.21.x
-            base = range_str[1:].strip()
+            # ~1.21.0 means 1.21.x; a trailing "-" (~26.2-) also admits pre-releases
+            base = range_str[1:].strip().rstrip('-')
             base_parts = base.split('.')[:2]  # Get major.minor
             version_parts = version.split('.')[:2]
             return base_parts == version_parts

@@ -253,3 +253,9 @@ class TestSecondRoundLayouts:
                  "gradle.properties": "minecraft_version=26.2\n"}
         ok, b = judge(paths, files, mc="26.2", name="26.2-neoforge")
         assert ok and b.loader == "neoforge"
+
+
+def test_fabric_tilde_prerelease_suffix():
+    from modforge.version import is_version_in_fabric_range
+    assert is_version_in_fabric_range("26.2", "~26.2-")
+    assert not is_version_in_fabric_range("26.3", "~26.2-")
