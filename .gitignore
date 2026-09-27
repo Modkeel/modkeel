@@ -50,3 +50,6 @@ research/.cache/
 research/.runtime/
 research/.overnight/
 research/.overnight.console
+
+# Modpack crawl: committed gzipped (packs_*.json.gz)
+research/packs_*.json
