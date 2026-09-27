@@ -165,3 +165,15 @@ def test_enum_field_resolves_through_jdk_super(tmp_path):
         "net/minecraft/Type", "java/lang/Enum", fields=[("KEYBOARD", "Lnet/minecraft/Type;")])}))
     assert db.resolve("field", "net/minecraft/Type", "KEYSYM", "Lnet/minecraft/Type;") == MISSING
     assert db.resolve("field", "net/minecraft/Type", "KEYBOARD", "Lnet/minecraft/Type;") == FOUND
+
+
+def test_neoforge_interfaces_json_injects_interfaces(tmp_path):
+    db = ClassDB()
+    db.add_jar(game(tmp_path))
+    mod = tmp_path / "mod.jar"
+    with zipfile.ZipFile(mod, "w") as z:
+        z.writestr("META-INF/interfaces.json", '{"net/minecraft/Block": ["mod/Provider"]}')
+        z.writestr("mod/Provider.class", class_file("mod/Provider", methods=[("extra", "()V")]))
+        z.writestr("mod/X.class", class_file("mod/X", refs=[
+            ("method", "net/minecraft/Block", "extra", "()V")]))
+    assert check_jar_members(mod, db).missing_members == []

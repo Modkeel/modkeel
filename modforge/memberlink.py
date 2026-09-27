@@ -200,7 +200,7 @@ def _iter_jar_classes(archive: zipfile.ZipFile, label: str, depth: int = 0):
         n = info.filename
         if n.endswith(".class") and not n.startswith("META-INF/versions/"):
             yield label, archive.read(info), None
-        elif n == "fabric.mod.json":
+        elif n in ("fabric.mod.json", "META-INF/interfaces.json"):
             yield label, None, archive.read(info)
         elif depth < 3 and NESTED_JAR.match(n):
             try:
@@ -250,12 +250,20 @@ class ClassDB:
 
     def _read_injected(self, raw: bytes) -> None:
         try:
-            meta = json.loads(raw.decode("utf-8", "replace"), strict=False)
+            meta = json.loads(raw.decode("utf-8-sig", "replace"), strict=False)
         except ValueError:
             return
-        custom = meta.get("custom") or {}
-        for target, ifaces in (custom.get("loom:injected_interfaces") or {}).items():
-            self.injected.setdefault(target, set()).update(ifaces)
+        if not isinstance(meta, dict):
+            return
+        if "schemaVersion" in meta or "id" in meta:
+            # fabric.mod.json: Loom interface injection
+            mapping = (meta.get("custom") or {}).get("loom:injected_interfaces") or {}
+        else:
+            # NeoForge META-INF/interfaces.json: {target: [interfaces]}
+            mapping = meta
+        for target, ifaces in mapping.items():
+            if isinstance(ifaces, list):
+                self.injected.setdefault(target, set()).update(ifaces)
 
     def resolve(self, kind: str, owner: str, name: str, desc: str,
                 overlay: Optional["ClassDB"] = None) -> str:
