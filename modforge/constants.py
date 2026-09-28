@@ -1,7 +1,7 @@
 """Global constants for ModForge."""
 
 MODFORGE_VERSION = "1.0.0"
-MODRINTH_USER_AGENT = f"ModForge/{MODFORGE_VERSION} (github.com/juanzab/ModForge)"
+MODRINTH_USER_AGENT = f"ModForge/{MODFORGE_VERSION} (github.com/Modkeel/modkeel)"
 
 # Crowdsource API (Supabase Edge Function)
 MODFORGE_API_URL = "https://pcczpdyhytvzqcnmddfv.supabase.co/functions/v1/submit-report"

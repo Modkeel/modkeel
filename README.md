@@ -21,7 +21,7 @@ ModForge is a CLI tool that finds, compiles, and verifies unofficial Minecraft m
 ## Quick Start
 
 ```bash
-git clone https://github.com/juanzab/ModForge.git
+git clone https://github.com/Modkeel/modkeel.git
 cd ModForge && pip install -e .
 modforge compile repos.txt -m 1.21.10 -l neoforge -lv 64 -t "$(cat github_token.txt)"
 ```
@@ -68,7 +68,7 @@ java -version     # 17 or 21
 ## Installation
 
 ```bash
-git clone https://github.com/juanzab/ModForge.git
+git clone https://github.com/Modkeel/modkeel.git
 cd ModForge
 pip install -e .
 ```

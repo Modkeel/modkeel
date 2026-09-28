@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/juanzab/ModForge.git
+git clone https://github.com/Modkeel/modkeel.git
 cd ModForge
 pip install -e .
 ```
@@ -39,7 +39,7 @@ See [CLAUDE.md](CLAUDE.md) for the full architecture breakdown.
 
 ## Reporting Issues
 
-Open an issue at [github.com/juanzab/ModForge/issues](https://github.com/juanzab/ModForge/issues) with:
+Open an issue at [github.com/Modkeel/modkeel/issues](https://github.com/Modkeel/modkeel/issues) with:
 
 - ModForge version (`modforge --version`)
 - Python version
