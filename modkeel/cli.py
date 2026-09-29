@@ -16,7 +16,7 @@ from modkeel.loaders import ALL_LOADERS, KNOWN_LOADER_VERSIONS
 from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
 from modkeel.pipeline import Pipeline
 from modkeel.utils import setup_logging, setup_windows_console
-from modkeel.constants import MODKEEL_HOME
+from modkeel.constants import MODKEEL_API_URL, MODKEEL_HOME
 
 BANNER = r"""    __  ___          ____             __
    /  |/  /___  ____/ / /_____  ___  / /
@@ -219,7 +219,7 @@ def compile(
     github_token = resolve_github_token(
         github_token, modkeel_cfg, prompt_if_missing=True
     )
-    if modkeel_cfg.is_first_run and not modkeel_cfg.was_prompted:
+    if MODKEEL_API_URL and modkeel_cfg.is_first_run and not modkeel_cfg.was_prompted:
         prompt_sharing_preference(modkeel_cfg)
 
     # Create configuration

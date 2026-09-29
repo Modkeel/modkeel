@@ -9,8 +9,9 @@ MODKEEL_HOME = Path(os.environ.get("MODKEEL_HOME", Path.home() / ".modkeel"))
 MODKEEL_VERSION = "1.0.0"
 MODRINTH_USER_AGENT = f"Modkeel/{MODKEEL_VERSION} (github.com/Modkeel/modkeel)"
 
-# Crowdsource API (Supabase Edge Function)
-MODKEEL_API_URL = "https://pcczpdyhytvzqcnmddfv.supabase.co/functions/v1/submit-report"
+# Crowdsource API. Empty = sharing off: no first-run prompt, no reports sent.
+# The old Supabase endpoint is gone; the Reports API will fill this in.
+MODKEEL_API_URL = ""
 
 # HMAC key for report signing. This is NOT a secret -- it's embedded in the
 # CLI to raise the bar for casual API abuse. The real anti-spam protection

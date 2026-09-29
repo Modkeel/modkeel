@@ -149,7 +149,7 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 | `--docker-timeout` | Docker timeout (seconds) | 180 |
 | `--output-report` | Save report to file | -- |
 | `--log-file` | Write log to file | -- |
-| `--no-share` | Skip anonymous data sharing | off |
+| `--no-share` | Skip anonymous data sharing (sharing is not live yet) | off |
 
 ### `modkeel search`
 
