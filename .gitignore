@@ -33,7 +33,7 @@ compilation_report*.txt
 out/
 *.log
 
-# Internal docs (kept locally, tracked in ModForge-Private)
+# Internal docs (not published)
 CLAUDE.md
 DESIGN.md
 ROADMAP.md
