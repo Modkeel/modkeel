@@ -18,12 +18,11 @@ from modkeel.pipeline import Pipeline
 from modkeel.utils import setup_logging, setup_windows_console
 from modkeel.constants import MODKEEL_HOME
 
-BANNER = r"""    __  ___          ______
-   /  |/  /___  ____/ / __/___  _________ ____
-  / /|_/ / __ \/ __  / /_/ __ \/ ___/ __ `/ _ \
- / /  / / /_/ / /_/ / __/ /_/ / /  / /_/ /  __/
-/_/  /_/\____/\__,_/_/  \____/_/   \__, /\___/
-                                  /____/"""
+BANNER = r"""    __  ___          ____             __
+   /  |/  /___  ____/ / /_____  ___  / /
+  / /|_/ / __ \/ __  / //_/ _ \/ _ \/ /
+ / /  / / /_/ / /_/ / ,< /  __/  __/ /
+/_/  /_/\____/\__,_/_/|_|\___/\___/_/"""
 
 TAGLINE = "Compile the mods Mojang left behind"
 
