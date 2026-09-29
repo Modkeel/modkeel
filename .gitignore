@@ -33,13 +33,6 @@ compilation_report*.txt
 out/
 *.log
 
-# Internal docs (not published)
-CLAUDE.md
-DESIGN.md
-ROADMAP.md
-IDEAS.md
-docs/
-
 # Virtual environments
 venv/
 .venv/
