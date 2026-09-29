@@ -4,6 +4,7 @@
 # Requires: modkeel installed (pip install -e .)
 
 Output demo/get.gif
+Set Shell "pwsh"
 Set Theme "Dracula"
 Set FontSize 14
 Set Width 1200

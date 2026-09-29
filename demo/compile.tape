@@ -6,6 +6,7 @@
 # Pre-req: run once to create ~/.modkeel/config.toml (avoids interactive prompt)
 
 Output demo/compile.gif
+Set Shell "pwsh"
 Set Theme "Dracula"
 Set FontSize 14
 Set Width 1200
@@ -19,6 +20,6 @@ Enter
 Sleep 2s
 
 # Run compile with token and --no-share to keep output clean
-Type "modkeel compile demo/demo_repos.txt -m 1.21.1 -l neoforge -lv 21.1.94 -t $(cat github_token.txt) --no-share"
+Type "modkeel compile demo/demo_repos.txt -m 1.21.1 -l neoforge -lv 21.1.94 --no-share"
 Enter
 Sleep 30s
