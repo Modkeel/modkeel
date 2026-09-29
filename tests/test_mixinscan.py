@@ -4,7 +4,7 @@ import io
 import struct
 import zipfile
 
-from modforge.mixinscan import jar_profile, parse_mixin, selector_name
+from modkeel.mixinscan import jar_profile, parse_mixin, selector_name
 
 from tests.test_memberlink import Pool
 

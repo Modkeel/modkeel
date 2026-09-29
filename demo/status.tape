@@ -1,6 +1,6 @@
-# VHS tape: modforge status demo
+# VHS tape: modkeel status demo
 # Run with: vhs demo/status.tape
-# Requires: modforge installed (no token needed)
+# Requires: modkeel installed (no token needed)
 
 Output demo/status.gif
 Set Theme "Dracula"
@@ -10,10 +10,10 @@ Set Height 600
 Set Padding 20
 Set TypingSpeed 50ms
 
-Type "modforge --version"
+Type "modkeel --version"
 Enter
 Sleep 2s
 
-Type "modforge status"
+Type "modkeel status"
 Enter
 Sleep 3s

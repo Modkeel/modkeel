@@ -14,26 +14,26 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from mod_auto_compiler import ModAutoCompiler
-from modforge.config import ModForgeConfig, prompt_sharing_preference
-from modforge.constants import MODFORGE_HMAC_KEY, MODFORGE_VERSION
-from modforge.crowdsource import sign_report
-from modforge.models import (
+from modkeel.config import ModkeelConfig, prompt_sharing_preference
+from modkeel.constants import MODKEEL_HMAC_KEY, MODKEEL_VERSION
+from modkeel.crowdsource import sign_report
+from modkeel.models import (
     CompilationResult, FailureType, ModCompilerConfig,
 )
 
 
 # ============================================================================
-# ModForgeConfig Tests
+# ModkeelConfig Tests
 # ============================================================================
-class TestModForgeConfig:
+class TestModkeelConfig:
     """Test persistent config loading/saving."""
 
     def test_creates_config_dir_and_file(self, tmp_path):
-        """Config should create ~/.modforge/config.toml on first run."""
+        """Config should create ~/.modkeel/config.toml on first run."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            cfg = ModkeelConfig()
             assert config_file.exists()
             assert cfg.client_id  # UUID should be generated
             assert cfg.is_first_run is True
@@ -41,55 +41,55 @@ class TestModForgeConfig:
     def test_client_id_persists(self, tmp_path):
         """client_id should stay the same across loads."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            cfg1 = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            cfg1 = ModkeelConfig()
             client_id = cfg1.client_id
 
-            cfg2 = ModForgeConfig()
+            cfg2 = ModkeelConfig()
             assert cfg2.client_id == client_id
             assert cfg2.is_first_run is False  # file already exists
 
     def test_sharing_default_is_ask(self, tmp_path):
         """Default sharing preference should be 'ask'."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            cfg = ModkeelConfig()
             assert cfg.sharing == "ask"
 
     def test_sharing_setter_validates(self, tmp_path):
         """Invalid sharing values should raise ValueError."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            cfg = ModkeelConfig()
             with pytest.raises(ValueError):
                 cfg.sharing = "invalid"
 
     def test_sharing_setter_saves(self, tmp_path):
         """Setting sharing should persist to disk."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            cfg = ModkeelConfig()
             cfg.sharing = "always"
 
-            cfg2 = ModForgeConfig()
+            cfg2 = ModkeelConfig()
             assert cfg2.sharing == "always"
 
     def test_mark_prompted(self, tmp_path):
         """mark_prompted should set _prompted flag and persist."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            cfg = ModkeelConfig()
             assert cfg.was_prompted is False
             cfg.mark_prompted()
             assert cfg.was_prompted is True
             assert cfg.is_first_run is False
 
-            cfg2 = ModForgeConfig()
+            cfg2 = ModkeelConfig()
             assert cfg2.was_prompted is True
 
 
@@ -102,10 +102,10 @@ class TestPromptSharingPreference:
     def test_always_choice(self, tmp_path):
         """Choosing 'A' should set sharing to 'always'."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
              patch("builtins.input", return_value="A"):
-            cfg = ModForgeConfig()
+            cfg = ModkeelConfig()
             result = prompt_sharing_preference(cfg)
             assert result == "always"
             assert cfg.sharing == "always"
@@ -114,10 +114,10 @@ class TestPromptSharingPreference:
     def test_never_choice(self, tmp_path):
         """Choosing 'N' should set sharing to 'never'."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
              patch("builtins.input", return_value="N"):
-            cfg = ModForgeConfig()
+            cfg = ModkeelConfig()
             result = prompt_sharing_preference(cfg)
             assert result == "never"
             assert cfg.sharing == "never"
@@ -125,20 +125,20 @@ class TestPromptSharingPreference:
     def test_ask_choice(self, tmp_path):
         """Choosing 'K' should set sharing to 'ask'."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
              patch("builtins.input", return_value="K"):
-            cfg = ModForgeConfig()
+            cfg = ModkeelConfig()
             result = prompt_sharing_preference(cfg)
             assert result == "ask"
 
     def test_eof_defaults_to_ask(self, tmp_path):
         """EOFError (piped input) should default to 'ask'."""
         config_file = tmp_path / "config.toml"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", tmp_path), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
+        with patch.object(ModkeelConfig, "CONFIG_DIR", tmp_path), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
              patch("builtins.input", side_effect=EOFError):
-            cfg = ModForgeConfig()
+            cfg = ModkeelConfig()
             result = prompt_sharing_preference(cfg)
             assert result == "ask"
 
@@ -191,7 +191,7 @@ class TestSignReport:
         report = {"mod_name": "Test", "mc_version": "1.21.4"}
         serialized = json.dumps(report, sort_keys=True, separators=(",", ":"))
         expected = hmac_lib.new(
-            MODFORGE_HMAC_KEY, serialized.encode("utf-8"), hashlib.sha256,
+            MODKEEL_HMAC_KEY, serialized.encode("utf-8"), hashlib.sha256,
         ).hexdigest()
         sig = sign_report(report)
         assert sig == f"hmac-sha256:{expected}"
@@ -279,7 +279,7 @@ class TestBuildReport:
         assert report["mc_version"] == "1.21.4"
         assert report["loader"] == "neoforge"
         assert report["loader_version"] == "64"
-        assert report["cli_version"] == MODFORGE_VERSION
+        assert report["cli_version"] == MODKEEL_VERSION
         assert report["source_repo"] == "Snownee/Jade"
         assert report["jar_hash_sha256"]  # non-empty hash
 
@@ -433,9 +433,9 @@ class TestSubmitReports:
         """Should not submit when sharing='never'."""
         config_file = tmp_path / "cfg" / "config.toml"
         config_dir = tmp_path / "cfg"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file):
-            mf_cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", config_dir), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file):
+            mf_cfg = ModkeelConfig()
             mf_cfg.sharing = "never"
 
             with patch("requests.post") as mock_post:
@@ -443,13 +443,13 @@ class TestSubmitReports:
                 mock_post.assert_not_called()
 
     def test_skips_when_no_api_url(self, compiler_with_results, tmp_path):
-        """Should not submit when MODFORGE_API_URL is empty."""
+        """Should not submit when MODKEEL_API_URL is empty."""
         config_file = tmp_path / "cfg" / "config.toml"
         config_dir = tmp_path / "cfg"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("modforge.crowdsource.MODFORGE_API_URL", ""):
-            mf_cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", config_dir), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
+             patch("modkeel.crowdsource.MODKEEL_API_URL", ""):
+            mf_cfg = ModkeelConfig()
             mf_cfg.sharing = "always"
 
             with patch("requests.post") as mock_post:
@@ -460,10 +460,10 @@ class TestSubmitReports:
         """Should submit when sharing='always' and API URL is set."""
         config_file = tmp_path / "cfg" / "config.toml"
         config_dir = tmp_path / "cfg"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("modforge.crowdsource.MODFORGE_API_URL", "https://api.example.com/submit"):
-            mf_cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", config_dir), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
+             patch("modkeel.crowdsource.MODKEEL_API_URL", "https://api.example.com/submit"):
+            mf_cfg = ModkeelConfig()
             mf_cfg.sharing = "always"
 
             mock_resp = MagicMock()
@@ -480,11 +480,11 @@ class TestSubmitReports:
         """When sharing='ask' and user says 'n', should not submit."""
         config_file = tmp_path / "cfg" / "config.toml"
         config_dir = tmp_path / "cfg"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("modforge.crowdsource.MODFORGE_API_URL", "https://api.example.com/submit"), \
+        with patch.object(ModkeelConfig, "CONFIG_DIR", config_dir), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
+             patch("modkeel.crowdsource.MODKEEL_API_URL", "https://api.example.com/submit"), \
              patch("builtins.input", return_value="n"):
-            mf_cfg = ModForgeConfig()
+            mf_cfg = ModkeelConfig()
             mf_cfg.sharing = "ask"
 
             with patch("requests.post") as mock_post:
@@ -495,10 +495,10 @@ class TestSubmitReports:
         """Network errors should be silently ignored."""
         config_file = tmp_path / "cfg" / "config.toml"
         config_dir = tmp_path / "cfg"
-        with patch.object(ModForgeConfig, "CONFIG_DIR", config_dir), \
-             patch.object(ModForgeConfig, "CONFIG_FILE", config_file), \
-             patch("modforge.crowdsource.MODFORGE_API_URL", "https://api.example.com/submit"):
-            mf_cfg = ModForgeConfig()
+        with patch.object(ModkeelConfig, "CONFIG_DIR", config_dir), \
+             patch.object(ModkeelConfig, "CONFIG_FILE", config_file), \
+             patch("modkeel.crowdsource.MODKEEL_API_URL", "https://api.example.com/submit"):
+            mf_cfg = ModkeelConfig()
             mf_cfg.sharing = "always"
 
             with patch("requests.post", side_effect=ConnectionError("no network")):

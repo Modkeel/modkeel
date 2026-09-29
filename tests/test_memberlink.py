@@ -4,7 +4,7 @@ import struct
 import zipfile
 from pathlib import Path
 
-from modforge.memberlink import (FOUND, MISSING, UNKNOWN, ClassDB, check_jar_members,
+from modkeel.memberlink import (FOUND, MISSING, UNKNOWN, ClassDB, check_jar_members,
                                  member_refs, parse_class_info)
 
 

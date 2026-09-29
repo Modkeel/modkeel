@@ -1,4 +1,4 @@
-"""Build and compilation functions for ModForge."""
+"""Build and compilation functions for Modkeel."""
 
 import json
 import logging
@@ -11,11 +11,12 @@ from typing import List, Optional, Tuple
 
 import toml
 
-from modforge.loaders import LOADER_PROFILES
-from modforge.models import FailureType
-from modforge.version import is_version_in_fabric_range, is_version_in_maven_range
+from modkeel.loaders import LOADER_PROFILES
+from modkeel.models import FailureType
+from modkeel.version import is_version_in_fabric_range, is_version_in_maven_range
+from modkeel.constants import MODKEEL_HOME
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 
 def classify_build_failure(
@@ -107,7 +108,7 @@ def key_error_lines(output: str, limit: int = 12) -> List[str]:
     return out
 
 
-GRADLE_DISTS = Path.home() / ".modforge" / "gradle"
+GRADLE_DISTS = MODKEEL_HOME / "gradle"
 _WRAPPER_URL = re.compile(r"^distributionUrl\s*=\s*(\S+)", re.M)
 _LOADER_DIR_ORDER = ("fabric", "neoforge", "forge", "quilt")
 
@@ -448,7 +449,7 @@ def publish_to_maven_local(
 
     # Release builds often GPG-sign their publications; a local publish needs no signature
     # and would otherwise fail with "no configured signatory".
-    no_signing = repo_path / ".modforge-no-signing.gradle"
+    no_signing = repo_path / ".modkeel-no-signing.gradle"
     no_signing.write_text(
         "allprojects {\n"
         "    tasks.withType(Sign).configureEach { enabled = false }\n"

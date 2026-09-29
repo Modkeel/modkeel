@@ -1,4 +1,4 @@
-"""Data models for ModForge."""
+"""Data models for Modkeel."""
 
 import json
 import hashlib
@@ -8,7 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from modforge.loaders import ALL_LOADERS, normalize_loader
+from modkeel.loaders import ALL_LOADERS, normalize_loader
+from modkeel.constants import MODKEEL_HOME
 
 
 class ModCompilerConfig:
@@ -82,9 +83,9 @@ class BranchCandidate:
         # Metadata validation fields
         self.version_range = None  # e.g., "[1.21,1.22)" or "~1.21.0"
         self.validation_method = None  # 'build_target', 'metadata_range', 'branch_name', ...
-        self.build_info = None  # BuildInfo from modforge.buildinfo
+        self.build_info = None  # BuildInfo from modkeel.buildinfo
 
-        # Pre-build gate fields (populated by modforge.prebuild)
+        # Pre-build gate fields (populated by modkeel.prebuild)
         self.prebuild_verdict = None  # PreBuildVerdict
         self.ci_status = None  # CIStatus
         self.symbol_report = None  # SymbolReport
@@ -154,7 +155,7 @@ class CompilationResult:
 class DockerTestCache:
     """Cache Docker test results to avoid re-testing identical JAR sets."""
 
-    CACHE_DIR = Path.home() / ".modforge"
+    CACHE_DIR = MODKEEL_HOME
     CACHE_FILE = CACHE_DIR / "docker_test_cache.json"
 
     def __init__(self):

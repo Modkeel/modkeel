@@ -7,9 +7,9 @@ for specific Minecraft versions and mod loaders.
 Author: Juan - AutoKufe
 
 NOTE: This file is a backwards-compatible shim. All logic has been moved
-      to the modforge/ package. Each method delegates to the appropriate module.
+      to the modkeel/ package. Each method delegates to the appropriate module.
       Direct usage: `python mod_auto_compiler.py ...` still works.
-      Package usage: `modforge compile ...` (after pip install -e .)
+      Package usage: `modkeel compile ...` (after pip install -e .)
 """
 
 import argparse
@@ -20,51 +20,51 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 warnings.warn(
-    "mod_auto_compiler.py is deprecated. Use 'modforge compile' instead. "
-    "Install with: pip install -e . (from the ModForge directory)",
+    "mod_auto_compiler.py is deprecated. Use 'modkeel compile' instead. "
+    "Install with: pip install -e . (from the Modkeel directory)",
     DeprecationWarning,
     stacklevel=1,
 )
 
 # ============================================================================
-# IMPORTS FROM modforge PACKAGE (re-exported for backwards compatibility)
+# IMPORTS FROM modkeel PACKAGE (re-exported for backwards compatibility)
 # ============================================================================
-from modforge.constants import (
-    MODFORGE_VERSION, MODRINTH_USER_AGENT,
-    MODFORGE_API_URL, MODFORGE_HMAC_KEY,
+from modkeel.constants import (
+    MODKEEL_VERSION, MODRINTH_USER_AGENT,
+    MODKEEL_API_URL, MODKEEL_HMAC_KEY,
 )
-from modforge.models import (
+from modkeel.models import (
     ModCompilerConfig, BranchCandidate, FailureType,
     CompilationResult, DockerTestCache,
 )
-from modforge.version import (
+from modkeel.version import (
     compare_versions as _compare_versions_standalone,
     is_version_in_maven_range as _is_version_in_maven_range_standalone,
     is_version_in_fabric_range as _is_version_in_fabric_range_standalone,
     is_version_compatible as _is_version_compatible_standalone,
 )
-from modforge.config import ModForgeConfig, prompt_sharing_preference
-from modforge.utils import (
+from modkeel.config import ModkeelConfig, prompt_sharing_preference
+from modkeel.utils import (
     setup_logging, setup_windows_console, safe_rmtree,
 )
-from modforge.crowdsource import (
+from modkeel.crowdsource import (
     sign_report, detect_java_version,
     build_report as _build_report_standalone,
     submit_reports as _submit_reports_standalone,
 )
-from modforge.github import (
+from modkeel.github import (
     GitHubClient, parse_repo_url as _parse_repo_url_standalone,
 )
-from modforge.validation import BranchValidator
-from modforge.build import (
+from modkeel.validation import BranchValidator
+from modkeel.build import (
     classify_build_failure as _classify_build_failure_standalone,
     compile_mod as _compile_mod_standalone,
     validate_jar as _validate_jar_standalone,
     create_maven_local_init_script as _create_maven_local_init_script_standalone,
     publish_to_maven_local as _publish_to_maven_local_standalone,
 )
-from modforge.modrinth import ModrinthClient
-from modforge.docker import (
+from modkeel.modrinth import ModrinthClient
+from modkeel.docker import (
     DockerTester,
     DOCKER_SUCCESS_PATTERN as _DOCKER_SUCCESS_PATTERN,
     DOCKER_FAIL_PATTERNS as _DOCKER_FAIL_PATTERNS,
@@ -76,13 +76,13 @@ from modforge.docker import (
     DOCKER_INSTALL_MAX_RETRIES as _DOCKER_INSTALL_MAX_RETRIES,
     NEOFORGE_VERSIONS as _NEOFORGE_VERSIONS,
 )
-from modforge.loaders import ALL_LOADERS
-from modforge.pipeline import Pipeline
+from modkeel.loaders import ALL_LOADERS
+from modkeel.pipeline import Pipeline
 
 # ============================================================================
 # LOGGING
 # ============================================================================
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 try:
     import requests
@@ -104,7 +104,7 @@ class ModAutoCompiler:
     """Main class for automatic mod compilation.
 
     NOTE: This class is a backwards-compatible shim. All logic has been
-    moved to the modforge/ package. Each method delegates to the
+    moved to the modkeel/ package. Each method delegates to the
     appropriate module.
     """
 
@@ -405,9 +405,9 @@ class ModAutoCompiler:
             self.config.loader_version, self.parse_repo_url,
         )
 
-    def submit_reports(self, modforge_config: "ModForgeConfig") -> None:
+    def submit_reports(self, modkeel_config: "ModkeelConfig") -> None:
         _submit_reports_standalone(
-            self.results, modforge_config, self.config.mc_version,
+            self.results, modkeel_config, self.config.mc_version,
             self.config.loader, self.config.loader_version,
             self.parse_repo_url,
         )
@@ -538,12 +538,12 @@ Examples:
 
     print(f"\U0001f4cb Loaded {len(repo_urls)} repositories from {args.repos_file}")
 
-    # Load persistent ModForge config (sharing preferences, client_id)
-    modforge_cfg = ModForgeConfig()
+    # Load persistent Modkeel config (sharing preferences, client_id)
+    modkeel_cfg = ModkeelConfig()
 
     # First-run: ask about anonymous data sharing
-    if modforge_cfg.is_first_run and not modforge_cfg.was_prompted:
-        prompt_sharing_preference(modforge_cfg)
+    if modkeel_cfg.is_first_run and not modkeel_cfg.was_prompted:
+        prompt_sharing_preference(modkeel_cfg)
 
     # Override sharing if --no-share flag is set
     no_share = args.no_share
@@ -583,7 +583,7 @@ Examples:
     # Submit anonymous crowdsource reports (last step, silent failure)
     if not no_share:
         try:
-            compiler.submit_reports(modforge_cfg)
+            compiler.submit_reports(modkeel_cfg)
         except Exception as e:
             logger.debug("Crowdsource submission error: %s", e)
 

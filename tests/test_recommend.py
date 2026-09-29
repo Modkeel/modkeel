@@ -1,10 +1,10 @@
-"""Tests for modforge.recommend module."""
+"""Tests for modkeel.recommend module."""
 
 import unittest
 from unittest.mock import MagicMock, patch
 
-from modforge.models import ModAvailability, RecommendationResult, ScannedMod
-from modforge.recommend import RecommendationEngine, _version_tuple
+from modkeel.models import ModAvailability, RecommendationResult, ScannedMod
+from modkeel.recommend import RecommendationEngine, _version_tuple
 
 
 def _make_mod(mod_id: str, mod_name: str = "", sha1: str = "abc123",
@@ -67,7 +67,7 @@ class TestEngineInit(unittest.TestCase):
 class TestIdentifyModsByHash(unittest.TestCase):
     """Test hash-based mod identification."""
 
-    @patch("modforge.recommend.requests.post")
+    @patch("modkeel.recommend.requests.post")
     def test_batch_identification(self, mock_post):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -83,14 +83,14 @@ class TestIdentifyModsByHash(unittest.TestCase):
         self.assertEqual(result, {"hash1": "proj_create"})
         mock_post.assert_called_once()
 
-    @patch("modforge.recommend.requests.post")
+    @patch("modkeel.recommend.requests.post")
     def test_empty_mods(self, mock_post):
         engine = RecommendationEngine([])
         result = engine.identify_mods_by_hash()
         self.assertEqual(result, {})
         mock_post.assert_not_called()
 
-    @patch("modforge.recommend.requests.post")
+    @patch("modkeel.recommend.requests.post")
     def test_api_error_handled(self, mock_post):
         mock_post.side_effect = Exception("Network error")
         mods = [_make_mod("create", sha1="hash1")]
@@ -102,8 +102,8 @@ class TestIdentifyModsByHash(unittest.TestCase):
 class TestResolveModrinthSlugs(unittest.TestCase):
     """Test Modrinth slug resolution."""
 
-    @patch("modforge.recommend.requests.get")
-    @patch("modforge.recommend.time.sleep")
+    @patch("modkeel.recommend.requests.get")
+    @patch("modkeel.recommend.time.sleep")
     def test_hash_matched_fetches_details(self, _sleep, mock_get):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -122,8 +122,8 @@ class TestResolveModrinthSlugs(unittest.TestCase):
         self.assertEqual(avail.modrinth_slug, "create")
         self.assertEqual(avail.downloads, 50000)
 
-    @patch("modforge.recommend.requests.get")
-    @patch("modforge.recommend.time.sleep")
+    @patch("modkeel.recommend.requests.get")
+    @patch("modkeel.recommend.time.sleep")
     def test_fuzzy_search_fallback(self, _sleep, mock_get):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -143,8 +143,8 @@ class TestResolveModrinthSlugs(unittest.TestCase):
         self.assertTrue(avail.found_on_modrinth)
         self.assertEqual(avail.modrinth_slug, "jei")
 
-    @patch("modforge.recommend.requests.get")
-    @patch("modforge.recommend.time.sleep")
+    @patch("modkeel.recommend.requests.get")
+    @patch("modkeel.recommend.time.sleep")
     def test_not_found_on_modrinth(self, _sleep, mock_get):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -281,9 +281,9 @@ class TestBuildRecommendations(unittest.TestCase):
 class TestFullPipeline(unittest.TestCase):
     """Test the full recommendation pipeline."""
 
-    @patch("modforge.recommend.requests.get")
-    @patch("modforge.recommend.requests.post")
-    @patch("modforge.recommend.time.sleep")
+    @patch("modkeel.recommend.requests.get")
+    @patch("modkeel.recommend.requests.post")
+    @patch("modkeel.recommend.time.sleep")
     def test_run_end_to_end(self, _sleep, mock_post, mock_get):
         # Hash lookup returns no matches
         hash_resp = MagicMock()

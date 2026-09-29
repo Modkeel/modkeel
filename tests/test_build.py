@@ -5,9 +5,9 @@ import os
 import zipfile
 from pathlib import Path
 
-from modforge.build import (build_tasks, key_error_lines, loader_subproject, resolve_gradle,
+from modkeel.build import (build_tasks, key_error_lines, loader_subproject, resolve_gradle,
                             select_main_jar)
-from modforge.version import is_version_in_fabric_range
+from modkeel.version import is_version_in_fabric_range
 
 SCRIPT = "gradlew.bat" if os.name == "nt" else "gradlew"
 

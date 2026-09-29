@@ -6,8 +6,8 @@ verified against official mappings without invoking a compiler.
 
 This module owns the in-memory symbol table (``SymbolIndex``), the Java-to-JVM descriptor
 conversion it needs, and the report produced by checking a scanned source tree against it.
-Fetching and caching mappings lives in ``modforge.mappings``; scanning source lives in
-``modforge.javascan``.
+Fetching and caching mappings lives in ``modkeel.mappings``; scanning source lives in
+``modkeel.javascan``.
 """
 
 import gzip
@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 INDEX_FORMAT_VERSION = 1
 
@@ -329,7 +329,7 @@ class SymbolReport:
 def check_references(refs, index: SymbolIndex) -> SymbolReport:
     """Check scanned source references against a symbol table.
 
-    ``refs`` is a ``modforge.javascan.SourceRefs``. Passed structurally rather than
+    ``refs`` is a ``modkeel.javascan.SourceRefs``. Passed structurally rather than
     imported so this module stays independent of the scanner.
     """
     report = SymbolReport(mc_version=index.mc_version, flavor=index.flavor)

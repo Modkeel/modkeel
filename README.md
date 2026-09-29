@@ -1,47 +1,43 @@
-```
-    __  ___          ______
-   /  |/  /___  ____/ / __/___  _________ ____
-  / /|_/ / __ \/ __  / /_/ __ \/ ___/ __ `/ _ \
- / /  / / /_/ / /_/ / __/ /_/ / /  / /_/ /  __/
-/_/  /_/\____/\__,_/_/  \____/_/   \__, /\___/
-                                  /____/
-```
+# Modkeel
 
 > **Compile the mods Mojang left behind**
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
-![Tests](https://img.shields.io/badge/tests-133_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-485_passing-brightgreen)
 
 ---
 
-ModForge is a CLI tool that finds, compiles, and verifies unofficial Minecraft mod forks for versions the original authors don't support. When Mojang releases a patch version (like 1.21.10), major mods skip it -- but community forks exist on GitHub as uncompiled branches. ModForge finds them, builds them, and validates the output.
+Modkeel is a CLI tool that finds, compiles, and verifies unofficial Minecraft mod forks for versions the original authors don't support. When Mojang releases a patch version (like 1.21.10), major mods skip it -- but community forks exist on GitHub as uncompiled branches. Modkeel finds them, builds them, and validates the output.
+
+Playing the mods, not building them? The [Modkeel Companion](https://github.com/Modkeel/companion)
+mod backs up your worlds when your mods change and fixes crashes in one click.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/Modkeel/modkeel.git
-cd ModForge && pip install -e .
-modforge compile repos.txt -m 1.21.10 -l neoforge -lv 64 -t "$(cat github_token.txt)"
+cd modkeel && pip install -e .
+modkeel compile repos.txt -m 1.21.10 -l neoforge -lv 64 -t "$(cat github_token.txt)"
 ```
 
 ## Quick Demo
 
 ### Search for a mod
-![modforge search](demo/search.gif)
+![modkeel search](demo/search.gif)
 
 ### Compile mods from a list
-![modforge compile](demo/compile.gif)
+![modkeel compile](demo/compile.gif)
 
 ### Check status
-![modforge status](demo/status.gif)
+![modkeel status](demo/status.gif)
 
 > GIFs generated with [VHS](https://github.com/charmbracelet/vhs). See [`demo/README.md`](demo/README.md) to regenerate.
 
 ## How It Works
 
-For each repository in your list, ModForge runs:
+For each repository in your list, Modkeel runs:
 
 1. **Modrinth Check** -- Search for a pre-compiled JAR first (skip compilation if found)
 2. **Fork Discovery** -- Search GitHub for compatible forks and independent ports
@@ -69,18 +65,18 @@ java -version     # 17 or 21
 
 ```bash
 git clone https://github.com/Modkeel/modkeel.git
-cd ModForge
+cd modkeel
 pip install -e .
 ```
 
-This installs the `modforge` CLI command and all dependencies.
+This installs the `modkeel` CLI command and all dependencies.
 
 ## Usage
 
 ### Compile Mods
 
 ```bash
-modforge compile repos.txt \
+modkeel compile repos.txt \
   --mc-version 1.21.10 \
   --loader neoforge \
   --loader-version 64 \
@@ -90,7 +86,7 @@ modforge compile repos.txt \
 ### Compile and Install to Instance
 
 ```bash
-modforge compile repos.txt \
+modkeel compile repos.txt \
   -m 1.21.10 -l neoforge -lv 64 \
   --instance "/path/to/minecraft/instance" \
   -t "$(cat github_token.txt)"
@@ -99,7 +95,7 @@ modforge compile repos.txt \
 ### Compile and Test in Docker
 
 ```bash
-modforge compile repos.txt \
+modkeel compile repos.txt \
   -m 1.21.10 -l neoforge -lv 64 \
   --docker-test \
   -t "$(cat github_token.txt)"
@@ -108,23 +104,23 @@ modforge compile repos.txt \
 ### Search Without Compiling
 
 ```bash
-modforge search "Create" -m 1.21.10 -l neoforge -t "$(cat github_token.txt)"
+modkeel search "Create" -m 1.21.10 -l neoforge -t "$(cat github_token.txt)"
 ```
 
 ### Check Status
 
 ```bash
-modforge status
+modkeel status
 ```
 
-> **Legacy:** `python mod_auto_compiler.py ...` still works but is deprecated. Use `modforge compile` instead.
+> **Legacy:** `python mod_auto_compiler.py ...` still works but is deprecated. Use `modkeel compile` instead.
 
 ## Repository File Format
 
 The `repos.txt` file contains one repository URL per line:
 
 ```
-# Base URL -- ModForge finds the best branch automatically
+# Base URL -- Modkeel finds the best branch automatically
 https://github.com/Creators-of-Create/Create
 https://github.com/mezz/JustEnoughItems
 
@@ -136,7 +132,7 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 
 ## Command Reference
 
-### `modforge compile`
+### `modkeel compile`
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -155,7 +151,7 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 | `--log-file` | Write log to file | -- |
 | `--no-share` | Skip anonymous data sharing | off |
 
-### `modforge search`
+### `modkeel search`
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -164,7 +160,7 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 | `-l`, `--loader` | Mod loader | `neoforge` |
 | `-t`, `--github-token` | GitHub API token | -- |
 
-### `modforge status`
+### `modkeel status`
 
 No arguments. Shows version, config, cached loaders, and known NeoForge versions.
 
@@ -184,7 +180,7 @@ Without a token you're limited to 60 API requests/hour. With a token: 5,000/hour
 | `gradle.properties not found` | Branch lacks Gradle files | Try a different branch |
 | `Compilation timeout (>10 min)` | Large mod or slow machine | Build manually with `./gradlew build` |
 | `GitHub API rate limit exceeded` | No token or too many requests | Use `--github-token` |
-| `minecraft_version is X, expected Y` | Branch targets wrong version | Expected -- ModForge tries the next branch |
+| `minecraft_version is X, expected Y` | Branch targets wrong version | Expected -- Modkeel tries the next branch |
 | `No JAR file found in build/libs` | Unusual output path | Check `build.gradle` |
 | `JAR declares incompatible MC version` | Misconfigured `mods.toml` | Try another branch |
 

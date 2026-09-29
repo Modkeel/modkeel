@@ -1,10 +1,10 @@
-# Contributing to ModForge
+# Contributing to Modkeel
 
 ## Development Setup
 
 ```bash
 git clone https://github.com/Modkeel/modkeel.git
-cd ModForge
+cd modkeel
 pip install -e .
 ```
 
@@ -18,7 +18,7 @@ All 133 tests must pass before submitting a PR.
 
 ## Project Structure
 
-All new code goes into the `modforge/` package. The root `mod_auto_compiler.py` is a deprecated shim -- do not modify it.
+All new code goes into the `modkeel/` package. The root `mod_auto_compiler.py` is a deprecated shim -- do not modify it.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture breakdown.
 
@@ -41,8 +41,8 @@ See [CLAUDE.md](CLAUDE.md) for the full architecture breakdown.
 
 Open an issue at [github.com/Modkeel/modkeel/issues](https://github.com/Modkeel/modkeel/issues) with:
 
-- ModForge version (`modforge --version`)
+- Modkeel version (`modkeel --version`)
 - Python version
 - OS and architecture
 - Steps to reproduce
-- Relevant log output (use `--log-file modforge.log`)
+- Relevant log output (use `--log-file modkeel.log`)

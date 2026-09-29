@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "modforge"
+name = "modkeel"
 dynamic = ["version"]
 description = "Minecraft Mod Auto-Compiler - find, compile, and verify unofficial mod forks"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Juan - AutoKufe" },
+    { name = "Modkeel" },
 ]
 keywords = ["minecraft", "mods", "compiler", "neoforge", "fabric", "forge"]
 classifiers = [
@@ -31,14 +31,14 @@ dependencies = [
 ]
 
 [project.scripts]
-modforge = "modforge.cli:app"
+modkeel = "modkeel.cli:app"
 
 [tool.hatch.version]
-path = "modforge/constants.py"
-pattern = 'MODFORGE_VERSION = "(?P<version>[^"]+)"'
+path = "modkeel/constants.py"
+pattern = 'MODKEEL_VERSION = "(?P<version>[^"]+)"'
 
 [tool.hatch.build.targets.wheel]
-packages = ["modforge"]
+packages = ["modkeel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

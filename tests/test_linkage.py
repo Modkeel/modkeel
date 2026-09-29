@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from modforge.linkage import (
+from modkeel.linkage import (
     SCHEME_INTERMEDIARY,
     SCHEME_MOJANG,
     SCHEME_SRG,
@@ -21,7 +21,7 @@ from modforge.linkage import (
     parse_constant_pool,
     read_jar_refs,
 )
-from modforge.symbols import parse_proguard_mappings
+from modkeel.symbols import parse_proguard_mappings
 
 SAMPLE_MAPPINGS = """\
 net.minecraft.world.level.Level -> dcw:
@@ -429,8 +429,8 @@ class TestParseClassMembers:
     """Real javac output (tests/fixtures/Sample.class): a long constant, fields, methods."""
 
     def test_members(self):
-        from modforge.linkage import parse_class_members
-        from modforge.mappings import _param_count
+        from modkeel.linkage import parse_class_members
+        from modkeel.mappings import _param_count
 
         data = (Path(__file__).parent / "fixtures" / "Sample.class").read_bytes()
         name, fields, methods = parse_class_members(data)

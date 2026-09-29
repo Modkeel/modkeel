@@ -16,15 +16,16 @@ from typing import Dict, List, Optional
 
 import requests
 
-from modforge.linkage import ClassFileError, parse_class_members
-from modforge.symbols import SymbolIndex, is_candidate, parse_proguard_mappings
+from modkeel.linkage import ClassFileError, parse_class_members
+from modkeel.symbols import SymbolIndex, is_candidate, parse_proguard_mappings
+from modkeel.constants import MODKEEL_HOME
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 VERSION_MANIFEST_URL = (
     "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
 )
-CACHE_DIR = Path.home() / ".modforge" / "mappings"
+CACHE_DIR = MODKEEL_HOME / "mappings"
 
 FLAVOR_MOJMAP = "mojmap"
 FLAVOR_YARN = "yarn"

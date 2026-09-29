@@ -1,5 +1,5 @@
 """
-Smoke tests for ModForge matching logic.
+Smoke tests for Modkeel matching logic.
 
 Tests version matching, loader matching, branch scoring, and range parsing
 to prevent regression on the substring-matching bugs fixed in Phase 1.
@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 from pathlib import Path
 
 from mod_auto_compiler import ModAutoCompiler
-from modforge.models import (
+from modkeel.models import (
     ModCompilerConfig, BranchCandidate, CompilationResult, FailureType,
 )
 
@@ -342,7 +342,7 @@ class TestCrossLoader(unittest.TestCase):
             mc_version="1.21.10",
             loader="neoforge",
             loader_version="64",
-            output_dir="/tmp/modforge_test_out"
+            output_dir="/tmp/modkeel_test_out"
         )
         self.assertTrue(config.cross_loader)
 
@@ -352,7 +352,7 @@ class TestCrossLoader(unittest.TestCase):
             mc_version="1.21.10",
             loader="neoforge",
             loader_version="64",
-            output_dir="/tmp/modforge_test_out",
+            output_dir="/tmp/modkeel_test_out",
             cross_loader=False
         )
         self.assertFalse(config.cross_loader)
@@ -682,7 +682,7 @@ class TestQuiltGradleDetection(unittest.TestCase):
 
     def test_quilt_loader_version_detected(self):
         """quilt_loader_version in gradle.properties should detect Quilt."""
-        from modforge.loaders import LOADER_PROFILES
+        from modkeel.loaders import LOADER_PROFILES
 
         gradle_content = """
 minecraft_version=1.21.10
@@ -699,7 +699,7 @@ quilt_mappings_version=1.21.10+build.1
 
     def test_quilt_version_extraction(self):
         """Should extract Quilt loader version from gradle.properties."""
-        from modforge.loaders import LOADER_PROFILES
+        from modkeel.loaders import LOADER_PROFILES
 
         gradle_content = "quilt_loader_version = 0.23.1"
         for pattern in LOADER_PROFILES["quilt"]["gradle_version_patterns"]:
@@ -711,7 +711,7 @@ quilt_mappings_version=1.21.10+build.1
 
     def test_quilt_not_confused_with_fabric(self):
         """Quilt patterns should not match fabric_loader_version."""
-        from modforge.loaders import LOADER_PROFILES
+        from modkeel.loaders import LOADER_PROFILES
 
         gradle_content = "fabric_loader_version = 0.16.0"
         for pattern in LOADER_PROFILES["quilt"]["gradle_detection_patterns"]:
@@ -724,7 +724,7 @@ class TestLoaderValidationInConfig(unittest.TestCase):
 
     def test_valid_loader_accepted(self):
         """All loaders in ALL_LOADERS should be accepted."""
-        from modforge.loaders import ALL_LOADERS
+        from modkeel.loaders import ALL_LOADERS
         from unittest.mock import patch
         for loader in ALL_LOADERS:
             with patch.object(Path, 'mkdir'):
@@ -762,10 +762,10 @@ class TestLoaderValidationInConfig(unittest.TestCase):
 
 
 class TestFuzzyScore(unittest.TestCase):
-    """Test fuzzy_score() from modforge.utils."""
+    """Test fuzzy_score() from modkeel.utils."""
 
     def setUp(self):
-        from modforge.utils import fuzzy_score as fs
+        from modkeel.utils import fuzzy_score as fs
         self.fuzzy_score = fs
 
     def test_exact_match_returns_100(self):
@@ -825,10 +825,10 @@ class TestFuzzyScore(unittest.TestCase):
 
 
 class TestFuzzyMatch(unittest.TestCase):
-    """Test fuzzy_match() from modforge.utils."""
+    """Test fuzzy_match() from modkeel.utils."""
 
     def setUp(self):
-        from modforge.utils import fuzzy_match as fm
+        from modkeel.utils import fuzzy_match as fm
         self.fuzzy_match = fm
 
     def test_exact_match_first(self):
@@ -880,10 +880,10 @@ class TestFuzzyMatch(unittest.TestCase):
 
 
 class TestSubsequenceScore(unittest.TestCase):
-    """Test _subsequence_score() from modforge.utils."""
+    """Test _subsequence_score() from modkeel.utils."""
 
     def setUp(self):
-        from modforge.utils import _subsequence_score as ss
+        from modkeel.utils import _subsequence_score as ss
         self._subsequence_score = ss
 
     def test_perfect_match(self):

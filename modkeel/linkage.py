@@ -35,9 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
-from modforge.symbols import SymbolIndex, is_candidate
+from modkeel.symbols import SymbolIndex, is_candidate
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 CLASS_FILE_MAGIC = b"\xca\xfe\xba\xbe"
 

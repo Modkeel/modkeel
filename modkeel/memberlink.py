@@ -33,11 +33,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from modforge.linkage import (TAG_CLASS, TAG_FIELDREF, TAG_INTERFACE_METHODREF, TAG_METHODREF,
+from modkeel.linkage import (TAG_CLASS, TAG_FIELDREF, TAG_INTERFACE_METHODREF, TAG_METHODREF,
                               TAG_NAME_AND_TYPE, ClassFileError, _class_internal_name,
                               _parse_pool, _utf8)
+from modkeel.constants import MODKEEL_HOME
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 OBJECT = "java/lang/Object"
 OBJECT_METHODS = {"equals", "hashCode", "toString", "getClass", "notify", "notifyAll",
@@ -386,7 +387,7 @@ def check_jar_members(jar: Path, db: ClassDB, patched_only: Optional[Set[str]] =
     return report
 
 
-JDK_CLASSES = Path.home() / ".modforge" / "jdk-classes"
+JDK_CLASSES = MODKEEL_HOME / "jdk-classes"
 
 
 def add_jdk(db: ClassDB) -> bool:

@@ -1,20 +1,27 @@
-"""Persistent user configuration for ModForge."""
+"""Persistent user configuration for Modkeel."""
 
+import shutil
 import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
 import toml
+from modkeel.constants import MODKEEL_HOME
 
 
-class ModForgeConfig:
-    """Persistent user config stored at ~/.modforge/config.toml."""
+class ModkeelConfig:
+    """Persistent user config stored at ~/.modkeel/config.toml."""
 
-    CONFIG_DIR = Path.home() / ".modforge"
+    CONFIG_DIR = MODKEEL_HOME
     CONFIG_FILE = CONFIG_DIR / "config.toml"
+    # before the rename to Modkeel the config lived here
+    LEGACY_FILE = Path.home() / ".modforge" / "config.toml"
 
     def __init__(self):
         self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        if (not self.CONFIG_FILE.exists() and self.CONFIG_FILE == MODKEEL_HOME / "config.toml"
+                and self.LEGACY_FILE.exists() and self.LEGACY_FILE != self.CONFIG_FILE):
+            shutil.copy2(self.LEGACY_FILE, self.CONFIG_FILE)
         self._data: Dict = {}
         self._is_first_run = not self.CONFIG_FILE.exists()
         self._load()
@@ -78,15 +85,15 @@ class ModForgeConfig:
         self._save()
 
 
-def prompt_sharing_preference(config: ModForgeConfig) -> str:
+def prompt_sharing_preference(config: ModkeelConfig) -> str:
     """
     Show the opt-in prompt on first run. Returns the user's choice.
     """
     print(f"\n{'='*60}")
-    print("  Help improve ModForge for everyone!")
+    print("  Help improve Modkeel for everyone!")
     print(f"{'='*60}")
     print()
-    print("  When a mod compiles/loads successfully, ModForge")
+    print("  When a mod compiles/loads successfully, Modkeel")
     print("  can share anonymous compatibility data with the")
     print("  community. This helps other players find working")
     print("  mods faster.")

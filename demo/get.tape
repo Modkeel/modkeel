@@ -1,7 +1,7 @@
-# VHS tape: modforge get demo
+# VHS tape: modkeel get demo
 # Run with: vhs demo/get.tape
 # Shows the one-command flow: check Modrinth → download mod + deps → done.
-# Requires: modforge installed (pip install -e .)
+# Requires: modkeel installed (pip install -e .)
 
 Output demo/get.gif
 Set Theme "Dracula"
@@ -12,6 +12,6 @@ Set Padding 20
 Set TypingSpeed 50ms
 
 # Get JEI in one step - downloads from Modrinth automatically
-Type "modforge get 'JEI' -m 1.21.1 -l neoforge"
+Type "modkeel get 'JEI' -m 1.21.1 -l neoforge"
 Enter
 Sleep 12s

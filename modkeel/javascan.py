@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", re.MULTILINE)
 PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)

@@ -1,4 +1,4 @@
-"""Loader profiles for ModForge - single source of truth for loader-specific data."""
+"""Loader profiles for Modkeel - single source of truth for loader-specific data."""
 
 from typing import Dict, List, Optional
 

@@ -1,4 +1,4 @@
-"""Tests for build-target extraction (modforge/buildinfo.py) and judge_build_info.
+"""Tests for build-target extraction (modkeel/buildinfo.py) and judge_build_info.
 
 Fixtures are trimmed from real branches that the old gradle.properties-only validator
 rejected or accepted wrongly (2026-09 re-measurement against Modrinth).
@@ -8,15 +8,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from modforge.buildinfo import (
+from modkeel.buildinfo import (
     extract_build_info,
     find_mc_versions,
     loaders_from_tree,
     resolve_placeholders,
     select_build_files,
 )
-from modforge.models import BranchCandidate, ModCompilerConfig
-from modforge.validation import NON_CODE_BRANCH, BranchValidator, is_bounded_range
+from modkeel.models import BranchCandidate, ModCompilerConfig
+from modkeel.validation import NON_CODE_BRANCH, BranchValidator, is_bounded_range
 
 
 def make_validator(mc="1.21.10", loader="neoforge"):
@@ -186,7 +186,7 @@ class TestJudgeRealLayouts:
 
 class TestModrinthSourceMatch:
     def test_filters_other_repos_and_tags_match(self, monkeypatch):
-        from modforge.modrinth import ModrinthClient
+        from modkeel.modrinth import ModrinthClient
 
         projects = [
             {"id": "a", "source_url": "https://github.com/someone/iris-flw-compat"},
@@ -195,7 +195,7 @@ class TestModrinthSourceMatch:
         ]
         resp = MagicMock(status_code=200)
         resp.json.return_value = projects
-        monkeypatch.setattr("modforge.modrinth.requests.get", lambda *a, **k: resp)
+        monkeypatch.setattr("modkeel.modrinth.requests.get", lambda *a, **k: resp)
 
         client = ModrinthClient(ModCompilerConfig("1.21.10", "neoforge", "0"))
         hits = [{"project_id": "a"}, {"project_id": "b"}, {"project_id": "c"}]
@@ -256,6 +256,6 @@ class TestSecondRoundLayouts:
 
 
 def test_fabric_tilde_prerelease_suffix():
-    from modforge.version import is_version_in_fabric_range
+    from modkeel.version import is_version_in_fabric_range
     assert is_version_in_fabric_range("26.2", "~26.2-")
     assert not is_version_in_fabric_range("26.3", "~26.2-")

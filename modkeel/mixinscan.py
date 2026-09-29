@@ -19,7 +19,7 @@ import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from modforge.linkage import ClassFileError, _class_internal_name, _parse_pool, _utf8
+from modkeel.linkage import ClassFileError, _class_internal_name, _parse_pool, _utf8
 
 MIXIN = "Lorg/spongepowered/asm/mixin/Mixin;"
 OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;"

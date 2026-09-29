@@ -1,4 +1,4 @@
-"""Docker testing for ModForge."""
+"""Docker testing for Modkeel."""
 
 import logging
 import os
@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from modforge.loaders import (
+from modkeel.loaders import (
     KNOWN_LOADER_VERSIONS,
     get_docker_server_type,
     get_installer_filename,
@@ -21,9 +21,10 @@ from modforge.loaders import (
     get_maven_domain,
     get_profile,
 )
-from modforge.models import CompilationResult, DockerTestCache, ModCompilerConfig
+from modkeel.models import CompilationResult, DockerTestCache, ModCompilerConfig
+from modkeel.constants import MODKEEL_HOME
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 # ============================================================================
 # LOG PATTERNS
@@ -80,7 +81,7 @@ DOCKER_SERVER_STARTING_PATTERN = re.compile(
     r"Launching wrapped minecraft"
 )
 
-DOCKER_VOLUME_PREFIX = "modforge_cache"
+DOCKER_VOLUME_PREFIX = "modkeel_cache"
 DOCKER_INSTALL_MAX_RETRIES = 5
 
 # Backwards-compatible alias
@@ -139,9 +140,9 @@ class DockerTester:
         return vol
 
     def _get_loader_cache_dir(self) -> Path:
-        """Local cache: ~/.modforge/loaders/<loader>/<mc_version>/"""
+        """Local cache: ~/.modkeel/loaders/<loader>/<mc_version>/"""
         d = (
-            Path.home() / ".modforge" / "loaders"
+            MODKEEL_HOME / "loaders"
             / self.config.loader.lower() / self.config.mc_version
         )
         d.mkdir(parents=True, exist_ok=True)
@@ -230,7 +231,7 @@ class DockerTester:
             )
             return None
 
-        installer_dir = Path.home() / ".modforge" / "installers"
+        installer_dir = MODKEEL_HOME / "installers"
         installer_dir.mkdir(parents=True, exist_ok=True)
         installer_fname = get_installer_filename(loader, loader_version)
         installer = installer_dir / installer_fname
@@ -336,7 +337,7 @@ class DockerTester:
     ) -> dict:
         """Run the server directly from pre-installed loader cache."""
         container_name = (
-            f"modforge_test_{int(time.time())}_{os.getpid()}"
+            f"modkeel_test_{int(time.time())}_{os.getpid()}"
         )
 
         unix_args = list(
@@ -370,7 +371,7 @@ class DockerTester:
             f'exec java @user_jvm_args.txt @{args_rel} nogui\n'
         )
         startup_path = Path(tempfile.mktemp(
-            prefix="modforge_start_", suffix=".sh",
+            prefix="modkeel_start_", suffix=".sh",
         ))
         startup_path.write_text(startup)
         startup_path.chmod(0o755)
@@ -422,7 +423,7 @@ class DockerTester:
 
         for attempt in range(1, DOCKER_INSTALL_MAX_RETRIES + 1):
             container_name = (
-                f"modforge_test_{int(time.time())}_{os.getpid()}"
+                f"modkeel_test_{int(time.time())}_{os.getpid()}"
             )
             cmd = [
                 "docker", "run", "--rm",
@@ -638,7 +639,7 @@ class DockerTester:
     ) -> dict:
         """Test all JARs together in a single Docker container."""
         with tempfile.TemporaryDirectory(
-            prefix="modforge_docker_"
+            prefix="modkeel_docker_"
         ) as tmp:
             tmp_path = Path(tmp)
             for jar in jar_paths:
@@ -653,7 +654,7 @@ class DockerTester:
     ) -> dict:
         """Test a single JAR in isolation (with its dependencies)."""
         with tempfile.TemporaryDirectory(
-            prefix="modforge_docker_"
+            prefix="modkeel_docker_"
         ) as tmp:
             tmp_path = Path(tmp)
             shutil.copy2(jar_path, tmp_path / jar_path.name)

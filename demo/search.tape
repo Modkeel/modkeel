@@ -1,8 +1,8 @@
-# VHS tape: modforge search demo
+# VHS tape: modkeel search demo
 # Run with: vhs demo/search.tape
 # Shows smart search: Modrinth found → skips fork search entirely.
 # Uses --no-prompt to avoid interactive download prompt in GIF.
-# Requires: modforge installed (pip install -e .)
+# Requires: modkeel installed (pip install -e .)
 
 Output demo/search.gif
 Set Theme "Dracula"
@@ -13,6 +13,6 @@ Set Padding 20
 Set TypingSpeed 50ms
 
 # Search for JEI - found on Modrinth, no fork search needed
-Type "modforge search 'JEI' -m 1.21.1 -l neoforge --no-prompt"
+Type "modkeel search 'JEI' -m 1.21.1 -l neoforge --no-prompt"
 Enter
 Sleep 8s

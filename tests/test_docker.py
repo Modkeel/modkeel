@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from mod_auto_compiler import ModAutoCompiler
-from modforge.models import (
+from modkeel.models import (
     ModCompilerConfig, CompilationResult, DockerTestCache, FailureType,
 )
 
@@ -382,7 +382,7 @@ class TestContainerName(unittest.TestCase):
         compiler = make_compiler()
         names = set()
         for _ in range(5):
-            name = f"modforge_test_{int(time.time())}_{os.getpid()}"
+            name = f"modkeel_test_{int(time.time())}_{os.getpid()}"
             names.add(name)
             time.sleep(0.01)
         # At minimum we get 1 unique due to sub-second calls
@@ -483,9 +483,9 @@ class TestAnalyzeServerLogs(unittest.TestCase):
 class TestRetryLogic(unittest.TestCase):
     """Test auto-retry on loader install failures."""
 
-    @patch("modforge.docker.time.sleep")
-    @patch("modforge.docker.subprocess.Popen")
-    @patch("modforge.docker.subprocess.run")
+    @patch("modkeel.docker.time.sleep")
+    @patch("modkeel.docker.subprocess.Popen")
+    @patch("modkeel.docker.subprocess.run")
     def test_retries_on_loader_error(self, mock_run, mock_popen,
                                       mock_sleep):
         """Should retry when loader install fails."""
@@ -518,9 +518,9 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 2)
         mock_sleep.assert_called_once_with(10)
 
-    @patch("modforge.docker.time.sleep")
-    @patch("modforge.docker.subprocess.Popen")
-    @patch("modforge.docker.subprocess.run")
+    @patch("modkeel.docker.time.sleep")
+    @patch("modkeel.docker.subprocess.Popen")
+    @patch("modkeel.docker.subprocess.run")
     def test_no_retry_on_mod_failure(self, mock_run, mock_popen,
                                       mock_sleep):
         """Should NOT retry when a mod fails (not a loader error)."""
@@ -543,9 +543,9 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 1)
         mock_sleep.assert_not_called()
 
-    @patch("modforge.docker.time.sleep")
-    @patch("modforge.docker.subprocess.Popen")
-    @patch("modforge.docker.subprocess.run")
+    @patch("modkeel.docker.time.sleep")
+    @patch("modkeel.docker.subprocess.Popen")
+    @patch("modkeel.docker.subprocess.run")
     def test_gives_up_after_max_retries(self, mock_run, mock_popen,
                                          mock_sleep):
         """Should give up after DOCKER_INSTALL_MAX_RETRIES."""

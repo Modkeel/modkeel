@@ -1,4 +1,4 @@
-"""Utility functions for ModForge."""
+"""Utility functions for Modkeel."""
 
 import logging
 import os
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 
 def setup_logging(log_file: Optional[str] = None) -> None:

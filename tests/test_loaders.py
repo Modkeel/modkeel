@@ -1,5 +1,5 @@
 """
-Tests for modforge.loaders module.
+Tests for modkeel.loaders module.
 
 Tests loader profiles, cross-loader chains, bridge mods, known versions,
 and all helper functions.
@@ -7,7 +7,7 @@ and all helper functions.
 
 import unittest
 
-from modforge.loaders import (
+from modkeel.loaders import (
     ALL_LOADERS,
     KNOWN_LOADER_VERSIONS,
     LOADER_PROFILES,

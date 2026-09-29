@@ -1,4 +1,4 @@
-"""Recommendation engine for ModForge.
+"""Recommendation engine for Modkeel.
 
 Queries Modrinth to build a compatibility matrix and recommends the best
 MC version + loader combination for a user's installed mods.
@@ -11,12 +11,12 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import requests
 
-from modforge.constants import MODRINTH_USER_AGENT
-from modforge.loaders import ALL_LOADERS
-from modforge.models import ModAvailability, RecommendationResult, ScannedMod
-from modforge.utils import fuzzy_score
+from modkeel.constants import MODRINTH_USER_AGENT
+from modkeel.loaders import ALL_LOADERS
+from modkeel.models import ModAvailability, RecommendationResult, ScannedMod
+from modkeel.utils import fuzzy_score
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 # Modrinth rate limit: 300 req/min. Stay conservative.
 _RATE_LIMIT_DELAY = 0.25

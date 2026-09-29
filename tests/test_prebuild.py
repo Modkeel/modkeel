@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from modforge.models import BranchCandidate, ModCompilerConfig
-from modforge.prebuild import (
+from modkeel.models import BranchCandidate, ModCompilerConfig
+from modkeel.prebuild import (
     DEAD_MAVEN_HOSTS,
     CIStatus,
     PreBuildGate,
@@ -130,26 +130,26 @@ class TestCheckMavenHostAlive:
         for host in DEAD_MAVEN_HOSTS:
             assert host == host.lower()
 
-    @patch("modforge.prebuild.requests.head")
+    @patch("modkeel.prebuild.requests.head")
     def test_404_on_root_is_not_dead(self, mock_head):
         mock_head.return_value = MagicMock(status_code=404)
         alive, _ = check_maven_host_alive("https://maven.example.org")
         assert alive
 
-    @patch("modforge.prebuild.requests.head")
+    @patch("modkeel.prebuild.requests.head")
     def test_connection_error_is_dead(self, mock_head):
         mock_head.side_effect = requests.ConnectionError()
         alive, reason = check_maven_host_alive("https://gone.example.org")
         assert not alive
         assert "unreachable" in reason
 
-    @patch("modforge.prebuild.requests.head")
+    @patch("modkeel.prebuild.requests.head")
     def test_410_is_dead(self, mock_head):
         mock_head.return_value = MagicMock(status_code=410)
         alive, _ = check_maven_host_alive("https://gone.example.org")
         assert not alive
 
-    @patch("modforge.prebuild.requests.head")
+    @patch("modkeel.prebuild.requests.head")
     def test_timeout_is_inconclusive_not_dead(self, mock_head):
         mock_head.side_effect = requests.Timeout()
         alive, _ = check_maven_host_alive("https://slow.example.org")

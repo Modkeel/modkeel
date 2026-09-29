@@ -1,4 +1,4 @@
-"""GitHub API client for ModForge."""
+"""GitHub API client for Modkeel."""
 
 import base64
 import logging
@@ -10,10 +10,10 @@ from urllib.parse import urlparse
 
 import requests
 
-from modforge.loaders import get_cross_loader_chain
-from modforge.models import BranchCandidate, ModCompilerConfig
+from modkeel.loaders import get_cross_loader_chain
+from modkeel.models import BranchCandidate, ModCompilerConfig
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 
 def parse_repo_url(url: str) -> Tuple[str, str, Optional[str]]:

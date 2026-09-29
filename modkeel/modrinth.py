@@ -1,4 +1,4 @@
-"""Modrinth API client for ModForge."""
+"""Modrinth API client for Modkeel."""
 
 import json
 import logging
@@ -8,12 +8,12 @@ from typing import Dict, List, Optional
 
 import requests
 
-from modforge.constants import MODRINTH_USER_AGENT
-from modforge.loaders import get_bridge_mods, get_cross_loader_chain
-from modforge.models import ModCompilerConfig
-from modforge.utils import fuzzy_score
+from modkeel.constants import MODRINTH_USER_AGENT
+from modkeel.loaders import get_bridge_mods, get_cross_loader_chain
+from modkeel.models import ModCompilerConfig
+from modkeel.utils import fuzzy_score
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 
 class ModrinthClient:

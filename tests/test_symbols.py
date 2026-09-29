@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from modforge.javascan import SourceRefs, scan_source, scan_tree
-from modforge.mappings import (
+from modkeel.javascan import SourceRefs, scan_source, scan_tree
+from modkeel.mappings import (
     FLAVOR_MCP,
     FLAVOR_MOJMAP,
     FLAVOR_YARN,
     cache_path,
     detect_flavor,
 )
-from modforge.symbols import (
+from modkeel.symbols import (
     BONUS_CLEAN,
     SymbolIndex,
     SymbolReport,

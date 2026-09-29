@@ -38,7 +38,7 @@ vhs demo/compile.tape   # Slow, needs saved token and repos.txt
 
 | File | Description | Requirements |
 |------|-------------|-------------|
-| `status.tape` | Shows `modforge --version` and `modforge status` | None |
+| `status.tape` | Shows `modkeel --version` and `modkeel status` | None |
 | `search.tape` | Smart search: Modrinth found, skips fork search | None |
 | `get.tape` | One-command download from Modrinth | None |
 | `compile.tape` | Full compilation pipeline | Saved token, `demo_repos.txt` |

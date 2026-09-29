@@ -1,4 +1,4 @@
-"""Pipeline orchestrator for ModForge."""
+"""Pipeline orchestrator for Modkeel."""
 
 import io
 import logging
@@ -14,25 +14,25 @@ from typing import Dict, List, Optional
 
 import requests
 
-from modforge.build import (
+from modkeel.build import (
     classify_build_failure,
     compile_mod,
     create_maven_local_init_script,
     publish_to_maven_local,
     validate_jar,
 )
-from modforge.constants import MODRINTH_USER_AGENT
-from modforge.docker import DockerTester
-from modforge.github import GitHubClient, parse_repo_url
-from modforge.models import CompilationResult, FailureType, ModCompilerConfig
-from modforge.modrinth import ModrinthClient
-from modforge.prebuild import PreBuildGate
-from modforge.utils import safe_rmtree
-from modforge.loaders import get_bridge_mods, get_cross_loader_chain, get_profile
-from modforge.validation import BranchValidator
-from modforge.version import is_version_in_maven_range, is_version_in_fabric_range
+from modkeel.constants import MODRINTH_USER_AGENT
+from modkeel.docker import DockerTester
+from modkeel.github import GitHubClient, parse_repo_url
+from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
+from modkeel.modrinth import ModrinthClient
+from modkeel.prebuild import PreBuildGate
+from modkeel.utils import safe_rmtree
+from modkeel.loaders import get_bridge_mods, get_cross_loader_chain, get_profile
+from modkeel.validation import BranchValidator
+from modkeel.version import is_version_in_maven_range, is_version_in_fabric_range
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 
 class Pipeline:
@@ -133,8 +133,8 @@ class Pipeline:
         if not getattr(self.config, "symbol_check", True):
             return True
 
-        from modforge.linkage import check_jar
-        from modforge.mappings import load_index
+        from modkeel.linkage import check_jar
+        from modkeel.mappings import load_index
 
         index = load_index(self.config.mc_version)
         if index is None:

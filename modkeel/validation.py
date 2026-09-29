@@ -1,4 +1,4 @@
-"""Branch validation and scoring for ModForge."""
+"""Branch validation and scoring for Modkeel."""
 
 import json
 import logging
@@ -10,16 +10,16 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from modforge.buildinfo import BuildInfo, extract_build_info, select_build_files
-from modforge.loaders import get_profile
-from modforge.models import BranchCandidate, ModCompilerConfig
-from modforge.version import (
+from modkeel.buildinfo import BuildInfo, extract_build_info, select_build_files
+from modkeel.loaders import get_profile
+from modkeel.models import BranchCandidate, ModCompilerConfig
+from modkeel.version import (
     is_version_compatible,
     is_version_in_fabric_range,
     is_version_in_maven_range,
 )
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 NON_CODE_BRANCH = re.compile(
     r'(?:^|[/_\-])(?:l10n|i18n|crowdin|translations?|dependabot|renovate|gh-pages|docs?|'
@@ -245,7 +245,7 @@ class BranchValidator:
 
             # If target not found, detect any loader via all profiles
             if not branch.loader:
-                from modforge.loaders import LOADER_PROFILES
+                from modkeel.loaders import LOADER_PROFILES
                 for ldr_name, ldr_profile in LOADER_PROFILES.items():
                     for pattern in ldr_profile["gradle_detection_patterns"]:
                         if re.search(pattern, gradle_content):

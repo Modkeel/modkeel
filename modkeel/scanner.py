@@ -1,4 +1,4 @@
-"""Mods folder scanner for ModForge recommend command."""
+"""Mods folder scanner for Modkeel recommend command."""
 
 import hashlib
 import json
@@ -11,10 +11,10 @@ from typing import List, Optional, Tuple
 
 import toml
 
-from modforge.loaders import LOADER_PROFILES
-from modforge.models import ScannedMod
+from modkeel.loaders import LOADER_PROFILES
+from modkeel.models import ScannedMod
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 # Mod IDs that are loader internals or APIs, not user-facing mods
 LIBRARY_MOD_IDS = {

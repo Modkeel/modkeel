@@ -1,4 +1,4 @@
-"""Typer CLI for ModForge."""
+"""Typer CLI for Modkeel."""
 
 import logging
 import sys
@@ -10,12 +10,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from modforge.config import ModForgeConfig, prompt_sharing_preference
-from modforge.constants import MODFORGE_VERSION
-from modforge.loaders import ALL_LOADERS, KNOWN_LOADER_VERSIONS
-from modforge.models import CompilationResult, FailureType, ModCompilerConfig
-from modforge.pipeline import Pipeline
-from modforge.utils import setup_logging, setup_windows_console
+from modkeel.config import ModkeelConfig, prompt_sharing_preference
+from modkeel.constants import MODKEEL_VERSION
+from modkeel.loaders import ALL_LOADERS, KNOWN_LOADER_VERSIONS
+from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
+from modkeel.pipeline import Pipeline
+from modkeel.utils import setup_logging, setup_windows_console
+from modkeel.constants import MODKEEL_HOME
 
 BANNER = r"""    __  ___          ______
    /  |/  /___  ____/ / __/___  _________ ____
@@ -29,7 +30,7 @@ TAGLINE = "Compile the mods Mojang left behind"
 setup_windows_console()
 console = Console()
 app = typer.Typer(
-    name="modforge",
+    name="modkeel",
     help="Minecraft Mod Auto-Compiler - find, compile, and verify unofficial mod forks.",
     add_completion=False,
 )
@@ -37,23 +38,23 @@ app = typer.Typer(
 
 def resolve_github_token(
     explicit: Optional[str],
-    modforge_cfg: ModForgeConfig,
+    modkeel_cfg: ModkeelConfig,
     prompt_if_missing: bool = False,
 ) -> Optional[str]:
     """Resolve GitHub token: CLI flag > saved config > interactive prompt.
 
     Args:
         explicit: Token passed via -t flag.
-        modforge_cfg: Persistent config.
+        modkeel_cfg: Persistent config.
         prompt_if_missing: If True and no token found, prompt the user
             interactively. Only prompts if running in a terminal.
     """
     if explicit:
-        if explicit != modforge_cfg.github_token:
-            modforge_cfg.github_token = explicit
-            console.print("[dim]  GitHub token saved to ~/.modforge/config.toml[/dim]")
+        if explicit != modkeel_cfg.github_token:
+            modkeel_cfg.github_token = explicit
+            console.print("[dim]  GitHub token saved to ~/.modkeel/config.toml[/dim]")
         return explicit
-    saved = modforge_cfg.github_token
+    saved = modkeel_cfg.github_token
     if saved:
         console.print("[dim]  Using saved GitHub token.[/dim]")
         return saved
@@ -66,8 +67,8 @@ def resolve_github_token(
         )
         token = typer.prompt("  GitHub token", hide_input=True, default="")
         if token:
-            modforge_cfg.github_token = token
-            console.print("[green]Token saved to ~/.modforge/config.toml[/green]")
+            modkeel_cfg.github_token = token
+            console.print("[green]Token saved to ~/.modkeel/config.toml[/green]")
             return token
     return None
 
@@ -75,7 +76,7 @@ def resolve_github_token(
 def version_callback(value: bool):
     if value:
         console.print(f"[bold cyan]{BANNER}[/bold cyan]")
-        console.print(f"\n  [bold]ModForge v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n")
+        console.print(f"\n  [bold]Modkeel v{MODKEEL_VERSION}[/bold] - {TAGLINE}\n")
         raise typer.Exit()
 
 
@@ -90,7 +91,7 @@ def main(
         is_eager=True,
     ),
 ):
-    """ModForge - Minecraft Mod Auto-Compiler."""
+    """Modkeel - Minecraft Mod Auto-Compiler."""
 
 
 @app.command()
@@ -206,21 +207,21 @@ def compile(
     console.print(
         Panel(
             f"[bold cyan]{BANNER}[/bold cyan]\n\n"
-            f"  [bold]v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n\n"
+            f"  [bold]v{MODKEEL_VERSION}[/bold] - {TAGLINE}\n\n"
             f"  MC {mc_version} | {loader.capitalize()} {loader_version}\n"
             f"  {len(repo_urls)} repositories loaded from {repos_file}",
-            title="ModForge",
+            title="Modkeel",
             border_style="blue",
         )
     )
 
     # Load persistent config + resolve token
-    modforge_cfg = ModForgeConfig()
+    modkeel_cfg = ModkeelConfig()
     github_token = resolve_github_token(
-        github_token, modforge_cfg, prompt_if_missing=True
+        github_token, modkeel_cfg, prompt_if_missing=True
     )
-    if modforge_cfg.is_first_run and not modforge_cfg.was_prompted:
-        prompt_sharing_preference(modforge_cfg)
+    if modkeel_cfg.is_first_run and not modkeel_cfg.was_prompted:
+        prompt_sharing_preference(modkeel_cfg)
 
     # Create configuration
     try:
@@ -260,19 +261,19 @@ def compile(
     # Submit anonymous crowdsource reports
     if not no_share:
         try:
-            from modforge.crowdsource import submit_reports
-            from modforge.github import parse_repo_url
+            from modkeel.crowdsource import submit_reports
+            from modkeel.github import parse_repo_url
 
             submit_reports(
                 pipeline.results,
-                modforge_cfg,
+                modkeel_cfg,
                 mc_version,
                 loader.lower(),
                 loader_version,
                 parse_repo_url,
             )
         except Exception as e:
-            logging.getLogger("modforge").debug("Crowdsource submission error: %s", e)
+            logging.getLogger("modkeel").debug("Crowdsource submission error: %s", e)
 
     # Exit with error code if all mods failed
     if pipeline.results and not any(r.success for r in pipeline.results):
@@ -324,17 +325,17 @@ def search(
     ),
 ):
     """Search Modrinth and GitHub for a mod. Offers to download or compile."""
-    from modforge.github import GitHubClient
-    from modforge.modrinth import ModrinthClient
+    from modkeel.github import GitHubClient
+    from modkeel.modrinth import ModrinthClient
 
     # Resolve token
-    modforge_cfg = ModForgeConfig()
-    github_token = resolve_github_token(github_token, modforge_cfg)
+    modkeel_cfg = ModkeelConfig()
+    github_token = resolve_github_token(github_token, modkeel_cfg)
 
     console.print(
         Panel(
             f"[bold]Search:[/bold] {query}\nMC {mc_version} | {loader.capitalize()}",
-            title="ModForge Search",
+            title="Modkeel Search",
             border_style="cyan",
         )
     )
@@ -393,7 +394,7 @@ def search(
 
     # Prompt for token if missing (only needed for fork search)
     if not github_token:
-        github_token = resolve_github_token(None, modforge_cfg, prompt_if_missing=True)
+        github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
         if github_token:
             # Rebuild config with token
             config = ModCompilerConfig(
@@ -407,7 +408,7 @@ def search(
 
     # GitHub fork search with pre-filtering
     if github_token:
-        from modforge.validation import BranchValidator
+        from modkeel.validation import BranchValidator
 
         console.print("\n[bold]GitHub Forks:[/bold]")
         github = GitHubClient(config)
@@ -507,7 +508,7 @@ def search(
 
                 console.print(
                     "\n[dim]  Pre-filtered via gradle.properties. "
-                    "Use 'modforge compile' to build and "
+                    "Use 'modkeel compile' to build and "
                     "'--docker-test' to confirm compatibility.[/dim]"
                 )
             else:
@@ -519,7 +520,7 @@ def search(
             console.print("[yellow]No GitHub forks found.[/yellow]")
     else:
         console.print(
-            "\n[dim]Tip: Run 'modforge token --set TOKEN' to enable "
+            "\n[dim]Tip: Run 'modkeel token --set TOKEN' to enable "
             "GitHub fork search.[/dim]"
         )
 
@@ -571,15 +572,15 @@ def get(
     import shutil
     import tempfile
 
-    from modforge.github import GitHubClient
-    from modforge.modrinth import ModrinthClient
-    from modforge.validation import BranchValidator
+    from modkeel.github import GitHubClient
+    from modkeel.modrinth import ModrinthClient
+    from modkeel.validation import BranchValidator
 
     setup_logging()
 
     # Resolve token
-    modforge_cfg = ModForgeConfig()
-    github_token = resolve_github_token(github_token, modforge_cfg)
+    modkeel_cfg = ModkeelConfig()
+    github_token = resolve_github_token(github_token, modkeel_cfg)
 
     # Validate loader
     if loader.lower() not in ALL_LOADERS:
@@ -592,11 +593,11 @@ def get(
     console.print(
         Panel(
             f"[bold cyan]{BANNER}[/bold cyan]\n\n"
-            f"  [bold]v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n\n"
+            f"  [bold]v{MODKEEL_VERSION}[/bold] - {TAGLINE}\n\n"
             f"  [bold]Get:[/bold] {query}\n"
             f"  MC {mc_version} | {loader.capitalize()}"
             + (f" {loader_version}" if loader_version else ""),
-            title="ModForge Get",
+            title="Modkeel Get",
             border_style="green",
         )
     )
@@ -631,7 +632,7 @@ def get(
 
     # Step 2: Search GitHub forks (prompt for token if missing)
     if not github_token:
-        github_token = resolve_github_token(None, modforge_cfg, prompt_if_missing=True)
+        github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
         if github_token:
             config = ModCompilerConfig(
                 mc_version=mc_version,
@@ -645,7 +646,7 @@ def get(
         console.print(
             "\n[red]Not found on Modrinth.[/red] "
             "Set a GitHub token to search forks:\n"
-            "  [bold]modforge token --set ghp_YOUR_TOKEN[/bold]"
+            "  [bold]modkeel token --set ghp_YOUR_TOKEN[/bold]"
         )
         raise typer.Exit(1)
 
@@ -763,7 +764,7 @@ def token(
     ),
 ):
     """Manage saved GitHub Personal Access Token."""
-    cfg = ModForgeConfig()
+    cfg = ModkeelConfig()
 
     if set_token:
         cfg.github_token = set_token
@@ -779,8 +780,8 @@ def token(
     if not saved:
         console.print(
             "No GitHub token saved.\n\n"
-            "  Set one with: [bold]modforge token --set ghp_YOUR_TOKEN[/bold]\n"
-            "  Or pass it:   [bold]modforge get ... -t ghp_YOUR_TOKEN[/bold] "
+            "  Set one with: [bold]modkeel token --set ghp_YOUR_TOKEN[/bold]\n"
+            "  Or pass it:   [bold]modkeel get ... -t ghp_YOUR_TOKEN[/bold] "
             "(auto-saves)"
         )
         return
@@ -795,19 +796,19 @@ def token(
 
 @app.command()
 def status():
-    """Show ModForge status: version, config, and Docker cache info."""
-    from modforge.models import DockerTestCache
+    """Show Modkeel status: version, config, and Docker cache info."""
+    from modkeel.models import DockerTestCache
 
     console.print(
         Panel(
-            f"[bold]ModForge v{MODFORGE_VERSION}[/bold]",
+            f"[bold]Modkeel v{MODKEEL_VERSION}[/bold]",
             title="Status",
             border_style="green",
         )
     )
 
     # Config info
-    config_dir = Path.home() / ".modforge"
+    config_dir = MODKEEL_HOME
     config_file = config_dir / "config.toml"
 
     table = Table(title="Configuration")
@@ -821,7 +822,7 @@ def status():
     )
 
     if config_file.exists():
-        cfg = ModForgeConfig()
+        cfg = ModkeelConfig()
         table.add_row("Client ID", cfg.client_id[:8] + "...")
         table.add_row("Data sharing", str(cfg.sharing))
         saved_token = cfg.github_token
@@ -881,7 +882,7 @@ def status():
     for loader_name, versions in sorted(KNOWN_LOADER_VERSIONS.items()):
         if not versions:
             continue
-        from modforge.loaders import get_profile
+        from modkeel.loaders import get_profile
 
         display_name = get_profile(loader_name)["display_name"]
         ver_table = Table(title=f"Known {display_name} Versions")
@@ -922,8 +923,8 @@ def recommend(
     """Scan installed mods and recommend the best MC version + loader."""
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    from modforge.recommend import RecommendationEngine
-    from modforge.scanner import detect_mods_folder, scan_mods_folder
+    from modkeel.recommend import RecommendationEngine
+    from modkeel.scanner import detect_mods_folder, scan_mods_folder
 
     # Resolve mods directory
     if mods_dir:
@@ -959,11 +960,11 @@ def recommend(
     console.print(
         Panel(
             f"[bold cyan]{BANNER}[/bold cyan]\n\n"
-            f"  [bold]v{MODFORGE_VERSION}[/bold] - {TAGLINE}\n\n"
+            f"  [bold]v{MODKEEL_VERSION}[/bold] - {TAGLINE}\n\n"
             f"  Scanned: {mods_path}\n"
             f"  Found: {len(user_mods)} mods"
             + (f" ({lib_count} libraries filtered)" if lib_count else ""),
-            title="ModForge Recommend",
+            title="Modkeel Recommend",
             border_style="cyan",
         )
     )
@@ -1145,7 +1146,7 @@ def recommend(
         )
 
     console.print(
-        "\n[dim]  Tip: Use 'modforge compile' to search forks and compile missing mods.\n"
+        "\n[dim]  Tip: Use 'modkeel compile' to search forks and compile missing mods.\n"
         "       Use '--docker-test' to confirm compatibility.[/dim]\n"
     )
 

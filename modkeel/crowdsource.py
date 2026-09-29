@@ -1,4 +1,4 @@
-"""Crowdsource reporting functions for ModForge."""
+"""Crowdsource reporting functions for Modkeel."""
 
 import hashlib
 import hmac
@@ -13,16 +13,16 @@ from typing import Dict, List, Optional
 
 import requests
 
-from modforge.constants import (
-    MODFORGE_API_URL,
-    MODFORGE_HMAC_KEY,
-    MODFORGE_VERSION,
+from modkeel.constants import (
+    MODKEEL_API_URL,
+    MODKEEL_HMAC_KEY,
+    MODKEEL_VERSION,
     MODRINTH_USER_AGENT,
 )
-from modforge.config import ModForgeConfig
-from modforge.models import CompilationResult
+from modkeel.config import ModkeelConfig
+from modkeel.models import CompilationResult
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 
 def sign_report(report: Dict) -> str:
@@ -38,7 +38,7 @@ def sign_report(report: Dict) -> str:
         payload, sort_keys=True, separators=(",", ":"),
     )
     sig = hmac.new(
-        MODFORGE_HMAC_KEY, serialized.encode("utf-8"), hashlib.sha256,
+        MODKEEL_HMAC_KEY, serialized.encode("utf-8"), hashlib.sha256,
     )
     return f"hmac-sha256:{sig.hexdigest()}"
 
@@ -120,14 +120,14 @@ def build_report(
         "os_version": platform.release(),
         "is_cross_loader": result.is_cross_loader,
         "modrinth_download": result.modrinth_download,
-        "cli_version": MODFORGE_VERSION,
+        "cli_version": MODKEEL_VERSION,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def submit_reports(
     results: List[CompilationResult],
-    modforge_config: ModForgeConfig,
+    modkeel_config: ModkeelConfig,
     mc_version: str,
     loader: str,
     loader_version: str,
@@ -139,10 +139,10 @@ def submit_reports(
     Respects the user's sharing preference. Silent failure on
     network errors -- never blocks or slows down the CLI.
     """
-    if modforge_config.sharing == "never":
+    if modkeel_config.sharing == "never":
         return
 
-    if not MODFORGE_API_URL:
+    if not MODKEEL_API_URL:
         logger.debug("No API URL configured, skipping reports")
         return
 
@@ -157,7 +157,7 @@ def submit_reports(
         return
 
     # If "ask", prompt user
-    if modforge_config.sharing == "ask":
+    if modkeel_config.sharing == "ask":
         print(
             f"\n\U0001f4ca Share {len(reports)} anonymous compatibility "
             f"report(s) with the community? [Y/n] ",
@@ -172,7 +172,7 @@ def submit_reports(
             return
 
     # Submit each report
-    client_id = modforge_config.client_id
+    client_id = modkeel_config.client_id
     submitted = 0
     for report in reports:
         report["client_id"] = client_id
@@ -180,7 +180,7 @@ def submit_reports(
 
         try:
             resp = requests.post(
-                MODFORGE_API_URL,
+                MODKEEL_API_URL,
                 json=report,
                 headers={
                     "Content-Type": "application/json",

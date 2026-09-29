@@ -2,7 +2,7 @@
 
 import zipfile
 
-from modforge.build import find_output_jars
+from modkeel.build import find_output_jars
 
 
 def _jar(path, entries):

@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 import requests
 
-logger = logging.getLogger("modforge")
+logger = logging.getLogger("modkeel")
 
 # Sentinel distinguishing "probe the local machine" from an explicit unknown JDK.
 AUTO_DETECT_JDK = object()
@@ -513,9 +513,9 @@ class SymbolChecker:
 
     def check(self, owner: str, repo: str, branch: str):
         """Return a SymbolReport for a branch. Never raises."""
-        from modforge.javascan import fetch_source_tree, scan_tree
-        from modforge.mappings import detect_flavor, load_index
-        from modforge.symbols import SymbolReport
+        from modkeel.javascan import fetch_source_tree, scan_tree
+        from modkeel.mappings import detect_flavor, load_index
+        from modkeel.symbols import SymbolReport
 
         scripts = [
             self.github.get_file_from_repo(owner, repo, branch, name)
@@ -529,13 +529,13 @@ class SymbolChecker:
                 f"no symbol table for {self.config.mc_version} ({flavor})"
             )
 
-        temp_dir = Path(tempfile.mkdtemp(prefix="modforge-symbols-"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="modkeel-symbols-"))
         try:
             root = fetch_source_tree(owner, repo, branch, temp_dir)
             if root is None:
                 return SymbolReport.skipped("source tarball unavailable")
 
-            from modforge.symbols import check_references
+            from modkeel.symbols import check_references
 
             return check_references(scan_tree(root), index)
         except Exception as e:  # noqa: BLE001 - advisory layer must never break a build
