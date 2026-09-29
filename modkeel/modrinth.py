@@ -16,6 +16,11 @@ from modkeel.utils import fuzzy_score
 logger = logging.getLogger("modkeel")
 
 
+def pick_version(versions: List[Dict]) -> Dict:
+    """Newest release from a Modrinth version list (newest first), else the newest."""
+    return next((v for v in versions if v.get("version_type") == "release"), versions[0])
+
+
 class ModrinthClient:
     """Encapsulates Modrinth API interactions."""
 
@@ -162,14 +167,7 @@ class ModrinthClient:
                 print(f"    \u26a0\ufe0f  No version files for {loader} + MC {mc_version}")
                 return None
 
-            versions = ver_resp.json()
-            version_data = None
-            for v in versions:
-                if v.get("version_type") == "release":
-                    version_data = v
-                    break
-            if not version_data:
-                version_data = versions[0]
+            version_data = pick_version(ver_resp.json())
 
             files = version_data.get("files", [])
             if not files:
@@ -343,7 +341,7 @@ class ModrinthClient:
 
     def download_modrinth_mod(self, slug: str, mc_version: str,
                               loader: str) -> Optional[Path]:
-        """Download the latest version of a mod from Modrinth API."""
+        """Download the version check_modrinth reports (latest release, else latest)."""
         base_url = "https://api.modrinth.com/v2"
         headers = {"User-Agent": MODRINTH_USER_AGENT}
 
@@ -366,7 +364,7 @@ class ModrinthClient:
                 if not versions:
                     continue
 
-                version_data = versions[0]
+                version_data = pick_version(versions)
                 files = version_data.get('files', [])
                 if not files:
                     continue

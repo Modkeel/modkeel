@@ -505,6 +505,20 @@ class TestCheckModrinth(unittest.TestCase):
         self.assertTrue(result.modrinth_download)
 
 
+    def test_pick_version_prefers_release(self):
+        """Search and download pick the same version: newest release over a newer beta."""
+        from modkeel.modrinth import pick_version
+        versions = [{"version_number": "19.57", "version_type": "beta"},
+                    {"version_number": "19.51", "version_type": "release"}]
+        self.assertEqual(pick_version(versions)["version_number"], "19.51")
+
+    def test_pick_version_falls_back_to_newest(self):
+        """With no release, the newest version is used."""
+        from modkeel.modrinth import pick_version
+        versions = [{"version_number": "2.0b", "version_type": "beta"},
+                    {"version_number": "1.0a", "version_type": "alpha"}]
+        self.assertEqual(pick_version(versions)["version_number"], "2.0b")
+
 class TestDiffAnalysis(unittest.TestCase):
     """Test fork diff analysis method."""
 
