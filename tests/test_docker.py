@@ -7,12 +7,12 @@ WITHOUT requiring Docker to be installed.
 
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mod_auto_compiler import ModAutoCompiler
+from modkeel.docker import _container_name
 from modkeel.models import (
     ModCompilerConfig, CompilationResult, DockerTestCache, FailureType,
 )
@@ -373,18 +373,16 @@ class TestCheckDockerAvailable(unittest.TestCase):
 # ============================================================================
 
 class TestContainerName(unittest.TestCase):
-    """Container names should be unique across calls."""
+    """Container names must be unique even for calls within the same second."""
 
-    def test_unique_names(self):
-        """Two sequential calls produce different container names."""
-        names = set()
-        for _ in range(5):
-            name = f"modkeel_test_{int(time.time())}_{os.getpid()}"
-            names.add(name)
-            time.sleep(0.01)
-        # At minimum we get 1 unique due to sub-second calls
-        # but with PID they should all differ from other processes
-        self.assertGreaterEqual(len(names), 1)
+    def test_unique_within_one_second(self):
+        with patch("modkeel.docker.time.time", return_value=1_700_000_000):
+            names = {_container_name() for _ in range(100)}
+        self.assertEqual(len(names), 100)
+
+    def test_format(self):
+        name = _container_name()
+        self.assertRegex(name, rf"^modkeel_test_\d+_{os.getpid()}_[0-9a-f]{{8}}$")
 
 
 # ============================================================================

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -86,6 +87,16 @@ DOCKER_INSTALL_MAX_RETRIES = 5
 
 # Backwards-compatible alias
 NEOFORGE_VERSIONS = KNOWN_LOADER_VERSIONS.get("neoforge", {})
+
+
+def _container_name() -> str:
+    """A Docker container name no other test run can hold.
+
+    Time + PID alone repeat within one second, e.g. the fallback's retry loop starting a new
+    container right after one that timed out and could not be removed, which makes
+    `docker run --name` fail with "name already in use". The random suffix rules that out.
+    """
+    return f"modkeel_test_{int(time.time())}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 
 
 class DockerTester:
@@ -336,9 +347,7 @@ class DockerTester:
         self, mods_dir: Path, loader_dir: Path,
     ) -> dict:
         """Run the server directly from pre-installed loader cache."""
-        container_name = (
-            f"modkeel_test_{int(time.time())}_{os.getpid()}"
-        )
+        container_name = _container_name()
 
         unix_args = list(
             loader_dir.glob(
@@ -422,9 +431,7 @@ class DockerTester:
         volume_name = self._ensure_docker_volume()
 
         for attempt in range(1, DOCKER_INSTALL_MAX_RETRIES + 1):
-            container_name = (
-                f"modkeel_test_{int(time.time())}_{os.getpid()}"
-            )
+            container_name = _container_name()
             cmd = [
                 "docker", "run", "--rm",
                 "--name", container_name,
