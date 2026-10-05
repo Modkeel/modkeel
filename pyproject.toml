@@ -34,7 +34,7 @@ dependencies = [
 # Contributor tooling: `pip install -e ".[dev]"`. CI installs the same set.
 dev = [
     "pytest>=8.0",
-    "ruff>=0.6",
+    "ruff>=0.15,<0.17",
 ]
 
 [project.scripts]
@@ -51,9 +51,14 @@ packages = ["modkeel"]
 testpaths = ["tests"]
 
 # Lint the CLI package and its tests. The deprecated shim (mod_auto_compiler.py) only re-exports
-# names for old callers, so it is left out. The rule set is ruff's default (pyflakes + the
-# E4/E7/E9 pycodestyle subset): real bugs, not formatting. Line length is the project's 100.
+# names for old callers, so it is left out. Line length is the project's 100.
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 extend-exclude = ["mod_auto_compiler.py"]
+
+# Pyflakes + the E4/E7/E9 pycodestyle subset: real bugs, not formatting. Listed explicitly
+# because ruff's default set changes between releases (0.16 added RUF/FURB/PL rules), and CI
+# must not go red on a ruff upgrade alone. Widen it on purpose, with the fixes in the same PR.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
