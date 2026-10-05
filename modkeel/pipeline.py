@@ -743,6 +743,7 @@ class Pipeline:
             if not is_valid:
                 print(f"    ❌ {message}")
                 branch_errors.append(f"{branch.name}: JAR validation: {message}")
+                last_fail_type = FailureType.VALIDATION_ERROR
                 continue
             print(f"    ✅ {message}")
             print(f"    \U0001f4cb Mod: {mod_name} v{mod_version}")

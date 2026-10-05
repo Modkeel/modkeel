@@ -327,6 +327,25 @@ class TestBuildLoop:
         result = pipeline.clone_and_compile(REPO)
         assert result.success and result.branch == "b"
 
+    def test_rejected_jar_is_a_validation_failure(self, pipeline, build):
+        self.setup_branches(pipeline, "main")
+        build.validate_jar.return_value = (False, None, None, "declares MC 1.20.1")
+        result = pipeline.clone_and_compile(REPO)
+        assert not result.success
+        assert result.failure_type == FailureType.VALIDATION_ERROR
+        assert result.error.endswith("main: JAR validation: declares MC 1.20.1")
+
+    def test_failure_type_is_the_last_branch_s(self, pipeline, build):
+        """A dependency failure followed by a rejected JAR is not retried with mavenLocal."""
+        self.setup_branches(pipeline, "a", "b")
+        build.compile_mod.side_effect = [
+            (False, None, "deps", FailureType.DEPENDENCY_RESOLUTION, ["lib"]),
+            (True, build.jar, "built", FailureType.NONE, []),
+        ]
+        build.validate_jar.return_value = (False, None, None, "bad")
+        result = pipeline.clone_and_compile(REPO)
+        assert result.failure_type == FailureType.VALIDATION_ERROR
+
     def test_unexpected_exception_becomes_a_failed_result(self, pipeline):
         pipeline.github.get_repo_info.side_effect = RuntimeError("kaboom")
         result = pipeline.clone_and_compile(REPO)
