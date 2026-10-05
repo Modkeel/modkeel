@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from modkeel.models import ModAvailability, RecommendationResult, ScannedMod
+from modkeel.models import ModAvailability, ScannedMod
 from modkeel.recommend import RecommendationEngine, _version_tuple
 
 

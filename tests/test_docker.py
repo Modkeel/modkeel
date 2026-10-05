@@ -5,14 +5,12 @@ Tests log parsing, cache logic, and dependency extraction
 WITHOUT requiring Docker to be installed.
 """
 
-import hashlib
-import json
 import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from mod_auto_compiler import ModAutoCompiler
 from modkeel.models import (
@@ -379,7 +377,6 @@ class TestContainerName(unittest.TestCase):
 
     def test_unique_names(self):
         """Two sequential calls produce different container names."""
-        compiler = make_compiler()
         names = set()
         for _ in range(5):
             name = f"modkeel_test_{int(time.time())}_{os.getpid()}"

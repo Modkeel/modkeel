@@ -1,7 +1,6 @@
 """Typer CLI for Modkeel."""
 
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +12,7 @@ from rich.table import Table
 from modkeel.config import ModkeelConfig, prompt_sharing_preference
 from modkeel.constants import MODKEEL_VERSION
 from modkeel.loaders import ALL_LOADERS, KNOWN_LOADER_VERSIONS
-from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
+from modkeel.models import ModCompilerConfig
 from modkeel.pipeline import Pipeline
 from modkeel.utils import setup_logging, setup_windows_console
 from modkeel.constants import MODKEEL_API_URL, MODKEEL_HOME
@@ -796,7 +795,6 @@ def token(
 @app.command()
 def status():
     """Show Modkeel status: version, config, and Docker cache info."""
-    from modkeel.models import DockerTestCache
 
     console.print(
         Panel(
@@ -1120,7 +1118,7 @@ def recommend(
             if alt_loaders:
                 detail_table.add_row(
                     avail.mod_name,
-                    f"Available on {', '.join(l.capitalize() for l in alt_loaders)} "
+                    f"Available on {', '.join(ldr.capitalize() for ldr in alt_loaders)} "
                     f"{best.mc_version}",
                 )
             elif alt_versions:

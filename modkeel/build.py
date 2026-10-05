@@ -225,7 +225,7 @@ def compile_mod(
     Compile the mod using Gradle.
     Returns (success, jar_path, message, failure_type, missing_deps)
     """
-    print(f"    \U0001f528 Compiling...")
+    print("    \U0001f528 Compiling...")
 
     root, gradlew = resolve_gradle(repo_path, loader)
     if not gradlew:
@@ -235,7 +235,7 @@ def compile_mod(
 
     # Quick dependency resolution check
     try:
-        print(f"    \U0001f50d Checking dependencies...")
+        print("    \U0001f50d Checking dependencies...")
         dep_cmd = [
             str(gradlew), "dependencies", "--configuration",
             "compileClasspath", "--no-daemon"
@@ -259,9 +259,9 @@ def compile_mod(
                 return (False, None,
                         f"Dependency check failed: {missing}",
                         fail_type, missing)
-            print(f"    \u26a0\ufe0f  Dep check returned error but not dep-related, continuing build...")
+            print("    \u26a0\ufe0f  Dep check returned error but not dep-related, continuing build...")
     except subprocess.TimeoutExpired:
-        print(f"    \u26a0\ufe0f  Dep check timed out, continuing with full build...")
+        print("    \u26a0\ufe0f  Dep check timed out, continuing with full build...")
     except Exception as e:
         print(f"    \u26a0\ufe0f  Dep check error ({e}), continuing with full build...")
 
@@ -300,7 +300,7 @@ def compile_mod(
 
             if missing_deps:
                 error_detail += (
-                    f"\n--- missing dependencies ---\n"
+                    "\n--- missing dependencies ---\n"
                     + "\n".join(f"  {d}" for d in missing_deps)
                 )
 
@@ -471,7 +471,7 @@ def publish_to_maven_local(
             timeout=600
         )
         if result.returncode == 0:
-            print(f"    \U0001f4e4 Published to Maven Local (~/.m2/repository/)")
+            print("    \U0001f4e4 Published to Maven Local (~/.m2/repository/)")
             return True
         else:
             logger.debug(

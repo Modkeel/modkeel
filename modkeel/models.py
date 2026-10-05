@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from modkeel.loaders import ALL_LOADERS, normalize_loader
+from modkeel.loaders import normalize_loader
 from modkeel.constants import MODKEEL_HOME
 
 
