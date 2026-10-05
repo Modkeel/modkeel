@@ -209,6 +209,23 @@ class TestBranchDiscovery:
         clone_cmd = build.run.call_args.args[0]
         assert "https://github.com/alice/mod-port.git" in clone_cmd
 
+    def test_fork_diff_bonus_decides_between_equal_branches(self, pipeline, build):
+        """Two exact fork branches with the same base score: the cleaner diff is built."""
+        pipeline.github.get_branches.side_effect = [
+            [branch("old", mc="1.21.9")], [branch("noisy"), branch("clean")]]
+        pipeline.validator.pre_validate_branches.side_effect = [
+            [branch("old", mc="1.21.9")], [branch("noisy"), branch("clean")]]
+        pipeline.validator.analyze_fork_diff.side_effect = (
+            lambda o, r, fo, fr, name: (name == "clean", 200 if name == "clean" else 0, "d"))
+        pipeline.github.search_compatible_repos.return_value = [{
+            "fork": {"owner": "alice", "repo": "mod-port", "full_name": "alice/mod-port",
+                     "url": "https://github.com/alice/mod-port"},
+            "score": 90, "signals": [], "trust_score": 85}]
+
+        result = pipeline.clone_and_compile(REPO)
+
+        assert result.branch == "clean"
+
     def test_close_upstream_used_when_forks_have_nothing(self, pipeline, build):
         pipeline.github.get_branches.return_value = [branch("old", mc="1.21.9")]
         pipeline.validator.pre_validate_branches.return_value = [branch("old", mc="1.21.9")]

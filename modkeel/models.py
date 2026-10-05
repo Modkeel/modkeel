@@ -72,6 +72,9 @@ class BranchCandidate:
         self.commit_sha = commit_sha
         self.commit_date = commit_date
         self.score = 0  # Will be calculated based on relevance
+        # Extra ranking points from comparing a fork branch with upstream (analyze_fork_diff:
+        # 0-200, more for a diff confined to version files); added on top of score_branch().
+        self.diff_bonus = 0
 
         # Pre-validation fields (populated via GitHub API)
         self.minecraft_version = None
