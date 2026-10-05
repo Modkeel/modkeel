@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
-![Tests](https://img.shields.io/badge/tests-485_passing-brightgreen)
+[![CI](https://github.com/Modkeel/modkeel/actions/workflows/cli.yml/badge.svg)](https://github.com/Modkeel/modkeel/actions/workflows/cli.yml)
 
 ---
 
