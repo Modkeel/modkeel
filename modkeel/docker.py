@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import requests
 
@@ -244,7 +244,7 @@ class DockerTester:
                 f"(with retry+resume)..."
             )
             if not self._download_installer_with_resume(url, installer):
-                print(f"  \u274c Could not download installer after retries")
+                print("  \u274c Could not download installer after retries")
                 return None
 
         install_retries = 10
@@ -280,11 +280,11 @@ class DockerTester:
 
                 lines = result.stdout.splitlines()
                 ok = sum(
-                    1 for l in lines if "Checksum valid" in l
+                    1 for line in lines if "Checksum valid" in line
                 )
                 failed = sum(
-                    1 for l in lines
-                    if "failed to download" in l.lower()
+                    1 for line in lines
+                    if "failed to download" in line.lower()
                 )
                 print(
                     f"     Libraries: {ok} cached, "
@@ -304,7 +304,7 @@ class DockerTester:
                     f"(attempt {inst_attempt}/{install_retries})"
                 )
                 if inst_attempt < install_retries:
-                    print(f"     Retrying (progress is saved)...")
+                    print("     Retrying (progress is saved)...")
             except Exception as e:
                 print(f"  \u26a0\ufe0f  Installer error: {e}")
                 return None
@@ -471,7 +471,7 @@ class DockerTester:
                     f"This is a server-side issue "
                     f"({maven} CDN), not your fault."
                 )
-                print(f"     Retrying in 10s...")
+                print("     Retrying in 10s...")
                 time.sleep(10)
             else:
                 print(
@@ -481,8 +481,8 @@ class DockerTester:
                     f"({maven}) is unreliable right now."
                 )
                 print(
-                    f"     Try again later, or use a VPN to connect "
-                    f"through a different region."
+                    "     Try again later, or use a VPN to connect "
+                    "through a different region."
                 )
 
         return result
@@ -706,7 +706,7 @@ class DockerTester:
         batch = self._test_batch_docker(existing_jars, results)
 
         if batch["passed"]:
-            print(f"  \u2705 Batch test PASSED \u2014 all mods loaded successfully")
+            print("  \u2705 Batch test PASSED \u2014 all mods loaded successfully")
             for r in successful:
                 r.docker_tested = True
                 r.docker_test_passed = True
@@ -720,8 +720,8 @@ class DockerTester:
         print(f"  \u274c Batch test FAILED: {batch['error']}")
 
         if batch.get("is_loader_error"):
-            print(f"  \u26a0\ufe0f  This is a loader/infrastructure error, "
-                  f"not caused by the mods.")
+            print("  \u26a0\ufe0f  This is a loader/infrastructure error, "
+                  "not caused by the mods.")
             print(f"     Snippet: {' | '.join(batch['log_snippet'][-3:])}")
             for r in successful:
                 r.docker_tested = True
@@ -739,7 +739,7 @@ class DockerTester:
                   f"on headless server")
             return
 
-        print(f"  \U0001f50d Testing mods individually to isolate failures...")
+        print("  \U0001f50d Testing mods individually to isolate failures...")
 
         for result in successful:
             jar = Path(result.jar_path)

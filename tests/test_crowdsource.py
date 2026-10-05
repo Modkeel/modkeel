@@ -9,7 +9,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,7 +18,7 @@ from modkeel.config import ModkeelConfig, prompt_sharing_preference
 from modkeel.constants import MODKEEL_HMAC_KEY, MODKEEL_VERSION
 from modkeel.crowdsource import sign_report
 from modkeel.models import (
-    CompilationResult, FailureType, ModCompilerConfig,
+    CompilationResult, ModCompilerConfig,
 )
 
 
@@ -506,4 +506,3 @@ class TestSubmitReports:
                 compiler_with_results.submit_reports(mf_cfg)
 
 
-import subprocess  # needed for TimeoutExpired in TestDetectJavaVersion

@@ -65,7 +65,7 @@ class GitHubClient:
                 print(f"  \u26a0\ufe0f  Repository not found: {owner}/{repo}")
                 return None
             elif response.status_code == 403:
-                print(f"  \u26a0\ufe0f  GitHub API rate limit exceeded. Consider using --github-token")
+                print("  \u26a0\ufe0f  GitHub API rate limit exceeded. Consider using --github-token")
                 return None
             elif response.status_code != 200:
                 print(f"  \u26a0\ufe0f  GitHub API error: {response.status_code}")
@@ -111,7 +111,7 @@ class GitHubClient:
                 print(f"       Status: {response.status_code}")
 
                 if response.status_code == 403:
-                    print(f"       \u26a0\ufe0f  Rate limit hit or forbidden")
+                    print("       \u26a0\ufe0f  Rate limit hit or forbidden")
                     remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
                     print(f"       Rate limit remaining: {remaining}")
                     continue
@@ -164,7 +164,7 @@ class GitHubClient:
                 time.sleep(0.3)
 
             except requests.exceptions.Timeout:
-                print(f"       \u26a0\ufe0f  Query timed out")
+                print("       \u26a0\ufe0f  Query timed out")
                 continue
             except requests.exceptions.RequestException as e:
                 print(f"       \u26a0\ufe0f  Request failed: {str(e)[:100]}")
@@ -176,7 +176,7 @@ class GitHubClient:
         print(f"    \u2139\ufe0f  Phase 1 found {len(all_forks)} unique forks")
 
         # Phase 2: Search for independent ports
-        print(f"    \U0001f50e Phase 2: Searching independent ports...")
+        print("    \U0001f50e Phase 2: Searching independent ports...")
         independent_searches = [
             f'"{original_repo}" {self.config.mc_version} {self.config.loader}',
             f'"{original_repo}" {self.config.loader} port',
@@ -262,7 +262,7 @@ class GitHubClient:
                 time.sleep(0.3)
 
             except requests.exceptions.Timeout:
-                print(f"       \u26a0\ufe0f  Query timed out")
+                print("       \u26a0\ufe0f  Query timed out")
                 continue
             except requests.exceptions.RequestException as e:
                 print(f"       \u26a0\ufe0f  Request failed: {str(e)[:100]}")
@@ -279,7 +279,7 @@ class GitHubClient:
         all_candidates.update(independent_repos)
 
         if not all_candidates:
-            print(f"    \u2139\ufe0f  No forks or independent ports found")
+            print("    \u2139\ufe0f  No forks or independent ports found")
             return []
 
         print(f"    \u2139\ufe0f  Total: {len(all_candidates)} candidates, analyzing...")
@@ -437,7 +437,7 @@ class GitHubClient:
         except Exception:
             return {
                 'trust_score': 50,
-                'warnings': [f'Trust analysis error'],
+                'warnings': ['Trust analysis error'],
                 'contributor_count': 0,
                 'signals': []
             }

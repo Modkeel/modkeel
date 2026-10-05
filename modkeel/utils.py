@@ -228,4 +228,4 @@ def safe_rmtree(path: Path) -> None:
         shutil.rmtree(path, onerror=handle_remove_readonly)
     except Exception as e:
         print(f"\u26a0\ufe0f  Warning: Could not fully clean up {path}: {e}")
-        print(f"   You may need to manually delete this directory.")
+        print("   You may need to manually delete this directory.")

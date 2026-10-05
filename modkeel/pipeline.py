@@ -15,7 +15,6 @@ from typing import Dict, List, Optional
 import requests
 
 from modkeel.build import (
-    classify_build_failure,
     compile_mod,
     create_maven_local_init_script,
     publish_to_maven_local,
@@ -70,7 +69,7 @@ class Pipeline:
         print(
             f"\n  \U0001f4e5 Found pre-built JAR ({artifact.source}): {artifact.name}"
         )
-        print(f"     Skipping compilation entirely.")
+        print("     Skipping compilation entirely.")
 
         try:
             headers = self.config.github_headers if artifact.requires_auth else {}
@@ -81,7 +80,7 @@ class Pipeline:
             if artifact.is_zip:
                 jar_name, payload = self._extract_jar_from_zip(payload)
                 if not payload:
-                    print(f"    ⚠️  Artifact contained no usable JAR")
+                    print("    ⚠️  Artifact contained no usable JAR")
                     return None
             else:
                 jar_name = artifact.name
@@ -152,7 +151,7 @@ class Pipeline:
         print(f"    ⚠️  Linkage: {report.summary} -- JAR targets a different version")
         for finding in report.findings[:3]:
             print(f"        - {finding}")
-        print(f"    ℹ️  Rejecting pre-built JAR, compiling instead")
+        print("    ℹ️  Rejecting pre-built JAR, compiling instead")
         return False
 
     @staticmethod
@@ -231,7 +230,7 @@ class Pipeline:
 
                 if modrinth_result:
                     print(
-                        f"\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)..."
+                        "\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)..."
                     )
                     try:
                         dl_resp = requests.get(
@@ -276,13 +275,13 @@ class Pipeline:
                     except Exception as e:
                         print(f"    \u26a0\ufe0f  Modrinth download failed: {e}")
                         print(
-                            f"    \u2139\ufe0f  Falling back to GitHub compilation..."
+                            "    \u2139\ufe0f  Falling back to GitHub compilation..."
                         )
 
             # Step 1+: GitHub fork search + compilation
             repo_temp_dir = Path(self.temp_dir) / repo
 
-            print(f"  \U0001f50d Fetching branches...")
+            print("  \U0001f50d Fetching branches...")
             all_branches = self.github.get_branches(owner, repo)
 
             if not all_branches:
@@ -305,7 +304,7 @@ class Pipeline:
                         error=f"Specified branch '{specific_branch}' not found",
                     )
 
-                print(f"  \U0001f50d Validating specified branch via GitHub API...")
+                print("  \U0001f50d Validating specified branch via GitHub API...")
                 is_compatible = self.validator.pre_validate_branch(
                     owner, repo, target_branch
                 )
@@ -412,7 +411,7 @@ class Pipeline:
                                 trust_analysis = fork_info.get("trust_analysis", {})
 
                                 print(
-                                    f"\n  \u26a0\ufe0f  SECURITY NOTICE: Using community fork (not official)"
+                                    "\n  \u26a0\ufe0f  SECURITY NOTICE: Using community fork (not official)"
                                 )
                                 print(f"      Trust Score: {trust_score}% - ", end="")
 
@@ -428,7 +427,7 @@ class Pipeline:
                                     print("CRITICAL - Multiple red flags detected")
 
                                 if trust_analysis.get("warnings"):
-                                    print(f"      Warnings:")
+                                    print("      Warnings:")
                                     for warning in trust_analysis["warnings"]:
                                         print(f"      - {warning}")
 
@@ -497,7 +496,7 @@ class Pipeline:
                                         compatible_branches = fork_close
                                         found_in_fork = True
                                         print(
-                                            f"  \u2705 Using fork with validated version range support!"
+                                            "  \u2705 Using fork with validated version range support!"
                                         )
                                         break
                                     else:
@@ -506,7 +505,7 @@ class Pipeline:
                                         )
                                 else:
                                     print(
-                                        f"  \u26a0\ufe0f  Could not determine version range from metadata"
+                                        "  \u26a0\ufe0f  Could not determine version range from metadata"
                                     )
 
                             if fork_compatible and not close_matches:
@@ -521,7 +520,7 @@ class Pipeline:
 
                         if not found_in_fork and close_matches:
                             print(
-                                f"\n  \u2139\ufe0f  No exact version in forks, using close matches from original repo"
+                                "\n  \u2139\ufe0f  No exact version in forks, using close matches from original repo"
                             )
                             compatible_branches = close_matches
 
@@ -610,7 +609,7 @@ class Pipeline:
 
                 compatible_branches.sort(key=lambda b: b.score, reverse=True)
 
-                print(f"\n  \U0001f4cb Top candidates:")
+                print("\n  \U0001f4cb Top candidates:")
                 for i, branch in enumerate(
                     compatible_branches[: min(3, len(compatible_branches))], 1
                 ):
@@ -676,7 +675,7 @@ class Pipeline:
                     shutil.rmtree(repo_temp_dir)
 
                 clone_url = f"https://github.com/{owner}/{repo}.git"
-                print(f"    \U0001f4e5 Cloning...")
+                print("    \U0001f4e5 Cloning...")
 
                 try:
                     result = subprocess.run(
@@ -704,7 +703,7 @@ class Pipeline:
 
                 except subprocess.TimeoutExpired:
                     branch_errors.append(f"{branch.name}: Clone timeout")
-                    print(f"    \u274c Clone timeout")
+                    print("    \u274c Clone timeout")
                     last_fail_type = FailureType.CLONE_ERROR
                     continue
                 except Exception as e:
@@ -713,7 +712,7 @@ class Pipeline:
                     last_fail_type = FailureType.CLONE_ERROR
                     continue
 
-                print(f"    \U0001f50d Validating gradle.properties...")
+                print("    \U0001f50d Validating gradle.properties...")
                 is_valid, message = self.validator.validate_gradle_properties(
                     repo_temp_dir, skip_loader_validation=is_cross_loader_attempt
                 )
@@ -724,7 +723,7 @@ class Pipeline:
                     continue
                 print(f"    {message}")
 
-                print(f"    \U0001f50d Validating build.gradle...")
+                print("    \U0001f50d Validating build.gradle...")
                 is_valid, message = self.validator.validate_build_gradle(repo_temp_dir)
                 if not is_valid:
                     print(f"    \u274c {message}")
@@ -745,7 +744,7 @@ class Pipeline:
                     continue
                 print(f"    \u2705 {message}")
 
-                print(f"    \U0001f50d Validating JAR...")
+                print("    \U0001f50d Validating JAR...")
                 is_valid, mod_name, mod_version, message = validate_jar(
                     jar_path, self.config.mc_version
                 )
@@ -939,7 +938,7 @@ class Pipeline:
                 self.docker.test_mods_in_docker(self.results)
 
         finally:
-            print(f"\n\U0001f9f9 Cleaning up temporary directory...")
+            print("\n\U0001f9f9 Cleaning up temporary directory...")
             if os.path.exists(self.temp_dir):
                 safe_rmtree(Path(self.temp_dir))
 
@@ -995,7 +994,7 @@ class Pipeline:
 
                 if result.is_cross_loader:
                     report_lines.append(
-                        f"   \U0001f504 Fabric mod via Sinytra Connector"
+                        "   \U0001f504 Fabric mod via Sinytra Connector"
                     )
 
                 report_lines.append(f"   \U0001f4be JAR: {result.jar_path}")
@@ -1029,7 +1028,7 @@ class Pipeline:
                 report_lines.append(f"\n\U0001f4e6 {result.repo_url}")
                 report_lines.append(f"   \u274c Error: {result.error}")
                 if result.failure_type == FailureType.DEPENDENCY_RESOLUTION:
-                    report_lines.append(f"   \U0001f517 Type: Unresolved dependencies")
+                    report_lines.append("   \U0001f517 Type: Unresolved dependencies")
                     if result.missing_dependencies:
                         for dep in result.missing_dependencies:
                             report_lines.append(f"      - {dep}")
@@ -1113,10 +1112,10 @@ class Pipeline:
             f"\U0001f3af Target: Minecraft {self.config.mc_version} with {self.config.loader.capitalize()} {self.config.loader_version}"
         )
         if self.config.strict_version:
-            report_lines.append(f"\U0001f512 Mode: STRICT (exact version matches only)")
+            report_lines.append("\U0001f512 Mode: STRICT (exact version matches only)")
         else:
             report_lines.append(
-                f"\U0001f513 Mode: LENIENT (allows same major.minor versions)"
+                "\U0001f513 Mode: LENIENT (allows same major.minor versions)"
             )
         report_lines.append(f"\U0001f4c1 Output: {self.config.output_dir}")
         if self.config.mods_path:

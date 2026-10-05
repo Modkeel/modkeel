@@ -114,7 +114,7 @@ class ModrinthClient:
             hits = data.get("hits", [])
 
             if not hits:
-                print(f"    \u2139\ufe0f  Not found on Modrinth")
+                print("    \u2139\ufe0f  Not found on Modrinth")
                 return None
 
             if source_repo:
@@ -123,7 +123,7 @@ class ModrinthClient:
                 if exact:
                     hits = exact[:1]
                 if not hits:
-                    print(f"    ℹ️  Modrinth results belong to other repositories")
+                    print("    ℹ️  Modrinth results belong to other repositories")
                     return None
 
             best = None
@@ -204,7 +204,7 @@ class ModrinthClient:
             return result
 
         except requests.exceptions.Timeout:
-            print(f"    \u26a0\ufe0f  Modrinth search timed out")
+            print("    \u26a0\ufe0f  Modrinth search timed out")
             return None
         except Exception as e:
             print(f"    \u26a0\ufe0f  Modrinth search error: {e}")

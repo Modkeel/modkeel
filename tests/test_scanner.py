@@ -1,9 +1,7 @@
 """Tests for modkeel.scanner module."""
 
 import hashlib
-import io
 import json
-import os
 import tempfile
 import unittest
 import zipfile
@@ -12,7 +10,6 @@ from pathlib import Path
 import toml
 
 from modkeel.scanner import (
-    LIBRARY_MOD_IDS,
     _extract_json_metadata,
     _extract_toml_metadata,
     _is_library_mod,
