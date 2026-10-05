@@ -7,6 +7,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.markup import escape
 from rich.table import Table
 
 from modkeel.config import ModkeelConfig, prompt_sharing_preference
@@ -386,8 +387,13 @@ def search(
                     console.print("[red]Download failed.[/red]")
         return
 
-    # Not found on Modrinth
-    table.add_row("Status", "[yellow]Not found on Modrinth[/yellow]")
+    # Not found, or Modrinth could not be asked: say which, so a network problem
+    # is not mistaken for "this mod has no build for this version".
+    if modrinth.last_error:
+        reason = escape(modrinth.last_error)
+        table.add_row("Status", f"[red]Modrinth unavailable ({reason})[/red]")
+    else:
+        table.add_row("Status", "[yellow]Not found on Modrinth[/yellow]")
     console.print(table)
 
     # Prompt for token if missing (only needed for fork search)
@@ -641,8 +647,12 @@ def get(
                 instance_path=instance,
             )
     if not github_token:
+        modrinth_status = (
+            f"Modrinth unavailable ({escape(modrinth.last_error)})."
+            if modrinth.last_error else "Not found on Modrinth."
+        )
         console.print(
-            "\n[red]Not found on Modrinth.[/red] "
+            f"\n[red]{modrinth_status}[/red] "
             "Set a GitHub token to search forks:\n"
             "  [bold]modkeel token --set ghp_YOUR_TOKEN[/bold]"
         )

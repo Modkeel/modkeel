@@ -16,6 +16,17 @@ from modkeel.utils import fuzzy_score
 logger = logging.getLogger("modkeel")
 
 
+def _short_error(exc: Exception) -> str:
+    """One-line reason for a failed request, for CLI output (requests' messages nest the
+    whole retry/proxy chain; the exception type plus its innermost cause is what users need)."""
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "could not connect (network, proxy or DNS)"
+    text = str(exc)
+    if not text:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {text.splitlines()[0][:120]}"
+
+
 def pick_version(versions: List[Dict]) -> Dict:
     """Newest release from a Modrinth version list (newest first), else the newest."""
     return next((v for v in versions if v.get("version_type") == "release"), versions[0])
@@ -26,6 +37,10 @@ class ModrinthClient:
 
     def __init__(self, config: ModCompilerConfig):
         self.config = config
+        # Why the last check_modrinth() returned None when Modrinth could not answer (network,
+        # HTTP error, timeout); None when it answered. Lets callers tell "not on Modrinth" from
+        # "Modrinth unreachable" without changing the Optional[Dict] return the pipeline uses.
+        self.last_error: Optional[str] = None
 
     def is_cross_loader_available(self) -> bool:
         """Check if cross-loader bridge mods are available on Modrinth."""
@@ -95,6 +110,7 @@ class ModrinthClient:
         )
 
         search_query = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', mod_name)
+        self.last_error = None
 
         try:
             print(f"  \U0001f50d Checking Modrinth for '{mod_name}' "
@@ -108,6 +124,7 @@ class ModrinthClient:
 
             if resp.status_code != 200:
                 print(f"    \u26a0\ufe0f  Modrinth search failed: HTTP {resp.status_code}")
+                self.last_error = f"HTTP {resp.status_code}"
                 return None
 
             data = resp.json()
@@ -163,7 +180,12 @@ class ModrinthClient:
                 timeout=15
             )
 
-            if ver_resp.status_code != 200 or not ver_resp.json():
+            if ver_resp.status_code != 200:
+                print("    \u26a0\ufe0f  Modrinth version lookup failed: "
+                      f"HTTP {ver_resp.status_code}")
+                self.last_error = f"HTTP {ver_resp.status_code}"
+                return None
+            if not ver_resp.json():
                 print(f"    \u26a0\ufe0f  No version files for {loader} + MC {mc_version}")
                 return None
 
@@ -205,9 +227,11 @@ class ModrinthClient:
 
         except requests.exceptions.Timeout:
             print("    \u26a0\ufe0f  Modrinth search timed out")
+            self.last_error = "timed out"
             return None
         except Exception as e:
             print(f"    \u26a0\ufe0f  Modrinth search error: {e}")
+            self.last_error = _short_error(e)
             return None
 
     @staticmethod
