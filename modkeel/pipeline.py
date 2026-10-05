@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -32,6 +33,35 @@ from modkeel.validation import BranchValidator
 from modkeel.version import is_version_in_maven_range, is_version_in_fabric_range
 
 logger = logging.getLogger("modkeel")
+
+
+@dataclass
+class BranchPlan:
+    """Where clone_and_compile builds from: the repo (upstream or a fork), its candidate
+    branches best first, whether they target the cross-loader fallback, and the fork search
+    results (reused by the cross-loader fallback)."""
+
+    owner: str
+    repo: str
+    branches: List
+    cross_loader: bool = False
+    fork_candidates: List[Dict] = field(default_factory=list)
+
+
+def _age_label(commit_date: Optional[str]) -> str:
+    """", 12d ago" / ", 3mo ago" for the candidates list; empty past a year or if unparsable."""
+    if not commit_date:
+        return ""
+    try:
+        commit_time = datetime.fromisoformat(commit_date.replace("Z", "+00:00"))
+        days = (datetime.now(timezone.utc) - commit_time).days
+    except Exception:
+        return ""
+    if days < 30:
+        return f", {days}d ago"
+    if days < 365:
+        return f", {days // 30}mo ago"
+    return ""
 
 
 class Pipeline:
@@ -182,13 +212,18 @@ class Pipeline:
         extra_gradle_args: Optional[List[str]] = None,
         skip_modrinth: bool = False,
     ) -> CompilationResult:
-        """Clone a repository, find compatible branch, compile, and validate."""
+        """Produce a JAR for one repository: Modrinth download, prebuilt JAR or local build.
+
+        Stages, each returning early with a CompilationResult when it settles the outcome:
+          0. Modrinth: a published build for the target (also via cross-loader fallback).
+          1. Branch plan: which repo (upstream or a fork) and which branches to build.
+          2. Pre-build gate + prebuilt lookup: skip builds whose outcome is already known.
+          3. Build loop: clone, validate, compile and validate the JAR, branch by branch.
+        Any unexpected exception becomes a failed result, so one repo never stops a batch.
+        """
         print(f"\n{'=' * 80}")
         print(f"\U0001f4e6 Processing: {repo_url}")
         print(f"{'=' * 80}")
-
-        is_cross_loader_attempt = False
-        saved_fork_candidates = []
 
         try:
             owner, repo, url_branch = parse_repo_url(repo_url)
@@ -202,607 +237,585 @@ class Pipeline:
             if repo_info:
                 stars = repo_info.get("stargazers_count", 0)
                 forks = repo_info.get("forks_count", 0)
-                print(f"  \u2b50 Stars: {stars} | \U0001f374 Forks: {forks}")
+                print(f"  ⭐ Stars: {stars} | \U0001f374 Forks: {forks}")
 
-            # Step 0: Check Modrinth
             if not specific_branch and not skip_modrinth:
-                modrinth_result = self.modrinth.check_modrinth(repo, source_repo=f"{owner}/{repo}")
+                downloaded = self._try_modrinth(repo_url, owner, repo)
+                if downloaded:
+                    return downloaded
 
-                fallback_loaders = get_cross_loader_chain(self.config.loader)
-                if (
-                    not modrinth_result
-                    and self.config.cross_loader
-                    and fallback_loaders
-                    and self.modrinth.is_cross_loader_available()
-                ):
-                    saved_loader = self.config.loader
-                    for fallback in fallback_loaders:
-                        self.config.loader = fallback
-                        print(
-                            f"  \U0001f504 CROSS-LOADER: Checking Modrinth for {fallback.capitalize()} version..."
-                        )
-                        modrinth_result = self.modrinth.check_modrinth(repo, source_repo=f"{owner}/{repo}")
-                        if modrinth_result:
-                            modrinth_result["_cross_loader"] = True
-                            modrinth_result["_fallback_loader"] = fallback
-                            break
-                    self.config.loader = saved_loader
-
-                if modrinth_result:
-                    print(
-                        "\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)..."
-                    )
-                    try:
-                        dl_resp = requests.get(
-                            modrinth_result["download_url"],
-                            headers={"User-Agent": MODRINTH_USER_AGENT},
-                            timeout=120,
-                        )
-                        dl_resp.raise_for_status()
-
-                        filename = modrinth_result["filename"]
-                        dest = self.config.output_dir / filename
-                        dest.write_bytes(dl_resp.content)
-                        print(f"    \U0001f4be Saved: {dest}")
-
-                        if self.config.mods_path:
-                            instance_dest = self.config.mods_path / filename
-                            instance_dest.write_bytes(dl_resp.content)
-                            print(f"    \U0001f4be Installed: {instance_dest}")
-
-                        self.modrinth.download_modrinth_deps(modrinth_result)
-
-                        is_cross = modrinth_result.get("_cross_loader", False)
-                        cross_note = (
-                            " [Fabric via Sinytra Connector]" if is_cross else ""
-                        )
-                        print(
-                            f"\n  \u2705 SUCCESS: {modrinth_result['title']} "
-                            f"v{modrinth_result['version_number']} "
-                            f"from Modrinth [pre-compiled]{cross_note}"
-                        )
-
-                        return CompilationResult(
-                            repo_url=repo_url,
-                            success=True,
-                            jar_path=str(dest),
-                            mod_name=modrinth_result["title"],
-                            mod_version=modrinth_result["version_number"],
-                            compiled_mc_version=self.config.mc_version,
-                            modrinth_download=True,
-                            is_cross_loader=is_cross,
-                        )
-                    except Exception as e:
-                        print(f"    \u26a0\ufe0f  Modrinth download failed: {e}")
-                        print(
-                            "    \u2139\ufe0f  Falling back to GitHub compilation..."
-                        )
-
-            # Step 1+: GitHub fork search + compilation
+            # Clones always land in <temp>/<upstream repo name>, even when a fork is built.
             repo_temp_dir = Path(self.temp_dir) / repo
 
-            print("  \U0001f50d Fetching branches...")
-            all_branches = self.github.get_branches(owner, repo)
+            plan = self._plan_branches(repo_url, owner, repo, specific_branch)
+            if isinstance(plan, CompilationResult):
+                return plan
 
-            if not all_branches:
-                return CompilationResult(
-                    repo_url=repo_url,
-                    success=False,
-                    error="Could not fetch branches from repository",
-                )
-
-            print(f"  \U0001f4ca Found {len(all_branches)} branches")
-
-            if specific_branch:
-                target_branch = next(
-                    (b for b in all_branches if b.name == specific_branch), None
-                )
-                if not target_branch:
-                    return CompilationResult(
-                        repo_url=repo_url,
-                        success=False,
-                        error=f"Specified branch '{specific_branch}' not found",
-                    )
-
-                print("  \U0001f50d Validating specified branch via GitHub API...")
-                is_compatible = self.validator.pre_validate_branch(
-                    owner, repo, target_branch
-                )
-
-                if not is_compatible:
-                    return CompilationResult(
-                        repo_url=repo_url,
-                        success=False,
-                        error=f"Branch '{specific_branch}' is not compatible: {target_branch.validation_error}",
-                    )
-
-                branches_to_try = [target_branch]
-            else:
-                all_branches = self.validator.filter_branches_by_version_proximity(
-                    all_branches
-                )
-                compatible_branches = self.validator.pre_validate_branches(
-                    owner, repo, all_branches
-                )
-
-                exact_matches = [
-                    b
-                    for b in compatible_branches
-                    if b.minecraft_version == self.config.mc_version
-                ]
-                close_matches = [
-                    b
-                    for b in compatible_branches
-                    if b.minecraft_version != self.config.mc_version
-                ]
-
-                if not compatible_branches:
-                    should_search_forks = True
-                elif not exact_matches and close_matches:
-                    print(
-                        f"  \u26a0\ufe0f  Only found close version matches ({close_matches[0].minecraft_version}), searching for exact {self.config.mc_version}..."
-                    )
-                    should_search_forks = True
-                else:
-                    should_search_forks = False
-
-                if should_search_forks:
-                    cross_available = (
-                        self.config.cross_loader
-                        and get_cross_loader_chain(self.config.loader)
-                        and self.modrinth.is_cross_loader_available()
-                    )
-                    fork_candidates = self.github.search_compatible_repos(
-                        owner, repo, cross_loader_available=cross_available
-                    )
-                    saved_fork_candidates = fork_candidates or []
-
-                    if not fork_candidates:
-                        pass
-                    else:
-                        print(
-                            f"\n  \U0001f3af Trying top {len(fork_candidates)} community forks..."
-                        )
-
-                        found_in_fork = False
-                        for fork_result in fork_candidates:
-                            fork_info = fork_result["fork"]
-                            fork_owner = fork_info["owner"]
-                            fork_repo = fork_info["repo"]
-
-                            print(
-                                f"\n  \U0001f4e6 Checking fork: {fork_info['full_name']}"
-                            )
-                            print(
-                                f"     Score: {fork_result['score']}, Signals: {', '.join(fork_result['signals'])}"
-                            )
-
-                            fork_branches = self.github.get_branches(
-                                fork_owner, fork_repo
-                            )
-                            fork_compatible = self.validator.pre_validate_branches(
-                                fork_owner, fork_repo, fork_branches
-                            )
-
-                            fork_exact = [
-                                b
-                                for b in fork_compatible
-                                if b.minecraft_version == self.config.mc_version
-                            ]
-
-                            if fork_exact:
-                                print(
-                                    f"  \u2705 Found EXACT version {self.config.mc_version} in fork!"
-                                )
-
-                                for fb in fork_exact:
-                                    is_clean, diff_bonus, diff_desc = (
-                                        self.validator.analyze_fork_diff(
-                                            owner, repo, fork_owner, fork_repo, fb.name
-                                        )
-                                    )
-                                    fb.score += diff_bonus
-                                    if is_clean or diff_bonus > 0:
-                                        print(
-                                            f"  \U0001f50d Diff analysis: {diff_desc}"
-                                        )
-
-                                trust_score = fork_result.get("trust_score", 50)
-                                trust_analysis = fork_info.get("trust_analysis", {})
-
-                                print(
-                                    "\n  \u26a0\ufe0f  SECURITY NOTICE: Using community fork (not official)"
-                                )
-                                print(f"      Trust Score: {trust_score}% - ", end="")
-
-                                if trust_score >= 80:
-                                    print("HIGH confidence (established contributors)")
-                                elif trust_score >= 60:
-                                    print(
-                                        "MEDIUM confidence (some established contributors)"
-                                    )
-                                elif trust_score >= 40:
-                                    print("LOW confidence (new/unknown contributors)")
-                                else:
-                                    print("CRITICAL - Multiple red flags detected")
-
-                                if trust_analysis.get("warnings"):
-                                    print("      Warnings:")
-                                    for warning in trust_analysis["warnings"]:
-                                        print(f"      - {warning}")
-
-                                if trust_analysis.get("signals"):
-                                    print(
-                                        f"      Signals: {', '.join(trust_analysis['signals'])}"
-                                    )
-
-                                print(f"      Review fork: {fork_info['url']}")
-                                print(f"      Compiling code from: {fork_owner}")
-
-                                owner = fork_owner
-                                repo = fork_repo
-                                compatible_branches = fork_exact
-                                found_in_fork = True
-                                break
-
-                            fork_close = [
-                                b
-                                for b in fork_compatible
-                                if b.minecraft_version != self.config.mc_version
-                            ]
-
-                            if fork_close:
-                                print(
-                                    f"  \u2139\ufe0f  No exact match, checking if close matches support {self.config.mc_version}..."
-                                )
-
-                                best_branch = fork_close[0]
-                                version_range = (
-                                    self.validator.parse_version_range_from_metadata(
-                                        fork_owner,
-                                        fork_repo,
-                                        best_branch.name,
-                                        self.config.loader,
-                                    )
-                                )
-
-                                if version_range:
-                                    range_format = get_profile(self.config.loader)[
-                                        "version_range_format"
-                                    ]
-                                    if range_format == "maven":
-                                        is_compat = is_version_in_maven_range(
-                                            self.config.mc_version, version_range
-                                        )
-                                    else:
-                                        is_compat = is_version_in_fabric_range(
-                                            self.config.mc_version, version_range
-                                        )
-
-                                    if is_compat:
-                                        print(
-                                            f"  \u2705 Fork branch '{best_branch.name}' supports range {version_range}"
-                                        )
-                                        print(
-                                            f"     \u2192 Covers target {self.config.mc_version}!"
-                                        )
-
-                                        for b in fork_close:
-                                            b.version_range = version_range
-                                            b.validation_method = "fork_metadata_range"
-
-                                        owner = fork_owner
-                                        repo = fork_repo
-                                        compatible_branches = fork_close
-                                        found_in_fork = True
-                                        print(
-                                            "  \u2705 Using fork with validated version range support!"
-                                        )
-                                        break
-                                    else:
-                                        print(
-                                            f"  \u274c Range {version_range} does not cover {self.config.mc_version}"
-                                        )
-                                else:
-                                    print(
-                                        "  \u26a0\ufe0f  Could not determine version range from metadata"
-                                    )
-
-                            if fork_compatible and not close_matches:
-                                owner = fork_owner
-                                repo = fork_repo
-                                compatible_branches = fork_compatible
-                                found_in_fork = True
-                                print(
-                                    f"  \u2705 Found {len(compatible_branches)} compatible branches in fork!"
-                                )
-                                break
-
-                        if not found_in_fork and close_matches:
-                            print(
-                                "\n  \u2139\ufe0f  No exact version in forks, using close matches from original repo"
-                            )
-                            compatible_branches = close_matches
-
-                if not compatible_branches:
-                    fallback_loaders_compile = get_cross_loader_chain(
-                        self.config.loader
-                    )
-                    if (
-                        self.config.cross_loader
-                        and fallback_loaders_compile
-                        and self.modrinth.is_cross_loader_available()
-                    ):
-                        fallback_label = fallback_loaders_compile[0].capitalize()
-                        print(
-                            f"\n  \U0001f504 CROSS-LOADER: No {self.config.loader.capitalize()} branches found, "
-                            f"trying {fallback_label} fallback via bridge mods..."
-                        )
-
-                        fallback_found = False
-                        for fallback_loader in fallback_loaders_compile:
-                            fb_all = self.github.get_branches(owner, repo)
-                            fb_branches = self.validator.pre_validate_branches(
-                                owner, repo, fb_all, override_loader=fallback_loader
-                            )
-
-                            if not fb_branches and saved_fork_candidates:
-                                for fork_result in saved_fork_candidates:
-                                    fi = fork_result["fork"]
-                                    print(
-                                        f"  \U0001f504 Checking fork {fi['full_name']} "
-                                        f"for {fallback_loader.capitalize()} branches..."
-                                    )
-                                    fork_b = self.github.get_branches(
-                                        fi["owner"], fi["repo"]
-                                    )
-                                    fb_branches = self.validator.pre_validate_branches(
-                                        fi["owner"],
-                                        fi["repo"],
-                                        fork_b,
-                                        override_loader=fallback_loader,
-                                    )
-                                    if fb_branches:
-                                        owner = fi["owner"]
-                                        repo = fi["repo"]
-                                        break
-
-                            if fb_branches:
-                                print(
-                                    f"  \u2705 Found {len(fb_branches)} {fallback_loader.capitalize()} "
-                                    f"branches for cross-loader compilation"
-                                )
-                                compatible_branches = fb_branches
-                                is_cross_loader_attempt = True
-                                fallback_found = True
-                                break
-
-                        if not fallback_found:
-                            tried = ", ".join(fallback_loaders_compile)
-                            return CompilationResult(
-                                repo_url=repo_url,
-                                success=False,
-                                error=(
-                                    f"No compatible branches in original repo "
-                                    f"or forks for MC {self.config.mc_version}"
-                                    f" + {self.config.loader} (also tried "
-                                    f"{tried} cross-loader fallback)"
-                                ),
-                            )
-                    else:
-                        return CompilationResult(
-                            repo_url=repo_url,
-                            success=False,
-                            error=(
-                                f"No compatible branches in original repo "
-                                f"or forks for MC {self.config.mc_version}"
-                                f" + {self.config.loader}"
-                            ),
-                        )
-
-                print(
-                    f"  \U0001f3af Found {len(compatible_branches)} compatible branches"
-                )
-
-                for branch in compatible_branches:
-                    branch.score = self.validator.score_branch(branch)
-
-                compatible_branches.sort(key=lambda b: b.score, reverse=True)
-
-                print("\n  \U0001f4cb Top candidates:")
-                for i, branch in enumerate(
-                    compatible_branches[: min(3, len(compatible_branches))], 1
-                ):
-                    exact_indicator = (
-                        "\u2713"
-                        if branch.minecraft_version == self.config.mc_version
-                        else "~"
-                    )
-                    days_old = ""
-                    if branch.commit_date:
-                        try:
-                            commit_time = datetime.fromisoformat(
-                                branch.commit_date.replace("Z", "+00:00")
-                            )
-                            now = datetime.now(timezone.utc)
-                            days = (now - commit_time).days
-                            if days < 30:
-                                days_old = f", {days}d ago"
-                            elif days < 365:
-                                days_old = f", {days // 30}mo ago"
-                        except Exception:
-                            pass
-                    print(
-                        f"    {i}. {branch.name} (MC {branch.minecraft_version} {exact_indicator}, score: {branch.score}{days_old})"
-                    )
-
-                branches_to_try = compatible_branches
-
+            branches = plan.branches
             # Level 1: drop branches with deterministic build failures before cloning
-            if self.config.prebuild_gate and branches_to_try:
-                print(f"\n  ⚡ Pre-build gate ({len(branches_to_try)} candidates)...")
-                branches_to_try = self.prebuild.filter_branches(
-                    owner, repo, branches_to_try
-                )
+            if self.config.prebuild_gate and branches:
+                print(f"\n  ⚡ Pre-build gate ({len(branches)} candidates)...")
+                branches = self.prebuild.filter_branches(plan.owner, plan.repo, branches)
 
             # Level 0: a published JAR means the build already happened elsewhere
-            if self.config.use_prebuilt and branches_to_try:
-                prebuilt_result = self._try_prebuilt(
-                    repo_url, owner, repo, branches_to_try[0]
-                )
+            if self.config.use_prebuilt and branches:
+                prebuilt_result = self._try_prebuilt(repo_url, plan.owner, plan.repo, branches[0])
                 if prebuilt_result:
                     return prebuilt_result
 
-            # Try each branch
-            branch_errors = []
-            last_fail_type = FailureType.UNKNOWN
-            last_missing_deps: List[str] = []
-            last_fail_clone_dir: Optional[Path] = None
-            for i, branch in enumerate(branches_to_try, 1):
-                print(
-                    f"\n  \U0001f33f Attempting [{i}/{len(branches_to_try)}]: {branch.name}"
-                )
-                version_match = (
-                    "exact"
-                    if branch.minecraft_version == self.config.mc_version
-                    else "close"
-                )
-                print(
-                    f"     MC: {branch.minecraft_version} ({version_match}), Loader: {branch.loader} {branch.loader_version}"
-                )
-
-                if repo_temp_dir.exists():
-                    shutil.rmtree(repo_temp_dir)
-
-                clone_url = f"https://github.com/{owner}/{repo}.git"
-                print("    \U0001f4e5 Cloning...")
-
-                try:
-                    result = subprocess.run(
-                        [
-                            "git",
-                            "clone",
-                            "-b",
-                            branch.name,
-                            "--depth",
-                            "1",
-                            clone_url,
-                            str(repo_temp_dir),
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                    )
-
-                    if result.returncode != 0:
-                        err = f"Clone failed: {result.stderr.strip()[:200]}"
-                        print(f"    \u274c {err}")
-                        branch_errors.append(f"{branch.name}: {err}")
-                        last_fail_type = FailureType.CLONE_ERROR
-                        continue
-
-                except subprocess.TimeoutExpired:
-                    branch_errors.append(f"{branch.name}: Clone timeout")
-                    print("    \u274c Clone timeout")
-                    last_fail_type = FailureType.CLONE_ERROR
-                    continue
-                except Exception as e:
-                    branch_errors.append(f"{branch.name}: Clone error: {e}")
-                    print(f"    \u274c Clone error: {e}")
-                    last_fail_type = FailureType.CLONE_ERROR
-                    continue
-
-                print("    \U0001f50d Validating gradle.properties...")
-                is_valid, message = self.validator.validate_gradle_properties(
-                    repo_temp_dir, skip_loader_validation=is_cross_loader_attempt
-                )
-                if not is_valid:
-                    print(f"    \u274c {message}")
-                    branch_errors.append(f"{branch.name}: {message}")
-                    last_fail_type = FailureType.VALIDATION_ERROR
-                    continue
-                print(f"    {message}")
-
-                print("    \U0001f50d Validating build.gradle...")
-                is_valid, message = self.validator.validate_build_gradle(repo_temp_dir)
-                if not is_valid:
-                    print(f"    \u274c {message}")
-                    branch_errors.append(f"{branch.name}: {message}")
-                    last_fail_type = FailureType.VALIDATION_ERROR
-                    continue
-                print(f"    \u2705 {message}")
-
-                success, jar_path, message, fail_type, missing_deps = compile_mod(
-                    repo_temp_dir, extra_gradle_args, self.config.mc_version
-                )
-                if not success:
-                    print(f"    \u274c {message}")
-                    branch_errors.append(f"{branch.name}: {message[:200]}")
-                    last_fail_type = fail_type
-                    last_missing_deps = missing_deps
-                    last_fail_clone_dir = repo_temp_dir
-                    continue
-                print(f"    \u2705 {message}")
-
-                print("    \U0001f50d Validating JAR...")
-                is_valid, mod_name, mod_version, message = validate_jar(
-                    jar_path, self.config.mc_version
-                )
-                if not is_valid:
-                    print(f"    \u274c {message}")
-                    branch_errors.append(f"{branch.name}: JAR validation: {message}")
-                    continue
-                print(f"    \u2705 {message}")
-                print(f"    \U0001f4cb Mod: {mod_name} v{mod_version}")
-
-                dest_path = self.config.output_dir / jar_path.name
-                shutil.copy2(jar_path, dest_path)
-                print(f"    \U0001f4be Saved to: {dest_path}")
-
-                if self.config.mods_path:
-                    instance_dest = self.config.mods_path / jar_path.name
-                    shutil.copy2(jar_path, instance_dest)
-                    print(f"    \U0001f4be Installed to: {instance_dest}")
-
-                version_note = ""
-                if branch.minecraft_version != self.config.mc_version:
-                    version_note = f" (compiled for MC {branch.minecraft_version})"
-                cross_note = ""
-                if is_cross_loader_attempt:
-                    cross_note = " [Fabric via Sinytra Connector]"
-
-                print(
-                    f"\n  \u2705 SUCCESS: {mod_name} v{mod_version} from branch '{branch.name}'{version_note}{cross_note}"
-                )
-
-                return CompilationResult(
-                    repo_url=repo_url,
-                    success=True,
-                    branch=branch.name,
-                    jar_path=str(dest_path),
-                    mod_name=mod_name,
-                    mod_version=mod_version,
-                    compiled_mc_version=branch.minecraft_version,
-                    clone_dir=repo_temp_dir,
-                    is_cross_loader=is_cross_loader_attempt,
-                )
-
-            error_detail = f"All {len(branches_to_try)} branches failed:\n"
-            for err in branch_errors:
-                error_detail += f"  - {err}\n"
-            return CompilationResult(
-                repo_url=repo_url,
-                success=False,
-                error=error_detail.strip(),
-                failure_type=last_fail_type,
-                missing_dependencies=last_missing_deps,
-                clone_dir=last_fail_clone_dir,
+            return self._build_branches(
+                repo_url, plan.owner, plan.repo, branches, repo_temp_dir,
+                extra_gradle_args, plan.cross_loader,
             )
 
         except Exception as e:
             return CompilationResult(
                 repo_url=repo_url, success=False, error=f"Unexpected error: {e}"
             )
+
+    # ------------------------------------------------------------------
+    # Stage 0: Modrinth
+    # ------------------------------------------------------------------
+
+    def _try_modrinth(self, repo_url: str, owner: str, repo: str) -> Optional[CompilationResult]:
+        """Download the mod from Modrinth when it has a build for the target.
+
+        Returns None (fall through to GitHub) when Modrinth has nothing or the download fails.
+        """
+        hit = self._find_modrinth_hit(owner, repo)
+        if not hit:
+            return None
+
+        print("\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)...")
+        try:
+            dl_resp = requests.get(
+                hit["download_url"],
+                headers={"User-Agent": MODRINTH_USER_AGENT},
+                timeout=120,
+            )
+            dl_resp.raise_for_status()
+
+            filename = hit["filename"]
+            dest = self.config.output_dir / filename
+            dest.write_bytes(dl_resp.content)
+            print(f"    \U0001f4be Saved: {dest}")
+
+            if self.config.mods_path:
+                instance_dest = self.config.mods_path / filename
+                instance_dest.write_bytes(dl_resp.content)
+                print(f"    \U0001f4be Installed: {instance_dest}")
+
+            self.modrinth.download_modrinth_deps(hit)
+
+            is_cross = hit.get("_cross_loader", False)
+            cross_note = " [Fabric via Sinytra Connector]" if is_cross else ""
+            print(
+                f"\n  ✅ SUCCESS: {hit['title']} "
+                f"v{hit['version_number']} "
+                f"from Modrinth [pre-compiled]{cross_note}"
+            )
+
+            return CompilationResult(
+                repo_url=repo_url,
+                success=True,
+                jar_path=str(dest),
+                mod_name=hit["title"],
+                mod_version=hit["version_number"],
+                compiled_mc_version=self.config.mc_version,
+                modrinth_download=True,
+                is_cross_loader=is_cross,
+            )
+        except Exception as e:
+            print(f"    ⚠️  Modrinth download failed: {e}")
+            print("    ℹ️  Falling back to GitHub compilation...")
+            return None
+
+    def _find_modrinth_hit(self, owner: str, repo: str) -> Optional[Dict]:
+        """Modrinth result for the target loader, else for a cross-loader fallback loader.
+
+        A fallback hit is tagged `_cross_loader` / `_fallback_loader`. The configured loader is
+        swapped only for the duration of each lookup (check_modrinth reads it from config).
+        """
+        source = f"{owner}/{repo}"
+        hit = self.modrinth.check_modrinth(repo, source_repo=source)
+        if hit:
+            return hit
+
+        fallback_loaders = get_cross_loader_chain(self.config.loader)
+        if not (
+            self.config.cross_loader
+            and fallback_loaders
+            and self.modrinth.is_cross_loader_available()
+        ):
+            return None
+
+        saved_loader = self.config.loader
+        try:
+            for fallback in fallback_loaders:
+                self.config.loader = fallback
+                print(
+                    f"  \U0001f504 CROSS-LOADER: Checking Modrinth for "
+                    f"{fallback.capitalize()} version..."
+                )
+                hit = self.modrinth.check_modrinth(repo, source_repo=source)
+                if hit:
+                    hit["_cross_loader"] = True
+                    hit["_fallback_loader"] = fallback
+                    return hit
+        finally:
+            self.config.loader = saved_loader
+        return None
+
+    # ------------------------------------------------------------------
+    # Stage 1: which repo and branches to build
+    # ------------------------------------------------------------------
+
+    def _plan_branches(
+        self, repo_url: str, owner: str, repo: str, specific_branch: Optional[str]
+    ) -> "BranchPlan | CompilationResult":
+        """Decide where to build from, or return the failed result that ends the attempt."""
+        print("  \U0001f50d Fetching branches...")
+        all_branches = self.github.get_branches(owner, repo)
+
+        if not all_branches:
+            return CompilationResult(
+                repo_url=repo_url,
+                success=False,
+                error="Could not fetch branches from repository",
+            )
+
+        print(f"  \U0001f4ca Found {len(all_branches)} branches")
+
+        if specific_branch:
+            return self._plan_specific_branch(
+                repo_url, owner, repo, specific_branch, all_branches
+            )
+
+        plan = self._discover_branches(owner, repo, all_branches)
+        if not plan.branches:
+            return self._no_branches_result(repo_url, owner, repo, plan)
+
+        print(f"  \U0001f3af Found {len(plan.branches)} compatible branches")
+        self._rank_branches(plan.branches)
+        return plan
+
+    def _plan_specific_branch(
+        self, repo_url: str, owner: str, repo: str, name: str, all_branches: List
+    ) -> "BranchPlan | CompilationResult":
+        """The user named the branch: it must exist and pass pre-validation. No ranking."""
+        target_branch = next((b for b in all_branches if b.name == name), None)
+        if not target_branch:
+            return CompilationResult(
+                repo_url=repo_url,
+                success=False,
+                error=f"Specified branch '{name}' not found",
+            )
+
+        print("  \U0001f50d Validating specified branch via GitHub API...")
+        if not self.validator.pre_validate_branch(owner, repo, target_branch):
+            return CompilationResult(
+                repo_url=repo_url,
+                success=False,
+                error=(
+                    f"Branch '{name}' is not compatible: {target_branch.validation_error}"
+                ),
+            )
+        return BranchPlan(owner, repo, [target_branch])
+
+    def _discover_branches(self, owner: str, repo: str, all_branches: List) -> "BranchPlan":
+        """Compatible branches in the upstream repo, or in a community fork when upstream
+        has no exact match. May return an empty plan; fork candidates are kept on it for the
+        cross-loader fallback."""
+        all_branches = self.validator.filter_branches_by_version_proximity(all_branches)
+        compatible = self.validator.pre_validate_branches(owner, repo, all_branches)
+
+        exact_matches = [b for b in compatible if b.minecraft_version == self.config.mc_version]
+        close_matches = [b for b in compatible if b.minecraft_version != self.config.mc_version]
+
+        if not compatible:
+            should_search_forks = True
+        elif not exact_matches and close_matches:
+            print(
+                f"  ⚠️  Only found close version matches "
+                f"({close_matches[0].minecraft_version}), searching for exact "
+                f"{self.config.mc_version}..."
+            )
+            should_search_forks = True
+        else:
+            should_search_forks = False
+
+        if not should_search_forks:
+            return BranchPlan(owner, repo, compatible)
+
+        cross_available = (
+            self.config.cross_loader
+            and get_cross_loader_chain(self.config.loader)
+            and self.modrinth.is_cross_loader_available()
+        )
+        fork_candidates = self.github.search_compatible_repos(
+            owner, repo, cross_loader_available=cross_available
+        ) or []
+
+        if fork_candidates:
+            print(f"\n  \U0001f3af Trying top {len(fork_candidates)} community forks...")
+            for fork_result in fork_candidates:
+                fork_branches = self._check_fork(owner, repo, fork_result, close_matches)
+                if fork_branches:
+                    fork_info = fork_result["fork"]
+                    return BranchPlan(fork_info["owner"], fork_info["repo"], fork_branches,
+                                      fork_candidates=fork_candidates)
+
+            if close_matches:
+                print(
+                    "\n  ℹ️  No exact version in forks, using close matches "
+                    "from original repo"
+                )
+                compatible = close_matches
+
+        return BranchPlan(owner, repo, compatible, fork_candidates=fork_candidates)
+
+    def _check_fork(
+        self, owner: str, repo: str, fork_result: Dict, upstream_close: List
+    ) -> Optional[List]:
+        """Branches to build from this fork, or None to try the next fork.
+
+        In order: an exact-version branch; a close branch whose declared range covers the
+        target; any compatible branch, but only when upstream had no close match to fall
+        back on.
+        """
+        fork_info = fork_result["fork"]
+        fork_owner = fork_info["owner"]
+        fork_repo = fork_info["repo"]
+
+        print(f"\n  \U0001f4e6 Checking fork: {fork_info['full_name']}")
+        print(
+            f"     Score: {fork_result['score']}, "
+            f"Signals: {', '.join(fork_result['signals'])}"
+        )
+
+        fork_branches = self.github.get_branches(fork_owner, fork_repo)
+        fork_compatible = self.validator.pre_validate_branches(
+            fork_owner, fork_repo, fork_branches
+        )
+
+        fork_exact = [b for b in fork_compatible if b.minecraft_version == self.config.mc_version]
+        if fork_exact:
+            print(f"  ✅ Found EXACT version {self.config.mc_version} in fork!")
+            for fb in fork_exact:
+                is_clean, diff_bonus, diff_desc = self.validator.analyze_fork_diff(
+                    owner, repo, fork_owner, fork_repo, fb.name
+                )
+                fb.score += diff_bonus
+                if is_clean or diff_bonus > 0:
+                    print(f"  \U0001f50d Diff analysis: {diff_desc}")
+            self._print_fork_notice(fork_result)
+            return fork_exact
+
+        fork_close = [b for b in fork_compatible if b.minecraft_version != self.config.mc_version]
+        if fork_close and self._fork_range_covers_target(fork_owner, fork_repo, fork_close):
+            print("  ✅ Using fork with validated version range support!")
+            return fork_close
+
+        if fork_compatible and not upstream_close:
+            print(f"  ✅ Found {len(fork_compatible)} compatible branches in fork!")
+            return fork_compatible
+
+        return None
+
+    def _fork_range_covers_target(self, fork_owner: str, fork_repo: str, fork_close: List) -> bool:
+        """Whether the best close branch declares a version range covering the target.
+
+        On success every close branch is marked with that range (validation_method
+        "fork_metadata_range"), since they share the fork's metadata.
+        """
+        print(
+            f"  ℹ️  No exact match, checking if close matches support "
+            f"{self.config.mc_version}..."
+        )
+        best_branch = fork_close[0]
+        version_range = self.validator.parse_version_range_from_metadata(
+            fork_owner, fork_repo, best_branch.name, self.config.loader
+        )
+        if not version_range:
+            print("  ⚠️  Could not determine version range from metadata")
+            return False
+
+        if get_profile(self.config.loader)["version_range_format"] == "maven":
+            is_compat = is_version_in_maven_range(self.config.mc_version, version_range)
+        else:
+            is_compat = is_version_in_fabric_range(self.config.mc_version, version_range)
+
+        if not is_compat:
+            print(f"  ❌ Range {version_range} does not cover {self.config.mc_version}")
+            return False
+
+        print(f"  ✅ Fork branch '{best_branch.name}' supports range {version_range}")
+        print(f"     → Covers target {self.config.mc_version}!")
+        for b in fork_close:
+            b.version_range = version_range
+            b.validation_method = "fork_metadata_range"
+        return True
+
+    @staticmethod
+    def _print_fork_notice(fork_result: Dict) -> None:
+        """Security notice shown before building code from a community fork."""
+        fork_info = fork_result["fork"]
+        trust_score = fork_result.get("trust_score", 50)
+        trust_analysis = fork_info.get("trust_analysis", {})
+
+        print("\n  ⚠️  SECURITY NOTICE: Using community fork (not official)")
+        print(f"      Trust Score: {trust_score}% - ", end="")
+        if trust_score >= 80:
+            print("HIGH confidence (established contributors)")
+        elif trust_score >= 60:
+            print("MEDIUM confidence (some established contributors)")
+        elif trust_score >= 40:
+            print("LOW confidence (new/unknown contributors)")
+        else:
+            print("CRITICAL - Multiple red flags detected")
+
+        if trust_analysis.get("warnings"):
+            print("      Warnings:")
+            for warning in trust_analysis["warnings"]:
+                print(f"      - {warning}")
+        if trust_analysis.get("signals"):
+            print(f"      Signals: {', '.join(trust_analysis['signals'])}")
+
+        print(f"      Review fork: {fork_info['url']}")
+        print(f"      Compiling code from: {fork_info['owner']}")
+
+    def _no_branches_result(
+        self, repo_url: str, owner: str, repo: str, plan: "BranchPlan"
+    ) -> "BranchPlan | CompilationResult":
+        """Nothing compatible for the target loader: try the cross-loader fallback (Fabric
+        branches run through bridge mods), else return the failure."""
+        fallback_loaders = get_cross_loader_chain(self.config.loader)
+        base_error = (
+            f"No compatible branches in original repo "
+            f"or forks for MC {self.config.mc_version}"
+            f" + {self.config.loader}"
+        )
+        if not (
+            self.config.cross_loader
+            and fallback_loaders
+            and self.modrinth.is_cross_loader_available()
+        ):
+            return CompilationResult(repo_url=repo_url, success=False, error=base_error)
+
+        print(
+            f"\n  \U0001f504 CROSS-LOADER: No {self.config.loader.capitalize()} branches found, "
+            f"trying {fallback_loaders[0].capitalize()} fallback via bridge mods..."
+        )
+        for fallback_loader in fallback_loaders:
+            found = self._cross_loader_branches(owner, repo, plan.fork_candidates,
+                                                fallback_loader)
+            if found:
+                fb_owner, fb_repo, fb_branches = found
+                print(
+                    f"  ✅ Found {len(fb_branches)} {fallback_loader.capitalize()} "
+                    f"branches for cross-loader compilation"
+                )
+                print(f"  \U0001f3af Found {len(fb_branches)} compatible branches")
+                self._rank_branches(fb_branches)
+                return BranchPlan(fb_owner, fb_repo, fb_branches, cross_loader=True)
+
+        tried = ", ".join(fallback_loaders)
+        return CompilationResult(
+            repo_url=repo_url,
+            success=False,
+            error=f"{base_error} (also tried {tried} cross-loader fallback)",
+        )
+
+    def _cross_loader_branches(
+        self, owner: str, repo: str, fork_candidates: List[Dict], loader: str
+    ) -> Optional[tuple]:
+        """(owner, repo, branches) for `loader` in upstream, else in the first fork that has
+        them; None when neither does."""
+        branches = self.validator.pre_validate_branches(
+            owner, repo, self.github.get_branches(owner, repo), override_loader=loader
+        )
+        if branches:
+            return owner, repo, branches
+
+        for fork_result in fork_candidates:
+            fi = fork_result["fork"]
+            print(
+                f"  \U0001f504 Checking fork {fi['full_name']} "
+                f"for {loader.capitalize()} branches..."
+            )
+            branches = self.validator.pre_validate_branches(
+                fi["owner"], fi["repo"], self.github.get_branches(fi["owner"], fi["repo"]),
+                override_loader=loader,
+            )
+            if branches:
+                return fi["owner"], fi["repo"], branches
+        return None
+
+    def _rank_branches(self, branches: List) -> None:
+        """Score and sort branches in place (best first) and print the top three."""
+        for b in branches:
+            b.score = self.validator.score_branch(b)
+        branches.sort(key=lambda b: b.score, reverse=True)
+
+        print("\n  \U0001f4cb Top candidates:")
+        for i, b in enumerate(branches[:3], 1):
+            exact_indicator = "✓" if b.minecraft_version == self.config.mc_version else "~"
+            print(
+                f"    {i}. {b.name} (MC {b.minecraft_version} {exact_indicator}, "
+                f"score: {b.score}{_age_label(b.commit_date)})"
+            )
+
+    # ------------------------------------------------------------------
+    # Stage 3: clone, validate, compile
+    # ------------------------------------------------------------------
+
+    def _build_branches(
+        self,
+        repo_url: str,
+        owner: str,
+        repo: str,
+        branches: List,
+        repo_temp_dir: Path,
+        extra_gradle_args: Optional[List[str]],
+        is_cross_loader: bool,
+    ) -> CompilationResult:
+        """Try branches in order; the first that clones, validates, builds and yields a valid
+        JAR wins. Otherwise a failure carrying the last failure type and missing deps (which
+        drive process_repos' mavenLocal retry)."""
+        branch_errors = []
+        last_fail_type = FailureType.UNKNOWN
+        last_missing_deps: List[str] = []
+        last_fail_clone_dir: Optional[Path] = None
+
+        for i, branch in enumerate(branches, 1):
+            print(f"\n  \U0001f33f Attempting [{i}/{len(branches)}]: {branch.name}")
+            version_match = (
+                "exact" if branch.minecraft_version == self.config.mc_version else "close"
+            )
+            print(
+                f"     MC: {branch.minecraft_version} ({version_match}), "
+                f"Loader: {branch.loader} {branch.loader_version}"
+            )
+
+            clone_error = self._clone(owner, repo, branch.name, repo_temp_dir)
+            if clone_error:
+                print(f"    ❌ {clone_error}")
+                branch_errors.append(f"{branch.name}: {clone_error}")
+                last_fail_type = FailureType.CLONE_ERROR
+                continue
+
+            print("    \U0001f50d Validating gradle.properties...")
+            is_valid, message = self.validator.validate_gradle_properties(
+                repo_temp_dir, skip_loader_validation=is_cross_loader
+            )
+            if not is_valid:
+                print(f"    ❌ {message}")
+                branch_errors.append(f"{branch.name}: {message}")
+                last_fail_type = FailureType.VALIDATION_ERROR
+                continue
+            print(f"    {message}")
+
+            print("    \U0001f50d Validating build.gradle...")
+            is_valid, message = self.validator.validate_build_gradle(repo_temp_dir)
+            if not is_valid:
+                print(f"    ❌ {message}")
+                branch_errors.append(f"{branch.name}: {message}")
+                last_fail_type = FailureType.VALIDATION_ERROR
+                continue
+            print(f"    ✅ {message}")
+
+            success, jar_path, message, fail_type, missing_deps = compile_mod(
+                repo_temp_dir, extra_gradle_args, self.config.mc_version
+            )
+            if not success:
+                print(f"    ❌ {message}")
+                branch_errors.append(f"{branch.name}: {message[:200]}")
+                last_fail_type = fail_type
+                last_missing_deps = missing_deps
+                last_fail_clone_dir = repo_temp_dir
+                continue
+            print(f"    ✅ {message}")
+
+            print("    \U0001f50d Validating JAR...")
+            is_valid, mod_name, mod_version, message = validate_jar(
+                jar_path, self.config.mc_version
+            )
+            if not is_valid:
+                print(f"    ❌ {message}")
+                branch_errors.append(f"{branch.name}: JAR validation: {message}")
+                continue
+            print(f"    ✅ {message}")
+            print(f"    \U0001f4cb Mod: {mod_name} v{mod_version}")
+
+            dest_path = self._install_jar(jar_path)
+
+            version_note = ""
+            if branch.minecraft_version != self.config.mc_version:
+                version_note = f" (compiled for MC {branch.minecraft_version})"
+            cross_note = " [Fabric via Sinytra Connector]" if is_cross_loader else ""
+            print(
+                f"\n  ✅ SUCCESS: {mod_name} v{mod_version} from branch "
+                f"'{branch.name}'{version_note}{cross_note}"
+            )
+
+            return CompilationResult(
+                repo_url=repo_url,
+                success=True,
+                branch=branch.name,
+                jar_path=str(dest_path),
+                mod_name=mod_name,
+                mod_version=mod_version,
+                compiled_mc_version=branch.minecraft_version,
+                clone_dir=repo_temp_dir,
+                is_cross_loader=is_cross_loader,
+            )
+
+        error_detail = f"All {len(branches)} branches failed:\n"
+        for err in branch_errors:
+            error_detail += f"  - {err}\n"
+        return CompilationResult(
+            repo_url=repo_url,
+            success=False,
+            error=error_detail.strip(),
+            failure_type=last_fail_type,
+            missing_dependencies=last_missing_deps,
+            clone_dir=last_fail_clone_dir,
+        )
+
+    @staticmethod
+    def _clone(owner: str, repo: str, branch_name: str, dest: Path) -> Optional[str]:
+        """Shallow-clone one branch into dest (replacing it). Returns an error or None."""
+        if dest.exists():
+            shutil.rmtree(dest)
+
+        clone_url = f"https://github.com/{owner}/{repo}.git"
+        print("    \U0001f4e5 Cloning...")
+        try:
+            result = subprocess.run(
+                ["git", "clone", "-b", branch_name, "--depth", "1", clone_url, str(dest)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return "Clone timeout"
+        except Exception as e:
+            return f"Clone error: {e}"
+        if result.returncode != 0:
+            return f"Clone failed: {result.stderr.strip()[:200]}"
+        return None
+
+    def _install_jar(self, jar_path: Path) -> Path:
+        """Copy a built JAR to the output dir (and the instance's mods dir, if any)."""
+        dest_path = self.config.output_dir / jar_path.name
+        shutil.copy2(jar_path, dest_path)
+        print(f"    \U0001f4be Saved to: {dest_path}")
+
+        if self.config.mods_path:
+            instance_dest = self.config.mods_path / jar_path.name
+            shutil.copy2(jar_path, instance_dest)
+            print(f"    \U0001f4be Installed to: {instance_dest}")
+        return dest_path
 
     def process_repos(self, repo_urls: List[str]):
         """Process a list of repository URLs with dependency-aware multi-pass."""

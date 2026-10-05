@@ -26,7 +26,7 @@ The package is composition-based: `Pipeline` (`pipeline.py`) orchestrates one cl
 
 | Module | Role |
 |--------|------|
-| `cli.py` | Typer commands: `compile`, `search`, `get`, `token`, `status`, `recommend` |
+| `cli.py`, `commands/` | Typer app; one module per command: `compile`, `search`, `get`, `token`, `status`, `recommend` |
 | `pipeline.py` | Clone, compile, multi-pass dependency retry, Docker test, report |
 | `github.py`, `validation.py`, `buildinfo.py` | Fork discovery, branch scoring, reading build targets remotely |
 | `prebuild.py`, `symbols.py`, `mappings.py`, `javascan.py` | Skip builds whose outcome is knowable before cloning |
