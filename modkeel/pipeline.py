@@ -505,7 +505,7 @@ class Pipeline:
                 is_clean, diff_bonus, diff_desc = self.validator.analyze_fork_diff(
                     owner, repo, fork_owner, fork_repo, fb.name
                 )
-                fb.score += diff_bonus
+                fb.diff_bonus = diff_bonus
                 if is_clean or diff_bonus > 0:
                     print(f"  \U0001f50d Diff analysis: {diff_desc}")
             self._print_fork_notice(fork_result)
@@ -652,9 +652,12 @@ class Pipeline:
         return None
 
     def _rank_branches(self, branches: List) -> None:
-        """Score and sort branches in place (best first) and print the top three."""
+        """Score and sort branches in place (best first) and print the top three.
+
+        The score is score_branch() plus any fork diff bonus set by _check_fork.
+        """
         for b in branches:
-            b.score = self.validator.score_branch(b)
+            b.score = self.validator.score_branch(b) + b.diff_bonus
         branches.sort(key=lambda b: b.score, reverse=True)
 
         print("\n  \U0001f4cb Top candidates:")
