@@ -15,7 +15,8 @@ python3 -m pytest tests/ -q
 ruff check modkeel tests
 ```
 
-Both must pass before submitting a PR. CI runs them on Python 3.10, 3.11 and 3.12
+Both must pass before submitting a PR. CI runs them on Python 3.10 and 3.12 for pull
+requests, and on 3.10, 3.11 and 3.12 for every push to `main`
 ([`.github/workflows/cli.yml`](.github/workflows/cli.yml)).
 
 ## Project Structure
