@@ -14,6 +14,8 @@ from modkeel.loaders import (
     get_bridge_mods,
     get_cross_loader_chain,
     get_docker_server_type,
+    get_docker_version_env,
+    is_explicit_loader_version,
     get_installer_filename,
     get_installer_url,
     get_known_version,
@@ -184,6 +186,31 @@ class TestDockerServerType(unittest.TestCase):
 
     def test_quilt_type(self):
         self.assertEqual(get_docker_server_type("quilt"), "FABRIC")
+
+
+class TestDockerVersionEnv(unittest.TestCase):
+    """Env var that pins the loader version in itzg/minecraft-server."""
+
+    def test_per_loader(self):
+        self.assertEqual(get_docker_version_env("neoforge"), "NEOFORGE_VERSION")
+        self.assertEqual(get_docker_version_env("forge"), "FORGE_VERSION")
+        self.assertEqual(get_docker_version_env("fabric"), "FABRIC_LOADER_VERSION")
+
+    def test_quilt_has_none(self):
+        """Quilt runs as TYPE=FABRIC: its version must not be sent as a Fabric one."""
+        self.assertIsNone(get_docker_version_env("quilt"))
+
+
+class TestExplicitLoaderVersion(unittest.TestCase):
+    """Only full dotted versions count as a requested loader version."""
+
+    def test_full_versions(self):
+        for v in ("21.10.64", "0.19.5", "21.10.62-beta", "47.3.0"):
+            self.assertTrue(is_explicit_loader_version(v), v)
+
+    def test_sentinels_and_fragments(self):
+        for v in ("0", "64", "", None, "latest", "21."):
+            self.assertFalse(is_explicit_loader_version(v), v)
 
 
 class TestInstallerUrl(unittest.TestCase):

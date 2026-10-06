@@ -144,6 +144,11 @@ class CompilationResult:
         self.mod_version = mod_version
         self.compiled_mc_version = compiled_mc_version
         self.failure_type = failure_type or FailureType.NONE
+        # Which source strategy produced the JAR, the path taken to get there, and a note
+        # for the user when it is not an official build for the exact target (resolver).
+        self.source: Optional[str] = None
+        self.trail: List[str] = []
+        self.caveat: Optional[str] = None
         self.missing_dependencies = missing_dependencies or []
         self.clone_dir = clone_dir
         self.is_cross_loader = is_cross_loader
@@ -191,21 +196,30 @@ class DockerTestCache:
         combined = hashlib.sha256("|".join(sorted(file_hashes)).encode())
         return combined.hexdigest()
 
-    def get(self, jar_hash: str, mc_version: str, loader: str) -> Optional[bool]:
-        """Return cached pass/fail or None if not cached / invalidated."""
+    def get(self, jar_hash: str, mc_version: str, loader: str,
+            loader_version: Optional[str] = None) -> Optional[bool]:
+        """Return cached pass/fail or None if not cached / invalidated.
+
+        loader_version is part of the key: a result on one loader build says nothing
+        about another (None means "the image's latest", and matches only None).
+        """
         entry = self._data.get(jar_hash)
         if entry is None:
             return None
         if entry.get("mc_version") != mc_version or entry.get("loader") != loader:
             return None
+        if entry.get("loader_version") != loader_version:
+            return None
         return entry.get("passed")
 
-    def set(self, jar_hash: str, passed: bool, mc_version: str, loader: str) -> None:
+    def set(self, jar_hash: str, passed: bool, mc_version: str, loader: str,
+            loader_version: Optional[str] = None) -> None:
         """Store a Docker test result."""
         self._data[jar_hash] = {
             "passed": passed,
             "mc_version": mc_version,
             "loader": loader,
+            "loader_version": loader_version,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._save()

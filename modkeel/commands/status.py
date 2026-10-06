@@ -9,6 +9,7 @@ from modkeel.commands._shared import console
 from modkeel.config import ModkeelConfig
 from modkeel.constants import MODKEEL_HOME, MODKEEL_VERSION
 from modkeel.loaders import KNOWN_LOADER_VERSIONS, get_profile
+from modkeel.models import DockerTestCache
 
 
 def status_command():
@@ -59,31 +60,34 @@ def status_command():
         loader_table = Table(title="Cached Loaders")
         loader_table.add_column("Loader", style="cyan")
         loader_table.add_column("MC Version", style="green")
+        loader_table.add_column("Loader Version", style="magenta")
         loader_table.add_column("Status", style="yellow")
 
-        for loader_dir in sorted(cache_dir.iterdir()):
-            if loader_dir.is_dir():
-                for version_dir in sorted(loader_dir.iterdir()):
-                    if version_dir.is_dir():
-                        has_run = (version_dir / "run.sh").exists() or (
-                            version_dir / "run.bat"
-                        ).exists()
-                        status_str = (
-                            "[green]installed[/green]"
-                            if has_run
-                            else "[yellow]partial[/yellow]"
-                        )
-                        loader_table.add_row(
-                            loader_dir.name,
-                            version_dir.name,
-                            status_str,
-                        )
+        def is_installed(d) -> bool:
+            return (d / "run.sh").exists() or (d / "run.bat").exists()
+
+        # Layout: loaders/<loader>/<mc>/<loader_version>/. Older releases installed
+        # straight into loaders/<loader>/<mc>/ (no loader version), still listed.
+        for loader_dir in sorted(p for p in cache_dir.iterdir() if p.is_dir()):
+            for mc_dir in sorted(p for p in loader_dir.iterdir() if p.is_dir()):
+                installs = [(mc_dir, "-")] if is_installed(mc_dir) else [
+                    (d, d.name) for d in sorted(mc_dir.iterdir()) if d.is_dir()
+                ]
+                for install_dir, loader_version in installs or [(mc_dir, "-")]:
+                    status_str = (
+                        "[green]installed[/green]"
+                        if is_installed(install_dir)
+                        else "[yellow]partial[/yellow]"
+                    )
+                    loader_table.add_row(
+                        loader_dir.name, mc_dir.name, loader_version, status_str,
+                    )
         console.print(loader_table)
     else:
         console.print("[dim]No cached loaders found.[/dim]")
 
     # Docker test cache
-    cache_file = config_dir / "docker_cache.json"
+    cache_file = config_dir / DockerTestCache.CACHE_FILE.name
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())

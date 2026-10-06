@@ -1,5 +1,6 @@
 """Loader profiles for Modkeel - single source of truth for loader-specific data."""
 
+import re
 from typing import Dict, List, Optional
 
 
@@ -31,6 +32,7 @@ LOADER_PROFILES: Dict[str, dict] = {
         "version_range_format": "maven",
         "require_loader_version_in_gradle": True,
         "docker_server_type": "NEOFORGE",
+        "docker_version_env": "NEOFORGE_VERSION",
         "installer_url_template": (
             "https://maven.neoforged.net/releases/net/neoforged/"
             "neoforge/{version}/neoforge-{version}-installer.jar"
@@ -62,6 +64,7 @@ LOADER_PROFILES: Dict[str, dict] = {
         "version_range_format": "maven",
         "require_loader_version_in_gradle": False,
         "docker_server_type": "FORGE",
+        "docker_version_env": "FORGE_VERSION",
         "installer_url_template": None,
         "installer_filename_template": None,
         "maven_domain": "files.minecraftforge.net",
@@ -91,6 +94,7 @@ LOADER_PROFILES: Dict[str, dict] = {
         "version_range_format": "fabric",
         "require_loader_version_in_gradle": False,
         "docker_server_type": "FABRIC",
+        "docker_version_env": "FABRIC_LOADER_VERSION",
         "installer_url_template": None,
         "installer_filename_template": None,
         "maven_domain": None,
@@ -119,6 +123,8 @@ LOADER_PROFILES: Dict[str, dict] = {
         "version_range_format": "fabric",
         "require_loader_version_in_gradle": False,
         "docker_server_type": "FABRIC",
+        # Quilt runs as TYPE=FABRIC: a Quilt loader version is not a Fabric one.
+        "docker_version_env": None,
         "installer_url_template": None,
         "installer_filename_template": None,
         "maven_domain": None,
@@ -188,6 +194,22 @@ def get_known_version(loader: str, mc_version: str) -> Optional[str]:
     """Get the known loader version for a given MC version, or None."""
     loader_versions = KNOWN_LOADER_VERSIONS.get(loader.lower(), {})
     return loader_versions.get(mc_version)
+
+
+# A loader version the user can mean literally: "21.10.64", "0.19.5", "21.10.62-beta".
+# "0" (the sentinel search/get pass when no -lv is given) or a bare build number like
+# "64" is not one, so it never reaches an installer URL or the server image.
+_EXPLICIT_LOADER_VERSION = re.compile(r"\d+(?:\.\d+)+(?:[-+.][\w.+-]*)?")
+
+
+def is_explicit_loader_version(version: Optional[str]) -> bool:
+    """True when version is a full loader version (dotted), not a sentinel or a fragment."""
+    return bool(version) and _EXPLICIT_LOADER_VERSION.fullmatch(version) is not None
+
+
+def get_docker_version_env(loader: str) -> Optional[str]:
+    """itzg/minecraft-server env var that pins this loader's version, or None."""
+    return get_profile(loader).get("docker_version_env")
 
 
 def get_docker_server_type(loader: str) -> str:

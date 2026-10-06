@@ -16,11 +16,13 @@ import requests
 from modkeel.loaders import (
     KNOWN_LOADER_VERSIONS,
     get_docker_server_type,
+    get_docker_version_env,
     get_installer_filename,
     get_installer_url,
     get_known_version,
     get_maven_domain,
     get_profile,
+    is_explicit_loader_version,
 )
 from modkeel.models import CompilationResult, DockerTestCache, ModCompilerConfig
 from modkeel.constants import MODKEEL_HOME
@@ -77,6 +79,51 @@ DOCKER_LOADER_ERRORS = [
     ),
 ]
 
+# Loader errors that fail the same way on every attempt: retrying them only wastes minutes,
+# and they are not the download server's fault.
+DOCKER_DETERMINISTIC_LOADER_ERRORS = {
+    "Java module incompatibility (wrong JVM version for this loader)",
+    "Class file version mismatch (loader needs a different Java version)",
+}
+
+# Java runtimes published as itzg/minecraft-server:java<N> images.
+DOCKER_JAVA_IMAGES = (8, 11, 16, 17, 21, 25)
+DOCKER_IMAGE = "itzg/minecraft-server"
+
+
+def _java_from_version_number(mc_version: str) -> int:
+    """Java a Minecraft version needs, from its number alone (when Mojang's metadata is
+    unreachable): 26.x -> 25, 1.20.5+ -> 21, 1.18+ -> 17, 1.17 -> 16, older -> 8.
+    Snapshots and other unparsable ids get the newest runtime."""
+    try:
+        parts = tuple(int(p) for p in mc_version.split("."))
+    except ValueError:
+        return DOCKER_JAVA_IMAGES[-1]
+    if parts[0] >= 26:
+        return 25
+    if parts >= (1, 20, 5):
+        return 21
+    if parts >= (1, 18):
+        return 17
+    if parts >= (1, 17):
+        return 16
+    return 8
+
+
+def server_image(mc_version: str) -> str:
+    """The itzg/minecraft-server image whose Java runs this Minecraft version.
+
+    Mojang's metadata decides the Java version (fallback: the version number). The exact
+    runtime is used when an image exists for it, else the nearest newer one: old loaders
+    (Forge on Java 8) break on newer runtimes, new game jars refuse older ones.
+    """
+    from modkeel.mappings import java_major_version
+
+    java = java_major_version(mc_version) or _java_from_version_number(mc_version)
+    tag = next((j for j in DOCKER_JAVA_IMAGES if j >= java), DOCKER_JAVA_IMAGES[-1])
+    return f"{DOCKER_IMAGE}:java{tag}"
+
+
 DOCKER_SERVER_STARTING_PATTERN = re.compile(
     r"Starting minecraft server|ModLauncher running|"
     r"Launching wrapped minecraft"
@@ -87,6 +134,17 @@ DOCKER_INSTALL_MAX_RETRIES = 5
 
 # Backwards-compatible alias
 NEOFORGE_VERSIONS = KNOWN_LOADER_VERSIONS.get("neoforge", {})
+
+
+def _loader_error(explanation: str, recent_lines: List[str]) -> dict:
+    """Result for a loader/infrastructure failure; deterministic ones are not retried."""
+    return {
+        "passed": False,
+        "error": f"[LOADER ERROR] {explanation}",
+        "log_snippet": recent_lines[-5:],
+        "is_loader_error": True,
+        "retryable": explanation not in DOCKER_DETERMINISTIC_LOADER_ERRORS,
+    }
 
 
 def _container_name() -> str:
@@ -104,6 +162,23 @@ class DockerTester:
 
     def __init__(self, config: ModCompilerConfig):
         self.config = config
+
+    def _loader_version(self) -> Optional[str]:
+        """Loader version the test server runs, used by every cache and container below.
+
+        The user's -lv wins when it is a full version, so the server matches the target
+        the mods were built for. Otherwise the known version for this MC release, and
+        None when there is none: the fallback image then installs its latest loader.
+        """
+        requested = getattr(self.config, "loader_version", None)
+        if is_explicit_loader_version(requested):
+            return requested
+        return get_known_version(self.config.loader, self.config.mc_version)
+
+    def _describe_loader(self) -> str:
+        """'NeoForge 21.10.64' or 'NeoForge (latest)', for log lines."""
+        display = get_profile(self.config.loader)["display_name"]
+        return f"{display} {self._loader_version() or '(latest)'}"
 
     def check_docker_available(self) -> bool:
         """Check if Docker daemon is accessible."""
@@ -134,10 +209,15 @@ class DockerTester:
             pass
 
     def _get_docker_volume_name(self) -> str:
-        """Deterministic volume name based on MC version + loader."""
-        tag = (
+        """Deterministic volume name: MC version + loader + loader version.
+
+        One volume per loader version, so switching -lv does not make the image
+        reinstall over (or reuse) another version's server files.
+        """
+        tag = re.sub(
+            r"[^A-Za-z0-9_-]", "_",
             f"{self.config.mc_version}_{self.config.loader}"
-            .replace(".", "_")
+            f"_{self._loader_version() or 'latest'}",
         )
         return f"{DOCKER_VOLUME_PREFIX}_{tag}"
 
@@ -150,11 +230,16 @@ class DockerTester:
         )
         return vol
 
-    def _get_loader_cache_dir(self) -> Path:
-        """Local cache: ~/.modkeel/loaders/<loader>/<mc_version>/"""
+    def _get_loader_cache_dir(self, loader_version: str) -> Path:
+        """Local cache: ~/.modkeel/loaders/<loader>/<mc_version>/<loader_version>/
+
+        Keyed by loader version too: a server installed for one -lv is never reused
+        for another.
+        """
         d = (
             MODKEEL_HOME / "loaders"
             / self.config.loader.lower() / self.config.mc_version
+            / loader_version
         )
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -221,18 +306,12 @@ class DockerTester:
 
     def _ensure_loader_installed(self) -> Optional[Path]:
         """Ensure the mod loader is installed in a local cache directory."""
-        cache_dir = self._get_loader_cache_dir()
-
-        if self._is_loader_installed(cache_dir):
-            print(f"  \u2705 Loader cached at {cache_dir}")
-            return cache_dir
-
         loader = self.config.loader.lower()
         profile = get_profile(loader)
         if not profile.get("installer_url_template"):
             return None
 
-        loader_version = get_known_version(loader, self.config.mc_version)
+        loader_version = self._loader_version()
         if not loader_version:
             display = profile["display_name"]
             logger.info(
@@ -241,6 +320,11 @@ class DockerTester:
                 display, self.config.mc_version,
             )
             return None
+
+        cache_dir = self._get_loader_cache_dir(loader_version)
+        if self._is_loader_installed(cache_dir):
+            print(f"  \u2705 Loader cached at {cache_dir}")
+            return cache_dir
 
         installer_dir = MODKEEL_HOME / "installers"
         installer_dir.mkdir(parents=True, exist_ok=True)
@@ -278,7 +362,7 @@ class DockerTester:
                         "-v", f"{cache_dir.resolve()}:/data",
                         "-w", "/data",
                         "--entrypoint", "java",
-                        "itzg/minecraft-server:java21",
+                        server_image(self.config.mc_version),
                         "-jar", "/installer.jar",
                         "--installServer", "/data",
                     ],
@@ -394,7 +478,7 @@ class DockerTester:
             "-v", f"{startup_path.resolve()}:/start.sh:ro",
             "-w", "/server",
             "--entrypoint", "/bin/sh",
-            "itzg/minecraft-server:java21",
+            server_image(self.config.mc_version),
             "/start.sh",
         ]
 
@@ -438,11 +522,18 @@ class DockerTester:
                 "-e", "EULA=TRUE",
                 "-e", f"TYPE={loader_type}",
                 "-e", f"VERSION={self.config.mc_version}",
+            ]
+            # Pin the loader version when there is one, or the image installs its latest
+            version_env = get_docker_version_env(self.config.loader)
+            loader_version = self._loader_version()
+            if version_env and loader_version:
+                cmd += ["-e", f"{version_env}={loader_version}"]
+            cmd += [
                 "-e", "REMOVE_OLD_MODS=TRUE",
                 "-v", f"{mods_dir.resolve()}:/mods:ro",
                 "-v", f"{volume_name}:/data",
             ]
-            cmd.append("itzg/minecraft-server:java21")
+            cmd.append(server_image(self.config.mc_version))
 
             try:
                 process = subprocess.Popen(
@@ -467,7 +558,7 @@ class DockerTester:
             finally:
                 self._kill_container(container_name)
 
-            if not result.get("is_loader_error"):
+            if not result.get("is_loader_error") or not result.get("retryable", True):
                 return result
 
             maven = get_maven_domain(self.config.loader) or "the download server"
@@ -532,12 +623,7 @@ class DockerTester:
                 for regex, explanation in DOCKER_LOADER_ERRORS:
                     if regex.search(line):
                         process.terminate()
-                        return {
-                            "passed": False,
-                            "error": f"[LOADER ERROR] {explanation}",
-                            "log_snippet": recent_lines[-5:],
-                            "is_loader_error": True,
-                        }
+                        return _loader_error(explanation, recent_lines)
 
                 if DOCKER_CLIENT_ONLY_PATTERN.search(line):
                     process.terminate()
@@ -597,12 +683,7 @@ class DockerTester:
         all_text = "\n".join(recent_lines)
         for regex, explanation in DOCKER_LOADER_ERRORS:
             if regex.search(all_text):
-                return {
-                    "passed": False,
-                    "error": f"[LOADER ERROR] {explanation}",
-                    "log_snippet": recent_lines[-5:],
-                    "is_loader_error": True,
-                }
+                return _loader_error(explanation, recent_lines)
 
         return {
             "passed": False,
@@ -694,11 +775,17 @@ class DockerTester:
         print(f"\U0001f433 DOCKER TEST: Testing {len(existing_jars)} mod(s) "
               f"in headless Minecraft server")
         print(f"{'='*80}")
+        requested = getattr(self.config, "loader_version", None)
+        if requested and requested != "0" and not is_explicit_loader_version(requested):
+            print(f"  \u26a0\ufe0f  Loader version '{requested}' is not a full version; "
+                  f"testing on {self._describe_loader()}")
+        print(f"  Server: Minecraft {self.config.mc_version} + {self._describe_loader()}")
 
         cache = DockerTestCache()
         jar_hash = DockerTestCache.compute_jar_set_hash(existing_jars)
         cached = cache.get(
-            jar_hash, self.config.mc_version, self.config.loader
+            jar_hash, self.config.mc_version, self.config.loader,
+            self._loader_version(),
         )
         if cached is not None:
             status = "PASSED" if cached else "FAILED"
@@ -721,6 +808,7 @@ class DockerTester:
             cache.set(
                 jar_hash, True,
                 self.config.mc_version, self.config.loader,
+                self._loader_version(),
             )
             return
 

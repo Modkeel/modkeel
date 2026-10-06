@@ -1,5 +1,10 @@
-"""`modkeel get`: one mod in one step. Modrinth build if there is one, else compile the best
-pre-filtered GitHub fork (needs a token and -lv)."""
+"""`modkeel get`: one mod in one step, through the resolver (modkeel/resolve.py).
+
+The mod is identified first (its Modrinth project, never an addon with a similar name), then
+the sources run in order: official build for the target, an older official build that still
+runs on it, a community fork compiled for it (needs a token and -lv). The path taken is
+printed; nothing that isn't the requested mod is ever downloaded.
+"""
 
 from typing import Optional
 
@@ -11,10 +16,11 @@ from modkeel.commands._shared import (
     BANNER,
     TAGLINE,
     console,
-    prefilter_forks,
+    docker_test_delivered,
+    print_related,
+    print_trail,
     require_valid_loader,
     resolve_github_token,
-    temp_pipeline,
 )
 from modkeel.config import ModkeelConfig
 from modkeel.constants import MODKEEL_VERSION
@@ -65,9 +71,9 @@ def get_command(
     ),
 ):
     """Find and download/compile a mod in one step."""
-    from modkeel.github import GitHubClient
     from modkeel.modrinth import ModrinthClient
-    from modkeel.validation import BranchValidator
+    from modkeel.resolve import ResolveContext, Resolver
+    from modkeel.sources import caveat_after_docker, identify_mod
 
     setup_logging()
 
@@ -87,7 +93,7 @@ def get_command(
         )
     )
 
-    # Lookups need no loader version; "0" is a placeholder until the compile step.
+    # "0" marks "no loader version given": lookups don't need one, compiling does.
     def make_config(token: Optional[str]) -> ModCompilerConfig:
         return ModCompilerConfig(
             mc_version=mc_version,
@@ -98,106 +104,44 @@ def get_command(
             instance_path=instance,
         )
 
-    # Step 1: Modrinth
+    def token_on_demand() -> Optional[str]:
+        """The fork strategy calls this; a token is asked for only when forks are needed."""
+        nonlocal github_token
+        if not github_token:
+            github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
+        return github_token
+
     config = make_config(github_token)
     modrinth = ModrinthClient(config)
-    result = modrinth.check_modrinth(query)
+    mod = identify_mod(query, modrinth)
+    if mod.project:
+        repo = f" - github.com/{mod.source_repo}" if mod.source_repo else ""
+        console.print(f"\n  Mod: [bold]{escape(mod.title)}[/bold] "
+                      f"({mod.project['slug']}){repo}")
 
-    if result:
-        jar = modrinth.download_modrinth_mod(result["slug"], mc_version, loader.lower())
-        if jar:
-            modrinth.download_modrinth_deps(result)
-            console.print(
-                f"\n[green]Done! {result['title']} "
-                f"v{result['version_number']} downloaded to "
-                f"{output_dir}/[/green]"
-            )
-            return
-        console.print(
-            "[yellow]Modrinth download failed, trying GitHub forks...[/yellow]"
-        )
+    ctx = ResolveContext(config=config, modrinth=modrinth,
+                         github_token=token_on_demand, make_config=make_config)
+    resolution = Resolver().resolve(mod, ctx)
+    print_trail(resolution.trail)
 
-    # Step 2: GitHub forks (prompt for a token if none was saved)
-    if not github_token:
-        github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
-        if github_token:
-            config = make_config(github_token)
-    if not github_token:
-        modrinth_status = (
-            f"Modrinth unavailable ({escape(modrinth.last_error)})."
-            if modrinth.last_error else "Not found on Modrinth."
-        )
+    delivered = resolution.delivered
+    if not delivered:
+        print_related(mod)
         console.print(
-            f"\n[red]{modrinth_status}[/red] "
-            "Set a GitHub token to search forks:\n"
-            "  [bold]modkeel token --set ghp_YOUR_TOKEN[/bold]"
+            f"\n[red]No build of {escape(mod.title)} for MC {mc_version} + "
+            f"{loader.capitalize()} found.[/red]"
         )
         raise typer.Exit(1)
 
-    console.print("\n[bold]Searching GitHub forks...[/bold]")
-    github = GitHubClient(config)
-    forks = github.search_compatible_repos(query, query, False)
+    if docker_test:
+        docker_test_delivered(delivered, make_config(github_token))
 
-    if not forks:
-        console.print(
-            f"[red]Not found anywhere.[/red] No Modrinth results and "
-            f"no GitHub forks for '{query}'."
-        )
-        raise typer.Exit(1)
-
-    validated_forks = prefilter_forks(github, BranchValidator(github, config), forks)
-    if not validated_forks:
-        console.print(
-            f"[red]No compatible forks found[/red] for MC {mc_version} + {loader}."
-        )
-        raise typer.Exit(1)
-
-    best_fork = validated_forks[0]
-    best_branch = best_fork["_best_branch"]
-    fork_name = best_fork["fork"]["full_name"]
-
+    if "docker_server" in delivered.evidence and delivered.caveat:
+        console.print(f"\n[yellow]Note:[/yellow] "
+                      f"{escape(caveat_after_docker(delivered.caveat, mc_version))}")
+    elif delivered.caveat:
+        console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat)}")
     console.print(
-        f"\n  Best fork: [cyan]{fork_name}[/cyan] "
-        f"branch [blue]{best_branch.name}[/blue] "
-        f"(MC {best_branch.minecraft_version or '?'})"
-    )
-
-    # Step 3: compile (needs the real loader version)
-    if not loader_version:
-        console.print(
-            "\n[red]Fork found but [bold]-lv LOADER_VERSION[/bold] "
-            "is required to compile.[/red]"
-        )
-        raise typer.Exit(1)
-
-    full_config = ModCompilerConfig(
-        mc_version=mc_version,
-        loader=loader.lower(),
-        loader_version=loader_version,
-        github_token=github_token,
-        output_dir=output_dir,
-        instance_path=instance,
-        docker_test=docker_test,
-    )
-
-    with temp_pipeline(full_config) as pipeline:
-        comp_result = pipeline.clone_and_compile(
-            f"https://github.com/{fork_name}",
-            specific_branch=best_branch.name,
-            skip_modrinth=True,
-        )
-
-        if not comp_result.success:
-            console.print(f"\n[red]Compilation failed:[/red] {comp_result.error}")
-            raise typer.Exit(1)
-
-        if docker_test:
-            pipeline.results = [comp_result]
-            pipeline.docker.test_mods_in_docker(pipeline.results)
-            comp_result = pipeline.results[0]
-
-    console.print(
-        f"\n[green]Done! {comp_result.mod_name} "
-        f"v{comp_result.mod_version} compiled to "
-        f"{output_dir}/[/green]"
+        f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
+        f"{delivered.verb} to {output_dir}/[/green]"
     )

@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -263,14 +263,21 @@ class ModrinthClient:
 
     def download_modrinth_deps(
         self, modrinth_result: Dict, _seen: Optional[set] = None,
-    ) -> None:
-        """Recursively download required dependencies for a Modrinth mod."""
+    ) -> List[Path]:
+        """Recursively download required dependencies for a Modrinth mod.
+
+        Returns the dependency JARs now in the output directory (downloaded or already
+        there), so callers can test the mod together with them. A required dependency with
+        no build for the target is reported, not skipped silently: the mod won't load
+        without it.
+        """
         if _seen is None:
             _seen = set()
+        saved: List[Path] = []
 
         dep_ids = modrinth_result.get("required_deps", [])
         if not dep_ids:
-            return
+            return saved
 
         base_url = "https://api.modrinth.com/v2"
         headers = {"User-Agent": MODRINTH_USER_AGENT}
@@ -301,6 +308,7 @@ class ModrinthClient:
                     )
                 )
                 if existing:
+                    saved.extend(existing)
                     continue
 
                 vr = requests.get(
@@ -312,10 +320,8 @@ class ModrinthClient:
                     headers=headers, timeout=15,
                 )
                 if not vr.ok or not vr.json():
-                    logger.debug(
-                        "No Modrinth version for dep %s (%s + %s)",
-                        slug, loader, mc,
-                    )
+                    print(f"    \u26a0\ufe0f  Required dependency {title} has no "
+                          f"{loader} build for MC {mc}: the mod won't load without it")
                     continue
 
                 versions = vr.json()
@@ -341,6 +347,7 @@ class ModrinthClient:
                 fname = primary["filename"]
                 dest = self.config.output_dir / fname
                 dest.write_bytes(dl.content)
+                saved.append(dest)
                 print(f"    \U0001f4be Saved: {dest}")
 
                 if self.config.mods_path:
@@ -355,13 +362,15 @@ class ModrinthClient:
                     and d.get("project_id")
                 ]
                 if sub_deps:
-                    self.download_modrinth_deps(
+                    saved.extend(self.download_modrinth_deps(
                         {"required_deps": sub_deps}, _seen,
-                    )
+                    ))
 
             except Exception as e:
                 logger.debug("Failed to download dep %s: %s",
                              project_id, e)
+
+        return saved
 
     def download_modrinth_mod(self, slug: str, mc_version: str,
                               loader: str) -> Optional[Path]:
@@ -425,3 +434,133 @@ class ModrinthClient:
               f"MC {mc_version}")
         print(f"       Manual download: https://modrinth.com/mod/{slug}")
         return None
+
+    # ------------------------------------------------------------------
+    # Project identity (used by the resolver in modkeel/resolve.py)
+    # ------------------------------------------------------------------
+
+    def find_project(self, query: str) -> Tuple[Optional[Dict], List[Dict]]:
+        """The Modrinth project the user means by `query`, and the near misses.
+
+        Searched with no game-version or loader filter: the mod is identified first, its
+        builds for the target are looked up afterwards. Filtering by version before knowing
+        which mod was meant is what let an addon ("Create: The Factory Must Grow") stand in
+        for a mod with no build for the target ("Create").
+
+        A hit is the project when the query equals its slug or title (ignoring case, spaces
+        and punctuation, and with "Title (ALIAS)" matching either part); among several, the
+        most downloaded wins. Otherwise only a near-identical name counts (fuzzy >= 85).
+        Returns (None, hits) when nothing qualifies, so callers can show the near misses.
+        Sets last_error when Modrinth could not be asked.
+        """
+        self.last_error = None
+        search_query = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', query)
+        try:
+            resp = requests.get(
+                "https://api.modrinth.com/v2/search",
+                params={"query": search_query, "facets": '[["project_type:mod"]]',
+                        "limit": 10},
+                headers={"User-Agent": MODRINTH_USER_AGENT},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                self.last_error = f"HTTP {resp.status_code}"
+                return None, []
+            hits = resp.json().get("hits", [])
+        except (requests.RequestException, ValueError) as e:
+            self.last_error = "timed out" if isinstance(e, requests.Timeout) else _short_error(e)
+            return None, []
+
+        wanted = _norm_name(query)
+        exact = [h for h in hits if wanted in _name_keys(h)]
+        if exact:
+            best = max(exact, key=lambda h: h.get("downloads", 0))
+        else:
+            scored = [
+                (max(fuzzy_score(query, h.get("slug", "")),
+                     fuzzy_score(query, h.get("title", ""))), h)
+                for h in hits
+            ]
+            score, best = max(scored, key=lambda s: s[0], default=(0.0, None))
+            if score < 85.0:
+                best = None
+        others = [h for h in hits if h is not best]
+        return best, others
+
+    def find_project_by_repo(self, owner: str, repo: str) -> Optional[Dict]:
+        """The Modrinth project whose source is github.com/owner/repo, or None.
+
+        For `compile`, which knows the repo rather than a name: searched by repo name with
+        no version filter, kept only when the project's source_url is that repo.
+        """
+        project, others = self.find_project(repo)
+        hits = [h for h in [project, *others] if h]
+        if not hits:
+            return None
+        matched = self._filter_hits_by_source(
+            hits, f"{owner}/{repo}", {"User-Agent": MODRINTH_USER_AGENT})
+        matched = [h for h in matched if h.get("_source_match")]
+        # One repo can publish several projects: the one named like the repo, then the
+        # most downloaded.
+        named = _norm_name(repo)
+        return max(matched, key=lambda h: (named in _name_keys(h), h.get("downloads", 0)),
+                   default=None)
+
+    def project_versions(self, project_id: str, loader: str,
+                         game_version: Optional[str] = None) -> Optional[List[Dict]]:
+        """A project's versions for `loader` (and `game_version` when given), newest first.
+
+        None when Modrinth could not answer (last_error says why); [] when it has none.
+        """
+        self.last_error = None
+        params = {"loaders": json.dumps([loader])}
+        if game_version:
+            params["game_versions"] = json.dumps([game_version])
+        try:
+            resp = requests.get(
+                f"https://api.modrinth.com/v2/project/{project_id}/version",
+                params=params, headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=15,
+            )
+            if resp.status_code != 200:
+                self.last_error = f"HTTP {resp.status_code}"
+                return None
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
+            self.last_error = "timed out" if isinstance(e, requests.Timeout) else _short_error(e)
+            return None
+
+    @staticmethod
+    def source_repo_of(project: Dict) -> Optional[str]:
+        """"owner/repo" of the project's GitHub source, when Modrinth lists one."""
+        match = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", project.get("source_url") or "")
+        if not match:
+            return None
+        return f"{match.group(1)}/{match.group(2).removesuffix('.git')}"
+
+    def fetch_project(self, project_id: str) -> Optional[Dict]:
+        """Full project record (search hits lack source_url). None on any failure."""
+        try:
+            resp = requests.get(
+                f"https://api.modrinth.com/v2/project/{project_id}",
+                headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=15,
+            )
+            return resp.json() if resp.status_code == 200 else None
+        except (requests.RequestException, ValueError):
+            return None
+
+
+def _norm_name(name: str) -> str:
+    """'Forge Config API Port' / 'forge-config-api-port' -> 'forgeconfigapiport'."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _name_keys(hit: Dict) -> set:
+    """Normalized names a project answers to: slug, title, and both halves of
+    'Title (ALIAS)' (e.g. 'YetAnotherConfigLib (YACL)')."""
+    title = hit.get("title", "")
+    keys = {_norm_name(hit.get("slug", "")), _norm_name(title)}
+    paren = re.match(r"^(.*?)\s*\((.+)\)\s*$", title)
+    if paren:
+        keys |= {_norm_name(paren.group(1)), _norm_name(paren.group(2))}
+    keys.discard("")
+    return keys

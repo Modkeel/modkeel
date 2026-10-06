@@ -53,6 +53,7 @@ class GitHubClient:
 
     def __init__(self, config: ModCompilerConfig):
         self.config = config
+        self.search_denied = 0
 
     def get_repo_info(self, owner: str, repo: str) -> Optional[Dict]:
         """Fetch repository information from GitHub API."""
@@ -83,6 +84,9 @@ class GitHubClient:
         Minecraft version.
         """
         print(f"  \U0001f374 Searching for community forks and ports with MC {self.config.mc_version}...")
+        # Searches GitHub refused (403: rate limit or no access), so "no forks found" can be
+        # told apart from "GitHub would not answer".
+        self.search_denied = 0
 
         searches = [
             f'{original_repo} {self.config.mc_version} {self.config.loader} fork:only',
@@ -111,6 +115,7 @@ class GitHubClient:
                 print(f"       Status: {response.status_code}")
 
                 if response.status_code == 403:
+                    self.search_denied += 1
                     print("       \u26a0\ufe0f  Rate limit hit or forbidden")
                     remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
                     print(f"       Rate limit remaining: {remaining}")
@@ -208,6 +213,7 @@ class GitHubClient:
                 response = requests.get(url, params=params, headers=headers, timeout=15)
 
                 if response.status_code == 403:
+                    self.search_denied += 1
                     remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
                     print(f"       \u26a0\ufe0f  Rate limit hit (remaining: {remaining})")
                     continue
