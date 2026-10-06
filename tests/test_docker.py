@@ -492,6 +492,34 @@ class TestAnalyzeServerLogs(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertLessEqual(len(result["log_snippet"]), 5)
 
+    def test_client_only_mod_on_modern_neoforge(self):
+        """Controlify on NeoForge 1.21.10 (real log, cli-e2e): it loads, then dies on a
+        client class. Inconclusive client-only, not a failed mod (FATAL comes later)."""
+        compiler = make_compiler()
+        proc = self._mock_process([
+            "[18:15:13] [modloading-worker-0/ERROR] [ne.ne.fm.ja.FMLModContainer/LOADING]: "
+            "Failed to create mod instance. ModID: controlify, class "
+            "dev.isxander.controlify.ControlifyBootstrap",
+            "Caused by: java.lang.ClassNotFoundException: net.minecraft.client.gui.screens.Screen",
+            "[18:15:13] [main/FATAL] [ne.ne.ne.se.lo.ServerModLoader/]: Crash report saved to "
+            "./crash-reports/crash-2026-10-06_18.15.13-fml.txt",
+        ])
+        result = compiler._analyze_server_logs(proc)
+        self.assertFalse(result["passed"])
+        self.assertTrue(result.get("is_client_only"))
+
+    def test_client_only_pattern_variants(self):
+        from modkeel.docker import DOCKER_CLIENT_ONLY_PATTERN as pat
+        for line in (
+            "java.lang.NoClassDefFoundError: net/minecraft/client/gui/screens/Screen",
+            "Caused by: java.lang.ClassNotFoundException: net.minecraft.client.Minecraft",
+            "Attempted to load class net/minecraft/client/... for invalid dist DEDICATED_SERVER",
+        ):
+            self.assertTrue(pat.search(line), line)
+        # a missing server-side class is a real failure, not a client-only mod
+        self.assertIsNone(pat.search(
+            "java.lang.NoClassDefFoundError: net/minecraft/world/level/Level"))
+
     def test_process_ends_without_success(self):
         compiler = make_compiler()
         proc = self._mock_process(["just some output"])
