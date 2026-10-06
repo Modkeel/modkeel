@@ -343,6 +343,19 @@ class TestStatus:
         assert "ghp_****ghij" in result.output
         assert "installed" in result.output
 
+    def test_cached_loader_per_loader_version(self, isolated):
+        install = isolated / "loaders" / "neoforge" / "1.21.10" / "21.10.64"
+        install.mkdir(parents=True)
+        (install / "run.sh").write_text("")
+        (isolated / "loaders" / "neoforge" / "1.21.10" / "21.10.63").mkdir()
+        result = invoke("status")
+        assert "21.10.64" in result.output and "installed" in result.output
+        assert "partial" in result.output
+
+    def test_docker_test_cache_count(self, isolated):
+        (isolated / "docker_test_cache.json").write_text('{"a": {}, "b": {}}')
+        assert "2 entries" in invoke("status").output
+
 
 class TestRecommend:
     def test_missing_directory(self, tmp_path):

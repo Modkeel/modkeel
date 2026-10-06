@@ -16,11 +16,13 @@ import requests
 from modkeel.loaders import (
     KNOWN_LOADER_VERSIONS,
     get_docker_server_type,
+    get_docker_version_env,
     get_installer_filename,
     get_installer_url,
     get_known_version,
     get_maven_domain,
     get_profile,
+    is_explicit_loader_version,
 )
 from modkeel.models import CompilationResult, DockerTestCache, ModCompilerConfig
 from modkeel.constants import MODKEEL_HOME
@@ -105,6 +107,23 @@ class DockerTester:
     def __init__(self, config: ModCompilerConfig):
         self.config = config
 
+    def _loader_version(self) -> Optional[str]:
+        """Loader version the test server runs, used by every cache and container below.
+
+        The user's -lv wins when it is a full version, so the server matches the target
+        the mods were built for. Otherwise the known version for this MC release, and
+        None when there is none: the fallback image then installs its latest loader.
+        """
+        requested = getattr(self.config, "loader_version", None)
+        if is_explicit_loader_version(requested):
+            return requested
+        return get_known_version(self.config.loader, self.config.mc_version)
+
+    def _describe_loader(self) -> str:
+        """'NeoForge 21.10.64' or 'NeoForge (latest)', for log lines."""
+        display = get_profile(self.config.loader)["display_name"]
+        return f"{display} {self._loader_version() or '(latest)'}"
+
     def check_docker_available(self) -> bool:
         """Check if Docker daemon is accessible."""
         try:
@@ -134,10 +153,15 @@ class DockerTester:
             pass
 
     def _get_docker_volume_name(self) -> str:
-        """Deterministic volume name based on MC version + loader."""
-        tag = (
+        """Deterministic volume name: MC version + loader + loader version.
+
+        One volume per loader version, so switching -lv does not make the image
+        reinstall over (or reuse) another version's server files.
+        """
+        tag = re.sub(
+            r"[^A-Za-z0-9_-]", "_",
             f"{self.config.mc_version}_{self.config.loader}"
-            .replace(".", "_")
+            f"_{self._loader_version() or 'latest'}",
         )
         return f"{DOCKER_VOLUME_PREFIX}_{tag}"
 
@@ -150,11 +174,16 @@ class DockerTester:
         )
         return vol
 
-    def _get_loader_cache_dir(self) -> Path:
-        """Local cache: ~/.modkeel/loaders/<loader>/<mc_version>/"""
+    def _get_loader_cache_dir(self, loader_version: str) -> Path:
+        """Local cache: ~/.modkeel/loaders/<loader>/<mc_version>/<loader_version>/
+
+        Keyed by loader version too: a server installed for one -lv is never reused
+        for another.
+        """
         d = (
             MODKEEL_HOME / "loaders"
             / self.config.loader.lower() / self.config.mc_version
+            / loader_version
         )
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -221,18 +250,12 @@ class DockerTester:
 
     def _ensure_loader_installed(self) -> Optional[Path]:
         """Ensure the mod loader is installed in a local cache directory."""
-        cache_dir = self._get_loader_cache_dir()
-
-        if self._is_loader_installed(cache_dir):
-            print(f"  \u2705 Loader cached at {cache_dir}")
-            return cache_dir
-
         loader = self.config.loader.lower()
         profile = get_profile(loader)
         if not profile.get("installer_url_template"):
             return None
 
-        loader_version = get_known_version(loader, self.config.mc_version)
+        loader_version = self._loader_version()
         if not loader_version:
             display = profile["display_name"]
             logger.info(
@@ -241,6 +264,11 @@ class DockerTester:
                 display, self.config.mc_version,
             )
             return None
+
+        cache_dir = self._get_loader_cache_dir(loader_version)
+        if self._is_loader_installed(cache_dir):
+            print(f"  \u2705 Loader cached at {cache_dir}")
+            return cache_dir
 
         installer_dir = MODKEEL_HOME / "installers"
         installer_dir.mkdir(parents=True, exist_ok=True)
@@ -438,6 +466,13 @@ class DockerTester:
                 "-e", "EULA=TRUE",
                 "-e", f"TYPE={loader_type}",
                 "-e", f"VERSION={self.config.mc_version}",
+            ]
+            # Pin the loader version when there is one, or the image installs its latest
+            version_env = get_docker_version_env(self.config.loader)
+            loader_version = self._loader_version()
+            if version_env and loader_version:
+                cmd += ["-e", f"{version_env}={loader_version}"]
+            cmd += [
                 "-e", "REMOVE_OLD_MODS=TRUE",
                 "-v", f"{mods_dir.resolve()}:/mods:ro",
                 "-v", f"{volume_name}:/data",
@@ -694,11 +729,17 @@ class DockerTester:
         print(f"\U0001f433 DOCKER TEST: Testing {len(existing_jars)} mod(s) "
               f"in headless Minecraft server")
         print(f"{'='*80}")
+        requested = getattr(self.config, "loader_version", None)
+        if requested and requested != "0" and not is_explicit_loader_version(requested):
+            print(f"  \u26a0\ufe0f  Loader version '{requested}' is not a full version; "
+                  f"testing on {self._describe_loader()}")
+        print(f"  Server: Minecraft {self.config.mc_version} + {self._describe_loader()}")
 
         cache = DockerTestCache()
         jar_hash = DockerTestCache.compute_jar_set_hash(existing_jars)
         cached = cache.get(
-            jar_hash, self.config.mc_version, self.config.loader
+            jar_hash, self.config.mc_version, self.config.loader,
+            self._loader_version(),
         )
         if cached is not None:
             status = "PASSED" if cached else "FAILED"
@@ -721,6 +762,7 @@ class DockerTester:
             cache.set(
                 jar_hash, True,
                 self.config.mc_version, self.config.loader,
+                self._loader_version(),
             )
             return
 

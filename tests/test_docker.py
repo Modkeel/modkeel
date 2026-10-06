@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mod_auto_compiler import ModAutoCompiler
-from modkeel.docker import _container_name
+from modkeel.docker import DockerTester, _container_name
 from modkeel.models import (
     ModCompilerConfig, CompilationResult, DockerTestCache, FailureType,
 )
@@ -22,11 +22,13 @@ def make_compiler(
     mc_version: str = "1.21.10",
     loader: str = "neoforge",
     docker_timeout: int = 180,
+    loader_version: str = "0",
 ) -> ModAutoCompiler:
     """Create a compiler with mock config for testing."""
     config = MagicMock(spec=ModCompilerConfig)
     config.mc_version = mc_version
     config.loader = loader.lower()
+    config.loader_version = loader_version
     config.strict_version = False
     config.github_token = None
     config.github_headers = {}
@@ -329,6 +331,21 @@ class TestDockerTestCache(unittest.TestCase):
         cache2 = DockerTestCache()
         self.assertFalse(cache2.get("persist", "1.21.10", "neoforge"))
 
+    def test_cache_invalidation_loader_version(self):
+        """A result on one loader build is not reused for another."""
+        cache = DockerTestCache()
+        cache.set("abc123", True, "1.21.10", "neoforge", "21.10.63")
+        self.assertTrue(cache.get("abc123", "1.21.10", "neoforge", "21.10.63"))
+        self.assertIsNone(cache.get("abc123", "1.21.10", "neoforge", "21.10.64"))
+        self.assertIsNone(cache.get("abc123", "1.21.10", "neoforge"))
+
+    def test_legacy_entry_without_loader_version(self):
+        """Entries written before loader versions were keyed match only None."""
+        cache = DockerTestCache()
+        cache.set("old", True, "1.21.10", "neoforge")
+        self.assertTrue(cache.get("old", "1.21.10", "neoforge"))
+        self.assertIsNone(cache.get("old", "1.21.10", "neoforge", "21.10.64"))
+
     def test_corrupted_cache_handled(self):
         """Corrupted JSON doesn't crash, returns empty cache."""
         DockerTestCache.CACHE_FILE.write_text("{bad json", encoding="utf-8")
@@ -614,3 +631,77 @@ class TestDataStructures(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================================
+# LOADER VERSION (-lv) IN DOCKER TESTS
+# ============================================================================
+
+def make_tester(mc_version: str, loader: str, loader_version: str) -> DockerTester:
+    """DockerTester on a real config, so loader_version behaves as the CLI sets it."""
+    return DockerTester(ModCompilerConfig(mc_version, loader, loader_version))
+
+
+def fallback_cmd(tester: DockerTester) -> list:
+    """The docker run command the in-container fallback launches."""
+    proc = MagicMock()
+    proc.stdout = iter(['Done (5.0s)! For help, type "help"\n'])
+    proc.poll.return_value = None
+    with patch("modkeel.docker.subprocess.run", return_value=MagicMock(returncode=0)), \
+            patch("modkeel.docker.subprocess.Popen", return_value=proc) as popen:
+        tester._run_docker_server_fallback(Path("/tmp/fake"), "X")
+    return popen.call_args[0][0]
+
+
+class TestLoaderVersion(unittest.TestCase):
+    """The server runs the loader version asked for, not the image's latest."""
+
+    def test_explicit_version_wins_over_known_table(self):
+        self.assertEqual(
+            make_tester("1.21.4", "neoforge", "21.4.100")._loader_version(), "21.4.100")
+
+    def test_sentinel_and_fragment_fall_back_to_known_table(self):
+        for lv in ("0", "64", ""):
+            self.assertEqual(
+                make_tester("1.21.4", "neoforge", lv)._loader_version(), "21.4.156")
+
+    def test_no_version_known_means_latest(self):
+        self.assertIsNone(make_tester("1.21.10", "neoforge", "0")._loader_version())
+
+    def test_fallback_pins_neoforge_version(self):
+        cmd = fallback_cmd(make_tester("1.21.10", "neoforge", "21.10.64"))
+        self.assertIn("NEOFORGE_VERSION=21.10.64", cmd)
+
+    def test_fallback_pins_fabric_loader_version(self):
+        cmd = fallback_cmd(make_tester("1.21.10", "fabric", "0.19.5"))
+        self.assertIn("FABRIC_LOADER_VERSION=0.19.5", cmd)
+
+    def test_fallback_without_version_lets_image_choose(self):
+        cmd = fallback_cmd(make_tester("1.21.10", "neoforge", "0"))
+        self.assertFalse(any(a.startswith("NEOFORGE_VERSION=") for a in cmd))
+
+    def test_quilt_version_never_sent_as_fabric_version(self):
+        cmd = fallback_cmd(make_tester("1.21.10", "quilt", "0.29.1"))
+        self.assertFalse(any("LOADER_VERSION=" in a for a in cmd))
+
+    def test_volume_and_cache_dir_keyed_by_loader_version(self):
+        a = make_tester("1.21.10", "neoforge", "21.10.63")
+        b = make_tester("1.21.10", "neoforge", "21.10.64")
+        self.assertNotEqual(a._get_docker_volume_name(), b._get_docker_volume_name())
+        self.assertRegex(b._get_docker_volume_name(), r"^[A-Za-z0-9_-]+$")
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("modkeel.docker.MODKEEL_HOME", Path(tmp)):
+            self.assertEqual(
+                b._get_loader_cache_dir("21.10.64"),
+                Path(tmp) / "loaders" / "neoforge" / "1.21.10" / "21.10.64",
+            )
+
+    def test_direct_install_uses_requested_version(self):
+        """NeoForge installer is fetched for -lv, not for the known-table entry."""
+        tester = make_tester("1.21.4", "neoforge", "21.4.100")
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("modkeel.docker.MODKEEL_HOME", Path(tmp)), \
+                patch.object(DockerTester, "_download_installer_with_resume",
+                             return_value=False) as download:
+            self.assertIsNone(tester._ensure_loader_installed())
+        self.assertIn("neoforge-21.4.100-installer.jar", download.call_args[0][0])

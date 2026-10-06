@@ -191,21 +191,30 @@ class DockerTestCache:
         combined = hashlib.sha256("|".join(sorted(file_hashes)).encode())
         return combined.hexdigest()
 
-    def get(self, jar_hash: str, mc_version: str, loader: str) -> Optional[bool]:
-        """Return cached pass/fail or None if not cached / invalidated."""
+    def get(self, jar_hash: str, mc_version: str, loader: str,
+            loader_version: Optional[str] = None) -> Optional[bool]:
+        """Return cached pass/fail or None if not cached / invalidated.
+
+        loader_version is part of the key: a result on one loader build says nothing
+        about another (None means "the image's latest", and matches only None).
+        """
         entry = self._data.get(jar_hash)
         if entry is None:
             return None
         if entry.get("mc_version") != mc_version or entry.get("loader") != loader:
             return None
+        if entry.get("loader_version") != loader_version:
+            return None
         return entry.get("passed")
 
-    def set(self, jar_hash: str, passed: bool, mc_version: str, loader: str) -> None:
+    def set(self, jar_hash: str, passed: bool, mc_version: str, loader: str,
+            loader_version: Optional[str] = None) -> None:
         """Store a Docker test result."""
         self._data[jar_hash] = {
             "passed": passed,
             "mc_version": mc_version,
             "loader": loader,
+            "loader_version": loader_version,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._save()
