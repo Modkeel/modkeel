@@ -12,10 +12,22 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mod_auto_compiler import ModAutoCompiler
-from modkeel.docker import DockerTester, _container_name
+from modkeel.docker import DockerTester, _container_name, _java_from_version_number, server_image
 from modkeel.models import (
     ModCompilerConfig, CompilationResult, DockerTestCache, FailureType,
 )
+
+
+_no_metadata = patch("modkeel.mappings.java_major_version", return_value=None)
+
+
+def setUpModule():
+    """No test here reaches Mojang: the Java version comes from the version number."""
+    _no_metadata.start()
+
+
+def tearDownModule():
+    _no_metadata.stop()
 
 
 def make_compiler(
@@ -705,3 +717,63 @@ class TestLoaderVersion(unittest.TestCase):
                              return_value=False) as download:
             self.assertIsNone(tester._ensure_loader_installed())
         self.assertIn("neoforge-21.4.100-installer.jar", download.call_args[0][0])
+
+
+# ============================================================================
+# JAVA RUNTIME PER MINECRAFT VERSION
+# ============================================================================
+
+class TestServerImage(unittest.TestCase):
+    """The server image's Java matches what the Minecraft version needs."""
+
+    def test_from_mojang_metadata(self):
+        for java, image in ((25, "java25"), (21, "java21"), (17, "java17"), (8, "java8"),
+                            (12, "java16"), (99, "java25")):
+            with patch("modkeel.mappings.java_major_version", return_value=java):
+                self.assertEqual(server_image("x"), f"itzg/minecraft-server:{image}", java)
+
+    def test_fallback_from_version_number(self):
+        cases = {"26.3": 25, "26.1": 25, "1.21.10": 21, "1.20.5": 21, "1.20.4": 17,
+                 "1.18": 17, "1.17.1": 16, "1.16.5": 8, "25w31a": 25}
+        for mc, java in cases.items():
+            self.assertEqual(_java_from_version_number(mc), java, mc)
+            self.assertEqual(server_image(mc), f"itzg/minecraft-server:java{java}", mc)
+
+    def test_java_major_version_reads_metadata(self):
+        _no_metadata.stop()
+        try:
+            from modkeel.mappings import java_major_version  # the real one, not the patch
+
+            java_major_version.cache_clear()
+            with patch("modkeel.mappings._version_details",
+                       return_value={"javaVersion": {"majorVersion": 25}}):
+                self.assertEqual(java_major_version("26.3"), 25)
+            java_major_version.cache_clear()
+            with patch("modkeel.mappings._version_details", return_value=None):
+                self.assertIsNone(java_major_version("nope"))
+            java_major_version.cache_clear()
+        finally:
+            _no_metadata.start()
+
+    def test_fallback_container_uses_the_versions_java(self):
+        cmd = fallback_cmd(make_tester("26.3", "fabric", "0.19.5"))
+        self.assertIn("itzg/minecraft-server:java25", cmd)
+        cmd = fallback_cmd(make_tester("1.21.10", "fabric", "0.19.5"))
+        self.assertIn("itzg/minecraft-server:java21", cmd)
+
+    @patch("modkeel.docker.time.sleep")
+    @patch("modkeel.docker.subprocess.Popen")
+    @patch("modkeel.docker.subprocess.run")
+    def test_java_mismatch_is_not_retried(self, mock_run, mock_popen, mock_sleep):
+        """A wrong runtime fails identically every time: report it once, no CDN blame."""
+        mock_run.return_value = MagicMock(returncode=0)
+        proc = MagicMock()
+        proc.stdout = iter(["java.lang.UnsupportedClassVersionError: Main has been "
+                            "compiled by a more recent version\n"])
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        result = make_compiler(loader="fabric")._run_docker_server(Path("/tmp/fake"))
+        self.assertTrue(result["is_loader_error"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(mock_popen.call_count, 1)
+        mock_sleep.assert_not_called()

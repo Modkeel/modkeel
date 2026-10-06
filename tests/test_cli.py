@@ -423,6 +423,22 @@ class TestGet:
         assert result.exit_code == 0, result.output
         assert seen["jars"] == ["jei.jar", "dep.jar"]
 
+    def test_note_reflects_a_passed_docker_test(self):
+        def docker(self, results):
+            results[0].docker_test_passed = True
+
+        with patched(*modrinth(project=CREATE,
+                               all_versions=[mr_version("6.0.9", ["1.21.9"],
+                                                        filename="create.jar", deps=())]),
+                     patch("modkeel.sources._download", fake_download),
+                     patch("modkeel.sources.validate_jar",
+                           return_value=(True, "create", "6.0.9", "ok")),
+                     patch("modkeel.sources._linkage_rejection", return_value=None),
+                     patch("modkeel.docker.DockerTester.test_mods_in_docker", docker)):
+            result = invoke("get", "Create", "-m", "1.21.10", "--docker-test")
+        assert "Built for MC 1.21.9. A headless MC 1.21.10 server booted with it" in result.output
+        assert "before relying on it" not in result.output
+
     def test_invalid_loader(self):
         result = invoke("get", "JEI", "-m", "1.21.1", "-l", "rift")
         assert result.exit_code == 1 and "Invalid loader 'rift'" in result.output

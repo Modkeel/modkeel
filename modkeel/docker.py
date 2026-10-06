@@ -79,6 +79,51 @@ DOCKER_LOADER_ERRORS = [
     ),
 ]
 
+# Loader errors that fail the same way on every attempt: retrying them only wastes minutes,
+# and they are not the download server's fault.
+DOCKER_DETERMINISTIC_LOADER_ERRORS = {
+    "Java module incompatibility (wrong JVM version for this loader)",
+    "Class file version mismatch (loader needs a different Java version)",
+}
+
+# Java runtimes published as itzg/minecraft-server:java<N> images.
+DOCKER_JAVA_IMAGES = (8, 11, 16, 17, 21, 25)
+DOCKER_IMAGE = "itzg/minecraft-server"
+
+
+def _java_from_version_number(mc_version: str) -> int:
+    """Java a Minecraft version needs, from its number alone (when Mojang's metadata is
+    unreachable): 26.x -> 25, 1.20.5+ -> 21, 1.18+ -> 17, 1.17 -> 16, older -> 8.
+    Snapshots and other unparsable ids get the newest runtime."""
+    try:
+        parts = tuple(int(p) for p in mc_version.split("."))
+    except ValueError:
+        return DOCKER_JAVA_IMAGES[-1]
+    if parts[0] >= 26:
+        return 25
+    if parts >= (1, 20, 5):
+        return 21
+    if parts >= (1, 18):
+        return 17
+    if parts >= (1, 17):
+        return 16
+    return 8
+
+
+def server_image(mc_version: str) -> str:
+    """The itzg/minecraft-server image whose Java runs this Minecraft version.
+
+    Mojang's metadata decides the Java version (fallback: the version number). The exact
+    runtime is used when an image exists for it, else the nearest newer one: old loaders
+    (Forge on Java 8) break on newer runtimes, new game jars refuse older ones.
+    """
+    from modkeel.mappings import java_major_version
+
+    java = java_major_version(mc_version) or _java_from_version_number(mc_version)
+    tag = next((j for j in DOCKER_JAVA_IMAGES if j >= java), DOCKER_JAVA_IMAGES[-1])
+    return f"{DOCKER_IMAGE}:java{tag}"
+
+
 DOCKER_SERVER_STARTING_PATTERN = re.compile(
     r"Starting minecraft server|ModLauncher running|"
     r"Launching wrapped minecraft"
@@ -89,6 +134,17 @@ DOCKER_INSTALL_MAX_RETRIES = 5
 
 # Backwards-compatible alias
 NEOFORGE_VERSIONS = KNOWN_LOADER_VERSIONS.get("neoforge", {})
+
+
+def _loader_error(explanation: str, recent_lines: List[str]) -> dict:
+    """Result for a loader/infrastructure failure; deterministic ones are not retried."""
+    return {
+        "passed": False,
+        "error": f"[LOADER ERROR] {explanation}",
+        "log_snippet": recent_lines[-5:],
+        "is_loader_error": True,
+        "retryable": explanation not in DOCKER_DETERMINISTIC_LOADER_ERRORS,
+    }
 
 
 def _container_name() -> str:
@@ -306,7 +362,7 @@ class DockerTester:
                         "-v", f"{cache_dir.resolve()}:/data",
                         "-w", "/data",
                         "--entrypoint", "java",
-                        "itzg/minecraft-server:java21",
+                        server_image(self.config.mc_version),
                         "-jar", "/installer.jar",
                         "--installServer", "/data",
                     ],
@@ -422,7 +478,7 @@ class DockerTester:
             "-v", f"{startup_path.resolve()}:/start.sh:ro",
             "-w", "/server",
             "--entrypoint", "/bin/sh",
-            "itzg/minecraft-server:java21",
+            server_image(self.config.mc_version),
             "/start.sh",
         ]
 
@@ -477,7 +533,7 @@ class DockerTester:
                 "-v", f"{mods_dir.resolve()}:/mods:ro",
                 "-v", f"{volume_name}:/data",
             ]
-            cmd.append("itzg/minecraft-server:java21")
+            cmd.append(server_image(self.config.mc_version))
 
             try:
                 process = subprocess.Popen(
@@ -502,7 +558,7 @@ class DockerTester:
             finally:
                 self._kill_container(container_name)
 
-            if not result.get("is_loader_error"):
+            if not result.get("is_loader_error") or not result.get("retryable", True):
                 return result
 
             maven = get_maven_domain(self.config.loader) or "the download server"
@@ -567,12 +623,7 @@ class DockerTester:
                 for regex, explanation in DOCKER_LOADER_ERRORS:
                     if regex.search(line):
                         process.terminate()
-                        return {
-                            "passed": False,
-                            "error": f"[LOADER ERROR] {explanation}",
-                            "log_snippet": recent_lines[-5:],
-                            "is_loader_error": True,
-                        }
+                        return _loader_error(explanation, recent_lines)
 
                 if DOCKER_CLIENT_ONLY_PATTERN.search(line):
                     process.terminate()
@@ -632,12 +683,7 @@ class DockerTester:
         all_text = "\n".join(recent_lines)
         for regex, explanation in DOCKER_LOADER_ERRORS:
             if regex.search(all_text):
-                return {
-                    "passed": False,
-                    "error": f"[LOADER ERROR] {explanation}",
-                    "log_snippet": recent_lines[-5:],
-                    "is_loader_error": True,
-                }
+                return _loader_error(explanation, recent_lines)
 
         return {
             "passed": False,

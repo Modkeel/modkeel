@@ -8,6 +8,7 @@ Mojang's mappings carry a EULA that permits modding use but restricts redistribu
 they are downloaded at runtime and cached under the user's home, never vendored.
 """
 
+import functools
 import logging
 import re
 import zipfile
@@ -130,6 +131,20 @@ def _version_details(mc_version: str, timeout: int = 15) -> Optional[Dict]:
         return requests.get(entry["url"], timeout=timeout).json() if entry else None
     except (requests.RequestException, ValueError, KeyError, TypeError) as e:
         logger.debug("version detail fetch failed for %s: %s", mc_version, e)
+        return None
+
+
+@functools.lru_cache(maxsize=32)
+def java_major_version(mc_version: str) -> Optional[int]:
+    """Java major version Mojang ships for this Minecraft version (8, 16, 17, 21, 25...).
+
+    Read from the version's metadata (javaVersion.majorVersion), the source the launcher uses.
+    None when the version is unknown or the metadata cannot be fetched.
+    """
+    details = _version_details(mc_version)
+    try:
+        return int((details or {})["javaVersion"]["majorVersion"])
+    except (KeyError, TypeError, ValueError):
         return None
 
 

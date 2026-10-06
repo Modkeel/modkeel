@@ -136,7 +136,12 @@ def get_command(
     if docker_test:
         docker_test_delivered(delivered, make_config(github_token))
 
-    if delivered.caveat:
+    if "docker_server" in delivered.evidence and delivered.caveat:
+        # The server check replaces the "test it" advice; client-side code is still untested
+        console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat.split('. ')[0])}. "
+                      f"A headless MC {mc_version} server booted with it (--docker-test); "
+                      "client-side features are not covered by that test.")
+    elif delivered.caveat:
         console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat)}")
     console.print(
         f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
