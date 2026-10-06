@@ -532,6 +532,25 @@ class TestForkCopies:
                    for line in result.trail)
 
 
+class TestRankingCost:
+    """Commit dates (one API call each) are fetched only when there is a choice to make."""
+
+    def test_single_candidate_needs_no_dates(self, pipeline, build):
+        pipeline.github.get_branches.return_value = [branch("main")]
+        pipeline.validator.pre_validate_branches.return_value = [branch("main")]
+        pipeline.clone_and_compile(REPO, skip_modrinth=True)
+        pipeline.github.fill_commit_dates.assert_not_called()
+
+    def test_several_candidates_get_dates_from_their_repo(self, pipeline, build):
+        bs = [branch("a"), branch("b")]
+        pipeline.github.get_branches.return_value = bs
+        pipeline.validator.pre_validate_branches.return_value = bs
+        pipeline.clone_and_compile(REPO, skip_modrinth=True)
+        pipeline.github.fill_commit_dates.assert_called_once()
+        owner, repo, ranked = pipeline.github.fill_commit_dates.call_args.args
+        assert (owner, repo) == ("owner", "mod") and {b.name for b in ranked} == {"a", "b"}
+
+
 class TestProcessRepos:
     def test_dependency_failures_get_a_mavenlocal_second_pass(self, pipeline, tmp_path):
         fail = CompilationResult(repo_url="r1", success=False,
