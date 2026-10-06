@@ -7,10 +7,11 @@ to prevent regression on the substring-matching bugs fixed in Phase 1.
 
 import re
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 from mod_auto_compiler import ModAutoCompiler
+from modkeel.github import GitHubClient, split_unchanged_branches
 from modkeel.models import (
     ModCompilerConfig, BranchCandidate, CompilationResult, FailureType,
 )
@@ -925,3 +926,67 @@ class TestSubsequenceScore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================================
+# UNCHANGED FORK COPIES (forks named for a version that only copy upstream)
+# ============================================================================
+
+def _branch(name: str, sha: str) -> BranchCandidate:
+    return BranchCandidate(name, sha, "2026-01-01T00:00:00Z")
+
+
+class TestUnchangedForkCopies(unittest.TestCase):
+    """A fork branch with no commits of its own holds nothing upstream does not."""
+
+    UPSTREAM = [_branch("mc1.21.1/dev", "up-121"), _branch("mc1.20.1/fabric/dev", "up-fab")]
+
+    def split(self, fork_branches, ahead=None):
+        github = MagicMock()
+        github.commits_ahead.return_value = ahead
+        own, copies = split_unchanged_branches(github, "Creators-of-Create", "Create",
+                                               self.UPSTREAM, fork_branches)
+        return [b.name for b in own], [b.name for b in copies], github
+
+    def test_same_head_as_an_upstream_branch_is_free(self):
+        """NetworkArchitect-sudo/Create_1.21.10: its branch is upstream's, SHA for SHA."""
+        own, copies, github = self.split([_branch("mc1.20.1/fabric/dev", "up-fab")])
+        self.assertEqual((own, copies), ([], ["mc1.20.1/fabric/dev"]))
+        github.commits_ahead.assert_not_called()
+
+    def test_behind_upstream_with_no_own_commits(self):
+        """YourNerdiness/Create-1.21.10: an older upstream commit, nothing of its own."""
+        own, copies, github = self.split([_branch("mc1.21.1/dev", "older")], ahead=0)
+        self.assertEqual((own, copies), ([], ["mc1.21.1/dev"]))
+        github.commits_ahead.assert_called_once_with(
+            "Creators-of-Create", "Create", "up-121", "older")
+
+    def test_own_commits_are_kept(self):
+        own, copies, _ = self.split([_branch("mc1.21.1/dev", "ported")], ahead=12)
+        self.assertEqual((own, copies), (["mc1.21.1/dev"], []))
+
+    def test_cannot_compare_counts_as_changed(self):
+        """Never drop a possible port because GitHub could not answer."""
+        own, _, _ = self.split([_branch("mc1.21.1/dev", "x")], ahead=None)
+        self.assertEqual(own, ["mc1.21.1/dev"])
+
+    def test_new_branch_name_is_kept_without_a_call(self):
+        own, _, github = self.split([_branch("port-1.21.10", "new")])
+        self.assertEqual(own, ["port-1.21.10"])
+        github.commits_ahead.assert_not_called()
+
+
+class TestCommitsAhead(unittest.TestCase):
+    def client(self):
+        return GitHubClient(ModCompilerConfig("1.21.10", "neoforge", "0"))
+
+    def test_reads_ahead_by(self):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"ahead_by": 3, "behind_by": 40}
+        with patch("modkeel.github.requests.get", return_value=resp) as get:
+            self.assertEqual(self.client().commits_ahead("o", "r", "base", "head"), 3)
+        self.assertTrue(get.call_args.args[0].endswith("/repos/o/r/compare/base...head"))
+
+    def test_error_is_unknown(self):
+        with patch("modkeel.github.requests.get", return_value=MagicMock(status_code=404)):
+            self.assertIsNone(self.client().commits_ahead("o", "r", "base", "head"))

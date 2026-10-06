@@ -19,8 +19,11 @@ from modkeel.pipeline import Pipeline
 REPO = "https://github.com/owner/mod"
 
 
-def branch(name: str, mc: str = "1.21.10", loader: str = "neoforge") -> BranchCandidate:
-    b = BranchCandidate(name, "sha", "2026-01-01T00:00:00Z")
+def branch(name: str, mc: str = "1.21.10", loader: str = "neoforge",
+           sha: str = "") -> BranchCandidate:
+    # Each branch has its own head by default; a fork's unchanged copy of an upstream
+    # branch shares its SHA (see TestForkCopies).
+    b = BranchCandidate(name, sha or f"sha-{name}", "2026-01-01T00:00:00Z")
     b.minecraft_version = mc
     b.loader = loader
     b.loader_version = "64"
@@ -384,7 +387,8 @@ class TestSourceOrder:
 
     def exact_branch_fails(self, pipeline, build, failure=FailureType.BUILD_ERROR):
         bs = [branch("main")]
-        pipeline.github.get_branches.return_value = bs
+        # upstream's branches, then (when a fork is checked) the fork's own commit on main
+        pipeline.github.get_branches.side_effect = [bs, [branch("main", sha="fork-own")]]
         pipeline.validator.pre_validate_branches.return_value = bs
         build.compile_mod.return_value = (False, None, "gradle broke", failure, ["dep"])
 
@@ -476,6 +480,40 @@ class TestSourceOrder:
         report = pipeline.generate_report()
         assert "Built for MC 1.21.9. A headless MC 1.21.10 server booted with it" in report
         assert "Branch: None" not in report
+
+
+class TestForkCopies:
+    """Forks whose branches only copy upstream are skipped before pre-validation."""
+
+    FORK = {"fork": {"owner": "alice", "repo": "mod-1.21.10", "full_name": "alice/mod-1.21.10",
+                     "url": "https://github.com/alice/mod-1.21.10"},
+            "score": 90, "signals": [], "trust_score": 85}
+
+    def test_unchanged_copy_is_skipped_and_reported(self, pipeline, build):
+        upstream = [branch("old", mc="1.21.9")]
+        pipeline.github.get_branches.side_effect = [upstream, [branch("old", mc="1.21.9")]]
+        pipeline.validator.pre_validate_branches.return_value = upstream
+        pipeline.github.search_compatible_repos.return_value = [self.FORK]
+        pipeline.modrinth.find_project_by_repo.return_value = None
+
+        pipeline.clone_and_compile(REPO, skip_modrinth=True)
+
+        # upstream pre-validated once; the copy never is (same SHA: no compare call either)
+        assert pipeline.validator.pre_validate_branches.call_count == 1
+        pipeline.github.commits_ahead.assert_not_called()
+        assert pipeline.fork_copies == ["alice/mod-1.21.10"]
+
+    def test_copy_is_named_in_the_trail(self, pipeline, build):
+        pipeline.github.get_branches.side_effect = [[branch("main")], [branch("main")]]
+        pipeline.validator.pre_validate_branches.return_value = []
+        pipeline.github.search_compatible_repos.return_value = [self.FORK]
+        pipeline.modrinth.find_project_by_repo.return_value = None
+
+        result = pipeline.clone_and_compile(REPO, skip_modrinth=True)
+
+        assert not result.success
+        assert any("1 fork named for it was an unchanged copy of owner/mod" in line
+                   for line in result.trail)
 
 
 class TestProcessRepos:

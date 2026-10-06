@@ -23,7 +23,7 @@ from modkeel.build import (
 )
 from modkeel.constants import MODRINTH_USER_AGENT
 from modkeel.docker import DockerTester
-from modkeel.github import GitHubClient, parse_repo_url
+from modkeel.github import GitHubClient, parse_repo_url, split_unchanged_branches
 from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
 from modkeel.modrinth import ModrinthClient
 from modkeel.prebuild import PreBuildGate
@@ -99,6 +99,8 @@ class Pipeline:
         )
         self.results: List[CompilationResult] = []
         self.temp_dir = None
+        # Forks the last fork search skipped as unchanged copies of upstream (for the trail)
+        self.fork_copies: List[str] = []
 
     def _try_prebuilt(
         self, repo_url: str, owner: str, repo: str, branch
@@ -466,7 +468,8 @@ class Pipeline:
         return compatible, exact, close
 
     def _fork_plan(self, owner: str, repo: str, close_matches: List,
-                   upstream_tried: bool) -> "BranchPlan":
+                   upstream_tried: bool, upstream_branches: Optional[List] = None
+                   ) -> "BranchPlan":
         """Branches to build when the repo's own exact branches are missing or failed: the
         first community fork that qualifies, else the repo's close branches (unless they
         were already built with the exact ones). May return an empty plan; fork candidates
@@ -490,7 +493,8 @@ class Pipeline:
         if fork_candidates:
             print(f"\n  \U0001f3af Trying top {len(fork_candidates)} community forks...")
             for fork_result in fork_candidates:
-                fork_branches = self._check_fork(owner, repo, fork_result, close_matches)
+                fork_branches = self._check_fork(owner, repo, fork_result, close_matches,
+                                                 upstream_branches)
                 if fork_branches:
                     fork_info = fork_result["fork"]
                     return BranchPlan(fork_info["owner"], fork_info["repo"], fork_branches,
@@ -512,13 +516,16 @@ class Pipeline:
         return plan
 
     def _check_fork(
-        self, owner: str, repo: str, fork_result: Dict, upstream_close: List
+        self, owner: str, repo: str, fork_result: Dict, upstream_close: List,
+        upstream_branches: Optional[List] = None,
     ) -> Optional[List]:
         """Branches to build from this fork, or None to try the next fork.
 
-        In order: an exact-version branch; a close branch whose declared range covers the
-        target; any compatible branch, but only when upstream had no close match to fall
-        back on.
+        Branches that are unchanged copies of upstream branches are dropped first (no
+        pre-validation, no build: upstream was already tried); a fork made only of copies
+        is counted in self.fork_copies for the trail. Then, in order: an exact-version
+        branch; a close branch whose declared range covers the target; any compatible
+        branch, but only when upstream had no close match to fall back on.
         """
         fork_info = fork_result["fork"]
         fork_owner = fork_info["owner"]
@@ -531,6 +538,14 @@ class Pipeline:
         )
 
         fork_branches = self.github.get_branches(fork_owner, fork_repo)
+        if upstream_branches and fork_branches:
+            fork_branches, copies = split_unchanged_branches(
+                self.github, owner, repo, upstream_branches, fork_branches)
+            if copies and not fork_branches:
+                print(f"  \U0001f4cb Unchanged copy of {owner}/{repo} "
+                      f"(no commits of its own), skipped")
+                self.fork_copies.append(fork_info["full_name"])
+                return None
         fork_compatible = self.validator.pre_validate_branches(
             fork_owner, fork_repo, fork_branches
         )
@@ -1293,11 +1308,19 @@ class _ForkBuildSource(SourceStrategy):
         job = self.job
         if job.all_branches is None:
             return Found(note="skipped: the repository's branches could not be read")
-        plan = self.p._fork_plan(job.owner, job.repo, job.close, job.upstream_tried)
+        self.p.fork_copies = []
+        plan = self.p._fork_plan(job.owner, job.repo, job.close, job.upstream_tried,
+                                 job.all_branches)
         if not plan.branches:
             outcome = self.p._no_branches_result(job.repo_url, job.owner, job.repo, plan)
             if isinstance(outcome, CompilationResult):
-                return Found(note=outcome.error, payload=outcome)
+                note = outcome.error
+                if self.p.fork_copies:
+                    n = len(self.p.fork_copies)
+                    note += (f" ({n} fork{'s' if n > 1 else ''} named for it "
+                             f"{'were' if n > 1 else 'was an'} unchanged "
+                             f"cop{'ies' if n > 1 else 'y'} of {job.owner}/{job.repo})")
+                return Found(note=note, payload=outcome)
             plan = outcome  # cross-loader branches, already ranked
         else:
             plan = self.p._ranked(plan)
