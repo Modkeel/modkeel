@@ -318,6 +318,9 @@ class GitHubClient:
                 'contributor_count': contributor_count,
                 'topics': repo_data.get('topics', []),
                 'url': repo_data['html_url'],
+                # Raw timestamps: a fork never pushed to after creation is a plain copy
+                'created_at': repo_data.get('created_at'),
+                'pushed_at': repo_data.get('pushed_at'),
                 'trust_analysis': trust_analysis,
                 'is_independent_port': repo_data.get('_is_independent_port', False)
             }
@@ -768,3 +771,20 @@ def split_unchanged_branches(github: "GitHubClient", owner: str, repo: str,
         else:
             own.append(branch)
     return own, copies
+
+
+def never_pushed(fork_info: Dict, slack_seconds: int = 60) -> bool:
+    """A fork nobody pushed to after creating it: an unchanged copy of its parent.
+
+    Free (the search results carry both timestamps) and decided before listing any branch.
+    Independent ports and entries without timestamps are never judged by it.
+    """
+    if fork_info.get("is_independent_port"):
+        return False
+    created, pushed = fork_info.get("created_at"), fork_info.get("pushed_at")
+    try:
+        created_dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ")
+        pushed_dt = datetime.strptime(pushed, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return False
+    return (pushed_dt - created_dt).total_seconds() <= slack_seconds

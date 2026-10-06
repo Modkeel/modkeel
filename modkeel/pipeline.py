@@ -23,7 +23,12 @@ from modkeel.build import (
 )
 from modkeel.constants import MODRINTH_USER_AGENT
 from modkeel.docker import DockerTester
-from modkeel.github import GitHubClient, parse_repo_url, split_unchanged_branches
+from modkeel.github import (
+    GitHubClient,
+    never_pushed,
+    parse_repo_url,
+    split_unchanged_branches,
+)
 from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
 from modkeel.modrinth import ModrinthClient
 from modkeel.prebuild import PreBuildGate
@@ -536,6 +541,12 @@ class Pipeline:
             f"     Score: {fork_result['score']}, "
             f"Signals: {', '.join(fork_result['signals'])}"
         )
+
+        if never_pushed(fork_info):
+            print(f"  \U0001f4cb Unchanged copy of {owner}/{repo} "
+                  f"(never pushed to since it was forked), skipped")
+            self.fork_copies.append(fork_info["full_name"])
+            return None
 
         fork_branches = self.github.get_branches(fork_owner, fork_repo)
         if upstream_branches and fork_branches:

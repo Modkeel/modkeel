@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 from mod_auto_compiler import ModAutoCompiler
-from modkeel.github import GitHubClient, split_unchanged_branches
+from modkeel.github import GitHubClient, never_pushed, split_unchanged_branches
 from modkeel.models import (
     ModCompilerConfig, BranchCandidate, CompilationResult, FailureType,
 )
@@ -990,3 +990,25 @@ class TestCommitsAhead(unittest.TestCase):
     def test_error_is_unknown(self):
         with patch("modkeel.github.requests.get", return_value=MagicMock(status_code=404)):
             self.assertIsNone(self.client().commits_ahead("o", "r", "base", "head"))
+
+
+class TestNeverPushed(unittest.TestCase):
+    """A fork with no push after its creation is a copy; decided from search data alone."""
+
+    def fork(self, created, pushed, independent=False):
+        return {"created_at": created, "pushed_at": pushed,
+                "is_independent_port": independent}
+
+    def test_never_pushed(self):
+        # GitHub keeps the parent's last push time on a new fork: earlier than created_at
+        self.assertTrue(never_pushed(self.fork("2026-03-01T10:00:00Z", "2025-12-07T09:00:00Z")))
+        self.assertTrue(never_pushed(self.fork("2026-03-01T10:00:00Z", "2026-03-01T10:00:30Z")))
+
+    def test_pushed_after_forking(self):
+        self.assertFalse(never_pushed(self.fork("2026-03-01T10:00:00Z", "2026-03-04T18:00:00Z")))
+
+    def test_independent_ports_and_missing_data_are_not_judged(self):
+        self.assertFalse(never_pushed(self.fork("2026-03-01T10:00:00Z", "2025-01-01T00:00:00Z",
+                                                independent=True)))
+        self.assertFalse(never_pushed(self.fork(None, None)))
+        self.assertFalse(never_pushed({}))

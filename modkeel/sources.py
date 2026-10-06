@@ -312,11 +312,15 @@ def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10,
     (owner, repo, branches), branches that are unchanged copies of upstream ones are dropped
     before pre-validation, and forks made only of copies are named in `copies`.
     """
-    from modkeel.github import split_unchanged_branches
+    from modkeel.github import never_pushed, split_unchanged_branches
 
     validated = []
     for fork in forks[:limit]:
         fork_info = fork["fork"]
+        if never_pushed(fork_info):
+            if copies is not None:
+                copies.append(fork_info["full_name"])
+            continue
         branches = github.get_branches(fork_info["owner"], fork_info["repo"])
         if branches and upstream and upstream[2]:
             branches, unchanged = split_unchanged_branches(github, *upstream, branches)
@@ -382,8 +386,9 @@ class ForkSource(SourceStrategy):
         validated = prefilter_forks(github, BranchValidator(github, config), forks,
                                     upstream=upstream, copies=copies)
         if not validated:
-            copied = (f"; {len(copies)} were unchanged copies of {owner}/{repo}"
-                      if copies else "")
+            n = len(copies)
+            copied = (f"; {n} {'was an unchanged copy' if n == 1 else 'were unchanged copies'}"
+                      f" of {owner}/{repo}" if copies else "")
             return Found(note=f"No compatible forks found for MC {ctx.mc_version} + "
                               f"{ctx.loader} ({len(forks)} checked{copied})")
         return Found(

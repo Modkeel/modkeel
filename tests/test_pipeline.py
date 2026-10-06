@@ -503,6 +503,22 @@ class TestForkCopies:
         pipeline.github.commits_ahead.assert_not_called()
         assert pipeline.fork_copies == ["alice/mod-1.21.10"]
 
+    def test_never_pushed_fork_is_skipped_before_listing_branches(self, pipeline, build):
+        """NetworkArchitect-sudo/Create_1.21.10 kept a branch upstream deleted: no SHA to
+        match, but nobody ever pushed to the fork, so its branches are never listed."""
+        fork = {**self.FORK, "fork": {**self.FORK["fork"],
+                                      "created_at": "2026-03-01T10:00:00Z",
+                                      "pushed_at": "2025-12-07T09:00:00Z"}}
+        pipeline.github.get_branches.return_value = [branch("old", mc="1.21.9")]
+        pipeline.validator.pre_validate_branches.return_value = [branch("old", mc="1.21.9")]
+        pipeline.github.search_compatible_repos.return_value = [fork]
+        pipeline.modrinth.find_project_by_repo.return_value = None
+
+        pipeline.clone_and_compile(REPO, skip_modrinth=True)
+
+        assert pipeline.github.get_branches.call_count == 1   # upstream only
+        assert pipeline.fork_copies == ["alice/mod-1.21.10"]
+
     def test_copy_is_named_in_the_trail(self, pipeline, build):
         pipeline.github.get_branches.side_effect = [[branch("main")], [branch("main")]]
         pipeline.validator.pre_validate_branches.return_value = []
