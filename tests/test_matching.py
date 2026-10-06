@@ -1012,3 +1012,41 @@ class TestNeverPushed(unittest.TestCase):
                                                 independent=True)))
         self.assertFalse(never_pushed(self.fork(None, None)))
         self.assertFalse(never_pushed({}))
+
+
+class TestBranchListingCost(unittest.TestCase):
+    """Listing branches costs one call per 100 branches; dates only for ranked branches."""
+
+    def client(self):
+        return GitHubClient(ModCompilerConfig("1.21.10", "neoforge", "0"))
+
+    @staticmethod
+    def page(names, next_url=None):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = [{"name": n, "commit": {"sha": f"sha-{n}"}} for n in names]
+        resp.links = {"next": {"url": next_url}} if next_url else {}
+        return resp
+
+    def test_one_call_per_page_no_dates(self):
+        with patch("modkeel.github.requests.get",
+                   side_effect=[self.page(["a", "b"], "https://next"), self.page(["c"])]) as get:
+            branches = self.client().get_branches("o", "r")
+        self.assertEqual([b.name for b in branches], ["a", "b", "c"])
+        self.assertEqual([b.commit_sha for b in branches], ["sha-a", "sha-b", "sha-c"])
+        self.assertTrue(all(b.commit_date == "" for b in branches))
+        self.assertEqual(get.call_count, 2)          # was 1 + one per branch
+        self.assertEqual(get.call_args_list[0].kwargs["params"], {"per_page": 100})
+        self.assertEqual(get.call_args_list[1].args[0], "https://next")
+
+    def test_dates_fetched_once_per_commit(self):
+        client = self.client()
+        commit = MagicMock(status_code=200)
+        commit.json.return_value = {"commit": {"committer": {"date": "2026-09-01T00:00:00Z"}}}
+        a, b = BranchCandidate("a", "same", ""), BranchCandidate("b", "same", "")
+        dated = BranchCandidate("c", "other", "2026-01-01T00:00:00Z")
+        with patch("modkeel.github.requests.get", return_value=commit) as get:
+            client.fill_commit_dates("o", "r", [a, b, dated])
+            client.fill_commit_dates("fork", "r", [BranchCandidate("d", "same", "")])
+        self.assertEqual(get.call_count, 1)          # cached by SHA, across repos
+        self.assertEqual((a.commit_date, b.commit_date), ("2026-09-01T00:00:00Z",) * 2)
+        self.assertEqual(dated.commit_date, "2026-01-01T00:00:00Z")

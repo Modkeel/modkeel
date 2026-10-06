@@ -517,7 +517,7 @@ class Pipeline:
     def _ranked(self, plan: "BranchPlan") -> "BranchPlan":
         """Announce and rank a non-empty plan's branches (best first)."""
         print(f"  \U0001f3af Found {len(plan.branches)} compatible branches")
-        self._rank_branches(plan.branches)
+        self._rank_branches(plan.branches, plan.owner, plan.repo)
         return plan
 
     def _check_fork(
@@ -679,7 +679,7 @@ class Pipeline:
                     f"branches for cross-loader compilation"
                 )
                 print(f"  \U0001f3af Found {len(fb_branches)} compatible branches")
-                self._rank_branches(fb_branches)
+                self._rank_branches(fb_branches, fb_owner, fb_repo)
                 return BranchPlan(fb_owner, fb_repo, fb_branches, cross_loader=True)
 
         tried = ", ".join(fallback_loaders)
@@ -714,11 +714,15 @@ class Pipeline:
                 return fi["owner"], fi["repo"], branches
         return None
 
-    def _rank_branches(self, branches: List) -> None:
+    def _rank_branches(self, branches: List, owner: str, repo: str) -> None:
         """Score and sort branches in place (best first) and print the top three.
 
-        The score is score_branch() plus any fork diff bonus set by _check_fork.
+        The score is score_branch() plus any fork diff bonus set by _check_fork. Commit
+        dates (part of the score) are fetched here, only when there is more than one branch
+        to order: a single candidate is built whatever its age.
         """
+        if len(branches) > 1:
+            self.github.fill_commit_dates(owner, repo, branches)
         for b in branches:
             b.score = self.validator.score_branch(b) + b.diff_bonus
         branches.sort(key=lambda b: b.score, reverse=True)

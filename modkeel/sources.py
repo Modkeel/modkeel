@@ -332,6 +332,8 @@ def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10,
             fork_info["owner"], fork_info["repo"], branches
         )
         if compatible:
+            if len(compatible) > 1:  # dates rank branches; one candidate needs none
+                github.fill_commit_dates(fork_info["owner"], fork_info["repo"], compatible)
             fork["_best_branch"] = max(compatible, key=lambda b: validator.score_branch(b))
             validated.append(fork)
     return validated

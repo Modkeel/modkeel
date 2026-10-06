@@ -54,6 +54,7 @@ class GitHubClient:
     def __init__(self, config: ModCompilerConfig):
         self.config = config
         self.search_denied = 0
+        self._commit_dates: Dict[str, str] = {}  # head SHA -> committer date (ISO)
 
     def get_repo_info(self, owner: str, repo: str) -> Optional[Dict]:
         """Fetch repository information from GitHub API."""
@@ -636,39 +637,59 @@ class GitHubClient:
         }
 
     def get_branches(self, owner: str, repo: str) -> List[BranchCandidate]:
-        """Fetch all branches from a repository."""
+        """Every branch of a repository: name and head SHA, one API call per 100 branches.
+
+        Commit dates are not fetched here (that was one extra call per branch); only the
+        branches that get ranked need them, see fill_commit_dates().
+        """
         url = f"https://api.github.com/repos/{owner}/{repo}/branches"
-        branches = []
+        params = {"per_page": 100}
+        branches: List[BranchCandidate] = []
 
         try:
-            response = requests.get(url, headers=self.config.github_headers, timeout=10)
-
-            if response.status_code != 200:
-                print(f"  \u26a0\ufe0f  Could not fetch branches: HTTP {response.status_code}")
-                return branches
-
-            branch_data = response.json()
-
-            for branch in branch_data:
-                commit_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{branch['commit']['sha']}"
-                commit_response = requests.get(commit_url, headers=self.config.github_headers, timeout=10)
-
-                commit_date = ""
-                if commit_response.status_code == 200:
-                    commit_date = commit_response.json()['commit']['committer']['date']
-
-                candidate = BranchCandidate(
-                    name=branch['name'],
-                    commit_sha=branch['commit']['sha'],
-                    commit_date=commit_date
-                )
-                branches.append(candidate)
-
+            while url:
+                response = requests.get(url, headers=self.config.github_headers,
+                                        params=params, timeout=10)
+                if response.status_code != 200:
+                    print(f"  \u26a0\ufe0f  Could not fetch branches: HTTP {response.status_code}")
+                    return branches
+                for branch in response.json():
+                    branches.append(BranchCandidate(
+                        name=branch['name'],
+                        commit_sha=branch['commit']['sha'],
+                        commit_date="",
+                    ))
+                # Repos with more than 100 branches: follow the Link header's next page
+                url = response.links.get("next", {}).get("url")
+                params = None
             return branches
 
         except requests.RequestException as e:
             print(f"  \u26a0\ufe0f  Error fetching branches: {e}")
             return branches
+
+    def fill_commit_dates(self, owner: str, repo: str, branches: List[BranchCandidate]) -> None:
+        """Set commit_date on branches that lack it (one call per distinct head commit).
+
+        Called only on branches about to be ranked, so a fork search no longer pays one call
+        per branch it lists. Dates are cached by SHA: forks share their parent's commits.
+        """
+        for branch in branches:
+            if branch.commit_date or not branch.commit_sha:
+                continue
+            cached = self._commit_dates.get(branch.commit_sha)
+            if cached is None:
+                cached = ""
+                try:
+                    response = requests.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/commits/{branch.commit_sha}",
+                        headers=self.config.github_headers, timeout=10)
+                    if response.status_code == 200:
+                        cached = response.json()['commit']['committer']['date']
+                except (requests.RequestException, ValueError, KeyError):
+                    pass
+                self._commit_dates[branch.commit_sha] = cached
+            branch.commit_date = cached
 
     def commits_ahead(self, owner: str, repo: str, base_sha: str, head_sha: str
                       ) -> Optional[int]:
