@@ -17,7 +17,7 @@ Adding a way to find JARs means one SourceStrategy subclass and one entry in SOU
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from modkeel.models import ModCompilerConfig
 
@@ -84,6 +84,9 @@ class Found:
 
     candidates: List[Candidate] = field(default_factory=list)
     note: str = ""
+    # Strategy-specific detail for callers that need more than the note (the pipeline's
+    # CompilationResult for a failed plan). Collected in Resolution.payloads.
+    payload: Any = None
 
 
 @dataclass
@@ -102,6 +105,7 @@ class Delivered:
     evidence: List[str] = field(default_factory=list)
     caveat: Optional[str] = None
     dependencies: List[Path] = field(default_factory=list)  # required JARs fetched with it
+    payload: Any = None                   # strategy-specific result (see Found.payload)
 
 
 @dataclass
@@ -109,6 +113,7 @@ class Rejected:
     """A candidate that did not make it, and why (shown in the trail)."""
 
     reason: str
+    payload: Any = None                   # strategy-specific result (see Found.payload)
 
 
 @dataclass
@@ -148,6 +153,7 @@ class Resolution:
     trail: List[Step] = field(default_factory=list)
     pending: Optional[tuple] = None       # (strategy index, [Candidate], strategy name)
     pending_note: str = ""                # the pending strategy's Found.note
+    payloads: List[Any] = field(default_factory=list)  # every non-None payload, in order
 
     @property
     def pending_strategy(self) -> Optional[str]:
@@ -190,6 +196,8 @@ class Resolver:
         for index in range(start, len(self.strategies)):
             strategy = self.strategies[index]
             found = strategy.find(mod, ctx)
+            if found.payload is not None:
+                resolution.payloads.append(found.payload)
             if not found.candidates:
                 resolution.trail.append(Step(strategy.name, False, found.note))
                 continue
@@ -206,6 +214,8 @@ class Resolver:
                      ctx: ResolveContext, resolution: Resolution) -> bool:
         for candidate in candidates[:strategy.max_attempts]:
             outcome = strategy.deliver(candidate, mod, ctx)
+            if outcome.payload is not None:
+                resolution.payloads.append(outcome.payload)
             if isinstance(outcome, Delivered):
                 resolution.delivered = outcome
                 resolution.trail.append(Step(strategy.name, True, candidate.label))

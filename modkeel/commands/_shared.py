@@ -11,7 +11,7 @@ from modkeel.config import ModkeelConfig
 from modkeel.loaders import ALL_LOADERS
 from modkeel.models import ModCompilerConfig
 # Moved to modkeel/sources.py (the fork strategy uses them); re-exported for callers.
-from modkeel.sources import prefilter_forks, temp_pipeline  # noqa: F401
+from modkeel.sources import prefilter_forks, strategy_label, temp_pipeline  # noqa: F401
 from modkeel.utils import setup_windows_console
 
 BANNER = r"""    __  ___          ____             __
@@ -72,18 +72,6 @@ def require_valid_loader(loader: str) -> None:
             f"Must be one of: {', '.join(ALL_LOADERS)}"
         )
         raise typer.Exit(1)
-
-
-STRATEGY_LABELS = {
-    "official": "Official build",
-    "older_official": "Older official build",
-    "fork": "Community fork",
-}
-
-
-def strategy_label(name: str) -> str:
-    """Human name of a source strategy for the trail ("older_official" -> "Older ...")."""
-    return STRATEGY_LABELS.get(name, name.replace("_", " ").capitalize())
 
 
 def print_trail(trail) -> None:

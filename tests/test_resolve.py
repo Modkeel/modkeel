@@ -30,6 +30,7 @@ from modkeel.sources import (
     _family,
     _linkage_rejection,
     default_strategies,
+    in_source_order,
 )
 
 
@@ -112,8 +113,13 @@ class TestResolver:
         assert res.pending is None
 
     def test_default_order(self):
-        assert [s.name for s in default_strategies()] == SOURCE_ORDER
-        assert SOURCE_ORDER == ["official", "older_official", "fork"]
+        assert SOURCE_ORDER == ["official", "official_source", "older_official", "fork"]
+        # get/search know no repo branches: official_source is skipped, order kept
+        assert [s.name for s in default_strategies()] == ["official", "older_official", "fork"]
+
+    def test_unknown_strategy_name_is_a_bug(self):
+        with pytest.raises(KeyError):
+            in_source_order([FakeSource("nope")])
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +330,42 @@ class TestFindProject:
     def test_http_error(self):
         project, others, client, _ = find("Create", [], status=503)
         assert project is None and client.last_error == "HTTP 503"
+
+
+class TestFindProjectByRepo:
+    def client(self):
+        return ModrinthClient(ModCompilerConfig("1.21.10", "neoforge", "0"))
+
+    def by_repo(self, hits, sources):
+        """find_project returns `hits`; Modrinth says project id -> source_url per `sources`."""
+        client = self.client()
+
+        def tag(hits_, source_repo, headers):
+            out = []
+            for h in hits_:
+                src = sources.get(h["project_id"], "")
+                if src.lower() == source_repo.lower():
+                    out.append({**h, "_source_match": True})
+                elif not src:
+                    out.append(h)
+            return out
+
+        with patch.object(ModrinthClient, "find_project", return_value=(hits[0], hits[1:])), \
+                patch.object(ModrinthClient, "_filter_hits_by_source", side_effect=tag):
+            return client.find_project_by_repo("Engine-Room", "Flywheel")
+
+    def test_only_a_project_built_from_that_repo(self):
+        hits = [hit("flywheel", "Flywheel (Legacy)"), hit("flw-vanillin", "Vanillin")]
+        project = self.by_repo(hits, {"flywheel": "Jozufozu/Flywheel",
+                                      "flw-vanillin": "Engine-Room/Flywheel"})
+        assert project["slug"] == "flw-vanillin"
+
+    def test_named_like_the_repo_wins_among_several(self):
+        hits = [hit("flw-vanillin", "Vanillin", 9), hit("flywheel-x", "Flywheel", 1)]
+        project = self.by_repo(hits, {"flw-vanillin": "Engine-Room/Flywheel",
+                                      "flywheel-x": "Engine-Room/Flywheel"})
+        assert project["slug"] == "flywheel-x"
+
+    def test_no_project_names_the_repo(self):
+        hits = [hit("flywheel", "Flywheel (Legacy)")]
+        assert self.by_repo(hits, {"flywheel": "Jozufozu/Flywheel"}) is None

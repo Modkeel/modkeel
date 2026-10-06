@@ -373,6 +373,111 @@ class TestBuildLoop:
 # process_repos
 # ---------------------------------------------------------------------------
 
+class TestSourceOrder:
+    """clone_and_compile walks SOURCE_ORDER: official, official_source (the repo's own
+    branches), older_official, fork. These pin the order and the failure kept at the end."""
+
+    OLDER = {"version_number": "6.0.9", "version_type": "release",
+             "game_versions": ["1.21.9"], "dependencies": [],
+             "files": [{"primary": True, "url": "https://cdn/old.jar",
+                        "filename": "old.jar"}]}
+
+    def exact_branch_fails(self, pipeline, build, failure=FailureType.BUILD_ERROR):
+        bs = [branch("main")]
+        pipeline.github.get_branches.return_value = bs
+        pipeline.validator.pre_validate_branches.return_value = bs
+        build.compile_mod.return_value = (False, None, "gradle broke", failure, ["dep"])
+
+    def older_build_available(self, pipeline):
+        pipeline.modrinth.find_project_by_repo.return_value = {
+            "project_id": "p", "slug": "mod", "title": "Mod"}
+        pipeline.modrinth.project_versions.return_value = [self.OLDER]
+        return [
+            patch("modkeel.sources._download",
+                  lambda url, dest: dest.write_bytes(b"PK" + b"x" * 20_000)),
+            patch("modkeel.sources.validate_jar", return_value=(True, "mod", "6.0.9", "ok")),
+            patch("modkeel.sources._linkage_rejection", return_value=None),
+        ]
+
+    def test_author_branch_failure_tries_older_official_before_forks(self, pipeline, build):
+        self.exact_branch_fails(pipeline, build)
+        patches = self.older_build_available(pipeline)
+        for p_ in patches:
+            p_.start()
+        try:
+            result = pipeline.clone_and_compile(REPO)
+        finally:
+            for p_ in patches:
+                p_.stop()
+        assert result.success and result.modrinth_download
+        assert result.source == "older_official"
+        assert result.compiled_mc_version == "1.21.9"
+        assert "Built for MC 1.21.9" in result.caveat
+        assert (pipeline.config.output_dir / "old.jar").exists()
+        pipeline.github.search_compatible_repos.assert_not_called()
+        assert [line[:1] for line in result.trail] == ["✗", "✗", "✓"]
+        assert result.trail[1].startswith("✗ Author's branch: owner/mod branch main")
+
+    def test_strict_never_uses_an_older_build(self, pipeline, build):
+        pipeline.config.strict_version = True
+        self.exact_branch_fails(pipeline, build)
+        pipeline.clone_and_compile(REPO)
+        pipeline.modrinth.find_project_by_repo.assert_not_called()
+        pipeline.github.search_compatible_repos.assert_called_once()
+
+    def test_mavenlocal_pass_never_uses_an_older_build(self, pipeline, build):
+        self.exact_branch_fails(pipeline, build)
+        pipeline.clone_and_compile(REPO, skip_modrinth=True)
+        pipeline.modrinth.find_project_by_repo.assert_not_called()
+
+    def test_forks_are_searched_after_the_authors_branch_fails(self, pipeline, build):
+        self.exact_branch_fails(pipeline, build)
+        pipeline.modrinth.find_project_by_repo.return_value = None
+        pipeline.github.search_compatible_repos.return_value = [
+            {"fork": {"owner": "alice", "repo": "mod", "full_name": "alice/mod",
+                      "url": "https://github.com/alice/mod"}, "score": 80, "signals": []}]
+        pipeline.validator.analyze_fork_diff.return_value = (True, 0, "clean")
+        build.compile_mod.side_effect = [
+            (False, None, "gradle broke", FailureType.BUILD_ERROR, []),
+            (True, build.jar, "built", FailureType.NONE, []),
+        ]
+        result = pipeline.clone_and_compile(REPO)
+        assert result.success and result.source == "fork"
+        assert pipeline.github.search_compatible_repos.call_args.args[:2] == ("owner", "mod")
+
+    def test_dependency_failure_is_kept_for_the_mavenlocal_retry(self, pipeline, build):
+        self.exact_branch_fails(pipeline, build, FailureType.DEPENDENCY_RESOLUTION)
+        pipeline.modrinth.find_project_by_repo.return_value = None
+        result = pipeline.clone_and_compile(REPO)
+        assert not result.success
+        assert result.failure_type == FailureType.DEPENDENCY_RESOLUTION
+        assert result.missing_dependencies == ["dep"]
+        assert any(line.startswith("✗ Community fork") for line in result.trail)
+
+    def test_report_shows_source_and_what_was_tried(self, pipeline):
+        ok = CompilationResult(repo_url="r1", success=True, mod_name="A", mod_version="1",
+                               compiled_mc_version="1.21.9", jar_path="out/a.jar")
+        ok.source, ok.caveat = "older_official", "Built for MC 1.21.9."
+        bad = CompilationResult(repo_url="r2", success=False, error="nothing")
+        bad.trail = ["✗ Official build: no Modrinth build", "✗ Community fork: none"]
+        pipeline.results = [ok, bad]
+        report = pipeline.generate_report()
+        assert "Source: Older official build" in report
+        assert "Built for MC 1.21.9." in report
+        assert "Tried:\n      ✗ Official build: no Modrinth build" in report
+
+    def test_report_note_after_a_passed_docker_test(self, pipeline):
+        ok = CompilationResult(repo_url="r1", success=True, mod_name="A", mod_version="1",
+                               compiled_mc_version="1.21.9", jar_path="out/a.jar")
+        ok.source = "older_official"
+        ok.caveat = "Built for MC 1.21.9. Its metadata allows 1.21.10, test it in game."
+        ok.docker_tested, ok.docker_test_passed = True, True
+        pipeline.results = [ok]
+        report = pipeline.generate_report()
+        assert "Built for MC 1.21.9. A headless MC 1.21.10 server booted with it" in report
+        assert "Branch: None" not in report
+
+
 class TestProcessRepos:
     def test_dependency_failures_get_a_mavenlocal_second_pass(self, pipeline, tmp_path):
         fail = CompilationResult(repo_url="r1", success=False,
@@ -449,7 +554,7 @@ class TestReport:
         assert "✅ Successful: 2/3" in report
         assert "❌ Failed: 1/3" in report
         assert "Version: 1.21.10 (exact match)" in report
-        assert "Compiled for 1.21.9 (you're using 1.21.10)" in report
+        assert "Built for 1.21.9 (you're using 1.21.10)" in report
         assert "Unresolved dependencies" in report and "      - lib" in report
         assert "Target: Minecraft 1.21.10 with Neoforge 64" in report
         assert "Mode: LENIENT" in report

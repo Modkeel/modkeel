@@ -4,10 +4,15 @@ See modkeel/resolve.py for the contract. SOURCE_ORDER is the single place that d
 is tried first; each strategy only knows how to find and deliver its own kind of JAR:
 
   official        the mod's own published build for the exact target
+  official_source the author's own branch for the target, prebuilt or compiled (compile
+                  only: it needs the repo; implemented in modkeel/pipeline.py)
   older_official  the mod's own build for an older Minecraft version that still runs on the
                   target: its metadata must allow the target (loaders enforce it) and every
                   Minecraft class its bytecode uses must exist there (modkeel/linkage.py)
-  fork            a community fork or port, compiled (or prebuilt) by the pipeline
+  fork            a community fork or port, compiled (or prebuilt)
+
+The author's unpublished port beats an old JAR that only passed static checks, which is why
+official_source comes before older_official.
 """
 
 import shutil
@@ -34,7 +39,27 @@ from modkeel.resolve import (
 )
 from modkeel.version import compare_versions
 
-SOURCE_ORDER = ["official", "older_official", "fork"]
+SOURCE_ORDER = ["official", "official_source", "older_official", "fork"]
+
+STRATEGY_LABELS = {
+    "official": "Official build",
+    "official_source": "Author's branch",
+    "older_official": "Older official build",
+    "fork": "Community fork",
+}
+
+
+def strategy_label(name: str) -> str:
+    """Human name of a source strategy for trails ("older_official" -> "Older ...")."""
+    return STRATEGY_LABELS.get(name, name.replace("_", " ").capitalize())
+
+
+def caveat_after_docker(caveat: str, mc_version: str) -> str:
+    """A delivery's caveat once a headless server booted with the JAR: the server check
+    replaces the "test it" advice; client-side code is still untested."""
+    return (f"{caveat.split('. ')[0]}. A headless MC {mc_version} server booted with it "
+            "(--docker-test); client-side features are not covered by that test.")
+
 
 # How many older Minecraft versions older_official tries (nearest first). Each try downloads
 # one JAR, so this bounds the cost when none of them runs on the target.
@@ -54,6 +79,17 @@ def identify_mod(query: str, modrinth: ModrinthClient) -> ModRef:
         full = modrinth.fetch_project(project.get("project_id") or project["slug"])
         if full:
             mod.source_repo = ModrinthClient.source_repo_of(full)
+    return mod
+
+
+def identify_repo(owner: str, repo: str, modrinth: ModrinthClient) -> ModRef:
+    """The mod behind a GitHub repo (compile's input): its Modrinth project when one names
+    that repo as its source, which older_official needs."""
+    mod = ModRef(query=repo, source_repo=f"{owner}/{repo}")
+    try:
+        mod.project = modrinth.find_project_by_repo(owner, repo)
+    except Exception as e:  # identity is a bonus for compile: never fail the repo on it
+        mod.lookup_error = str(e)
     return mod
 
 
@@ -376,5 +412,13 @@ STRATEGIES = {cls.name: cls for cls in (OfficialSource, OlderOfficialSource, For
 
 
 def default_strategies() -> List[SourceStrategy]:
-    """One instance of each strategy, in SOURCE_ORDER."""
-    return [STRATEGIES[name]() for name in SOURCE_ORDER]
+    """The strategies for a mod known by name (get, search), in SOURCE_ORDER."""
+    return in_source_order([cls() for cls in STRATEGIES.values()])
+
+
+def in_source_order(strategies: List[SourceStrategy]) -> List[SourceStrategy]:
+    """Sort any set of strategies by SOURCE_ORDER. A command that has no implementation
+    of a step (get has no official_source: it knows no repo branches) simply skips it;
+    a strategy whose name is not in SOURCE_ORDER is a bug, so it raises."""
+    rank = {name: i for i, name in enumerate(SOURCE_ORDER)}
+    return sorted(strategies, key=lambda s: rank[s.name])

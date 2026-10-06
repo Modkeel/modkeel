@@ -123,6 +123,11 @@ modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
 
 It never downloads a different mod with a similar name: addons are listed separately.
 
+`compile` follows the same order for each repository, with one more step after the official
+build: the author's own branch for that version, prebuilt or compiled, comes before an older
+build. `--strict` never uses an older build. The report says which source each mod came from
+and, for failures, everything that was tried.
+
 ### Check Status
 
 ```bash

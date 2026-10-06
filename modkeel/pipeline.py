@@ -11,7 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import requests
 
@@ -27,6 +27,24 @@ from modkeel.github import GitHubClient, parse_repo_url
 from modkeel.models import CompilationResult, FailureType, ModCompilerConfig
 from modkeel.modrinth import ModrinthClient
 from modkeel.prebuild import PreBuildGate
+from modkeel.resolve import (
+    Candidate,
+    Delivered,
+    Found,
+    ModRef,
+    Rejected,
+    ResolveContext,
+    Resolver,
+    SourceStrategy,
+    Step,
+)
+from modkeel.sources import (
+    OlderOfficialSource,
+    caveat_after_docker,
+    identify_repo,
+    in_source_order,
+    strategy_label,
+)
 from modkeel.utils import safe_rmtree
 from modkeel.loaders import get_bridge_mods, get_cross_loader_chain, get_profile
 from modkeel.validation import BranchValidator
@@ -212,14 +230,21 @@ class Pipeline:
         extra_gradle_args: Optional[List[str]] = None,
         skip_modrinth: bool = False,
     ) -> CompilationResult:
-        """Produce a JAR for one repository: Modrinth download, prebuilt JAR or local build.
+        """Produce a JAR for one repository, trying the sources in SOURCE_ORDER.
 
-        Stages, each returning early with a CompilationResult when it settles the outcome:
-          0. Modrinth: a published build for the target (also via cross-loader fallback).
-          1. Branch plan: which repo (upstream or a fork) and which branches to build.
-          2. Pre-build gate + prebuilt lookup: skip builds whose outcome is already known.
-          3. Build loop: clone, validate, compile and validate the JAR, branch by branch.
-        Any unexpected exception becomes a failed result, so one repo never stops a batch.
+        The sources (see modkeel/resolve.py and modkeel/sources.py), each a strategy below:
+          official         Modrinth build for the target (also via cross-loader fallback)
+          official_source  the repo's own branches for the target: prebuilt or compiled
+          older_official   the mod's Modrinth build for an older version that still runs
+          fork             community forks, close upstream branches, cross-loader branches
+        A named branch (argument or URL) builds only that branch. skip_modrinth (the
+        mavenLocal pass, which needs a compiled checkout) leaves out both Modrinth sources;
+        --strict leaves out older_official.
+
+        On failure, returns the most useful failed result: a dependency failure first (it
+        drives process_repos' mavenLocal retry), else the last build failure, else the last
+        planning failure. Any unexpected exception becomes a failed result, so one repo
+        never stops a batch.
         """
         print(f"\n{'=' * 80}")
         print(f"\U0001f4e6 Processing: {repo_url}")
@@ -239,39 +264,75 @@ class Pipeline:
                 forks = repo_info.get("forks_count", 0)
                 print(f"  ⭐ Stars: {stars} | \U0001f374 Forks: {forks}")
 
-            if not specific_branch and not skip_modrinth:
-                downloaded = self._try_modrinth(repo_url, owner, repo)
-                if downloaded:
-                    return downloaded
-
             # Clones always land in <temp>/<upstream repo name>, even when a fork is built.
-            repo_temp_dir = Path(self.temp_dir) / repo
+            job = _RepoJob(repo_url, owner, repo, extra_gradle_args,
+                           Path(self.temp_dir) / repo)
 
-            plan = self._plan_branches(repo_url, owner, repo, specific_branch)
-            if isinstance(plan, CompilationResult):
-                return plan
+            if specific_branch:
+                return self._build_named_branch(job, specific_branch)
 
-            branches = plan.branches
-            # Level 1: drop branches with deterministic build failures before cloning
-            if self.config.prebuild_gate and branches:
-                print(f"\n  ⚡ Pre-build gate ({len(branches)} candidates)...")
-                branches = self.prebuild.filter_branches(plan.owner, plan.repo, branches)
+            strategies: List[SourceStrategy] = [_UpstreamSource(self, job),
+                                                _ForkBuildSource(self, job)]
+            if not skip_modrinth:
+                strategies.append(_ModrinthSource(self, job))
+                # --strict asks for the exact version; an older build is never that
+                if not self.config.strict_version:
+                    strategies.append(_RepoOlderOfficialSource(self, job))
 
-            # Level 0: a published JAR means the build already happened elsewhere
-            if self.config.use_prebuilt and branches:
-                prebuilt_result = self._try_prebuilt(repo_url, plan.owner, plan.repo, branches[0])
-                if prebuilt_result:
-                    return prebuilt_result
+            mod = ModRef(query=repo, source_repo=f"{owner}/{repo}")
+            ctx = ResolveContext(config=self.config, modrinth=self.modrinth)
+            resolution = Resolver(in_source_order(strategies)).resolve(mod, ctx)
+            _print_trail(resolution.trail)
 
-            return self._build_branches(
-                repo_url, plan.owner, plan.repo, branches, repo_temp_dir,
-                extra_gradle_args, plan.cross_loader,
-            )
+            if resolution.delivered:
+                result = resolution.delivered.payload
+            else:
+                result = _most_useful_failure(repo_url, resolution.payloads)
+            result.trail = [f"{'✓' if st.ok else '✗'} {strategy_label(st.strategy)}: "
+                            f"{st.detail}" for st in resolution.trail]
+            if resolution.delivered:
+                result.source = resolution.trail[-1].strategy
+            return result
 
         except Exception as e:
             return CompilationResult(
                 repo_url=repo_url, success=False, error=f"Unexpected error: {e}"
             )
+
+    def _build_named_branch(self, job: "_RepoJob", name: str) -> CompilationResult:
+        """The user named the branch: build exactly that one (no Modrinth, no forks)."""
+        print("  \U0001f50d Fetching branches...")
+        all_branches = self.github.get_branches(job.owner, job.repo)
+        if not all_branches:
+            return CompilationResult(
+                repo_url=job.repo_url, success=False,
+                error="Could not fetch branches from repository",
+            )
+        print(f"  \U0001f4ca Found {len(all_branches)} branches")
+        plan = self._plan_specific_branch(job.repo_url, job.owner, job.repo, name, all_branches)
+        if isinstance(plan, CompilationResult):
+            return plan
+        return self._build_plan(job, plan)
+
+    def _build_plan(self, job: "_RepoJob", plan: "BranchPlan") -> CompilationResult:
+        """Gate, prebuilt lookup and build loop over a plan's branches (stages 2-3)."""
+        branches = plan.branches
+        # Level 1: drop branches with deterministic build failures before cloning
+        if self.config.prebuild_gate and branches:
+            print(f"\n  ⚡ Pre-build gate ({len(branches)} candidates)...")
+            branches = self.prebuild.filter_branches(plan.owner, plan.repo, branches)
+
+        # Level 0: a published JAR means the build already happened elsewhere
+        if self.config.use_prebuilt and branches:
+            prebuilt_result = self._try_prebuilt(job.repo_url, plan.owner, plan.repo,
+                                                 branches[0])
+            if prebuilt_result:
+                return prebuilt_result
+
+        return self._build_branches(
+            job.repo_url, plan.owner, plan.repo, branches, job.temp_dir,
+            job.extra_gradle_args, plan.cross_loader,
+        )
 
     # ------------------------------------------------------------------
     # Stage 0: Modrinth
@@ -285,7 +346,10 @@ class Pipeline:
         hit = self._find_modrinth_hit(owner, repo)
         if not hit:
             return None
+        return self._download_modrinth_hit(repo_url, hit)
 
+    def _download_modrinth_hit(self, repo_url: str, hit: Dict) -> Optional[CompilationResult]:
+        """Download a Modrinth hit (and its deps) to the output dir; None when it fails."""
         print("\n  \U0001f4e5 Downloading from Modrinth (no compilation needed)...")
         try:
             dl_resp = requests.get(
@@ -370,35 +434,6 @@ class Pipeline:
     # Stage 1: which repo and branches to build
     # ------------------------------------------------------------------
 
-    def _plan_branches(
-        self, repo_url: str, owner: str, repo: str, specific_branch: Optional[str]
-    ) -> "BranchPlan | CompilationResult":
-        """Decide where to build from, or return the failed result that ends the attempt."""
-        print("  \U0001f50d Fetching branches...")
-        all_branches = self.github.get_branches(owner, repo)
-
-        if not all_branches:
-            return CompilationResult(
-                repo_url=repo_url,
-                success=False,
-                error="Could not fetch branches from repository",
-            )
-
-        print(f"  \U0001f4ca Found {len(all_branches)} branches")
-
-        if specific_branch:
-            return self._plan_specific_branch(
-                repo_url, owner, repo, specific_branch, all_branches
-            )
-
-        plan = self._discover_branches(owner, repo, all_branches)
-        if not plan.branches:
-            return self._no_branches_result(repo_url, owner, repo, plan)
-
-        print(f"  \U0001f3af Found {len(plan.branches)} compatible branches")
-        self._rank_branches(plan.branches)
-        return plan
-
     def _plan_specific_branch(
         self, repo_url: str, owner: str, repo: str, name: str, all_branches: List
     ) -> "BranchPlan | CompilationResult":
@@ -422,30 +457,26 @@ class Pipeline:
             )
         return BranchPlan(owner, repo, [target_branch])
 
-    def _discover_branches(self, owner: str, repo: str, all_branches: List) -> "BranchPlan":
-        """Compatible branches in the upstream repo, or in a community fork when upstream
-        has no exact match. May return an empty plan; fork candidates are kept on it for the
-        cross-loader fallback."""
+    def _upstream_branches(self, owner: str, repo: str, all_branches: List):
+        """(compatible, exact, close) pre-validated branches of the repo itself."""
         all_branches = self.validator.filter_branches_by_version_proximity(all_branches)
         compatible = self.validator.pre_validate_branches(owner, repo, all_branches)
+        exact = [b for b in compatible if b.minecraft_version == self.config.mc_version]
+        close = [b for b in compatible if b.minecraft_version != self.config.mc_version]
+        return compatible, exact, close
 
-        exact_matches = [b for b in compatible if b.minecraft_version == self.config.mc_version]
-        close_matches = [b for b in compatible if b.minecraft_version != self.config.mc_version]
-
-        if not compatible:
-            should_search_forks = True
-        elif not exact_matches and close_matches:
+    def _fork_plan(self, owner: str, repo: str, close_matches: List,
+                   upstream_tried: bool) -> "BranchPlan":
+        """Branches to build when the repo's own exact branches are missing or failed: the
+        first community fork that qualifies, else the repo's close branches (unless they
+        were already built with the exact ones). May return an empty plan; fork candidates
+        are kept on it for the cross-loader fallback."""
+        if close_matches and not upstream_tried:
             print(
                 f"  ⚠️  Only found close version matches "
                 f"({close_matches[0].minecraft_version}), searching for exact "
                 f"{self.config.mc_version}..."
             )
-            should_search_forks = True
-        else:
-            should_search_forks = False
-
-        if not should_search_forks:
-            return BranchPlan(owner, repo, compatible)
 
         cross_available = (
             self.config.cross_loader
@@ -465,14 +496,20 @@ class Pipeline:
                     return BranchPlan(fork_info["owner"], fork_info["repo"], fork_branches,
                                       fork_candidates=fork_candidates)
 
-            if close_matches:
-                print(
-                    "\n  ℹ️  No exact version in forks, using close matches "
-                    "from original repo"
-                )
-                compatible = close_matches
+        if close_matches and not upstream_tried:
+            print(
+                "\n  ℹ️  No exact version in forks, using close matches "
+                "from original repo"
+            )
+            return BranchPlan(owner, repo, close_matches, fork_candidates=fork_candidates)
 
-        return BranchPlan(owner, repo, compatible, fork_candidates=fork_candidates)
+        return BranchPlan(owner, repo, [], fork_candidates=fork_candidates)
+
+    def _ranked(self, plan: "BranchPlan") -> "BranchPlan":
+        """Announce and rank a non-empty plan's branches (best first)."""
+        print(f"  \U0001f3af Found {len(plan.branches)} compatible branches")
+        self._rank_branches(plan.branches)
+        return plan
 
     def _check_fork(
         self, owner: str, repo: str, fork_result: Dict, upstream_close: List
@@ -995,7 +1032,8 @@ class Pipeline:
 
             for result in successful:
                 report_lines.append(f"\n\U0001f4e6 {result.repo_url}")
-                report_lines.append(f"   \U0001f33f Branch: {result.branch}")
+                if result.branch:
+                    report_lines.append(f"   \U0001f33f Branch: {result.branch}")
                 report_lines.append(
                     f"   \U0001f4cb Mod: {result.mod_name} v{result.mod_version}"
                 )
@@ -1015,6 +1053,12 @@ class Pipeline:
                     )
 
                 report_lines.append(f"   \U0001f4be JAR: {result.jar_path}")
+                if result.source:
+                    report_lines.append(f"   \U0001f9ed Source: {strategy_label(result.source)}")
+                if result.caveat:
+                    caveat = (caveat_after_docker(result.caveat, self.config.mc_version)
+                              if result.docker_test_passed else result.caveat)
+                    report_lines.append(f"   \u2139\ufe0f  {caveat}")
 
         if version_mismatches:
             report_lines.append("\n" + "-" * 80)
@@ -1030,7 +1074,7 @@ class Pipeline:
 
             for result in version_mismatches:
                 report_lines.append(
-                    f"  \u2022 {result.mod_name} v{result.mod_version}: Compiled for {result.compiled_mc_version} (you're using {self.config.mc_version})"
+                    f"  \u2022 {result.mod_name} v{result.mod_version}: Built for {result.compiled_mc_version} (you're using {self.config.mc_version})"
                 )
 
             report_lines.append("")
@@ -1044,6 +1088,9 @@ class Pipeline:
             for result in failed:
                 report_lines.append(f"\n\U0001f4e6 {result.repo_url}")
                 report_lines.append(f"   \u274c Error: {result.error}")
+                if result.trail:
+                    report_lines.append("   Tried:")
+                    report_lines.extend(f"      {line}" for line in result.trail)
                 if result.failure_type == FailureType.DEPENDENCY_RESOLUTION:
                     report_lines.append("   \U0001f517 Type: Unresolved dependencies")
                     if result.missing_dependencies:
@@ -1140,3 +1187,177 @@ class Pipeline:
         report_lines.append("=" * 80)
 
         return "\n".join(report_lines)
+
+
+# ----------------------------------------------------------------------
+# The pipeline's stages as source strategies (order: sources.SOURCE_ORDER)
+# ----------------------------------------------------------------------
+
+@dataclass
+class _RepoJob:
+    """One clone_and_compile call: what every strategy needs, plus what the upstream step
+    learned about the repo's own branches (the fork step builds on it)."""
+
+    repo_url: str
+    owner: str
+    repo: str
+    extra_gradle_args: Optional[List[str]]
+    temp_dir: Path
+    all_branches: Optional[List] = None    # None until fetched (or when fetching failed)
+    close: List = field(default_factory=list)
+    upstream_tried: bool = False           # the repo's exact branches were built (and failed)
+
+
+def _built(result: CompilationResult, mod_name: str = "") -> Union[Delivered, Rejected]:
+    """A pipeline CompilationResult as a resolver outcome (the result rides as payload)."""
+    if result is None:
+        return Rejected("download failed")
+    if result.success:
+        return Delivered(jar_path=Path(result.jar_path or "."),
+                         mod_name=result.mod_name or mod_name,
+                         mod_version=result.mod_version or "unknown",
+                         verb="downloaded" if result.modrinth_download else "compiled",
+                         payload=result)
+    first_line = (result.error or "failed").splitlines()[0]
+    return Rejected(first_line, payload=result)
+
+
+class _ModrinthSource(SourceStrategy):
+    """official: the Modrinth build whose source is this repo (cross-loader included)."""
+
+    name = "official"
+
+    def __init__(self, pipeline: "Pipeline", job: _RepoJob):
+        self.p, self.job = pipeline, job
+
+    def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
+        hit = self.p._find_modrinth_hit(self.job.owner, self.job.repo)
+        if not hit:
+            error = getattr(self.p.modrinth, "last_error", None)
+            note = (f"Modrinth unavailable ({error})" if isinstance(error, str)
+                    else "no Modrinth build of this repo for the target")
+            return Found(note=note)
+        cross = " (Fabric via bridge mods)" if hit.get("_cross_loader") else ""
+        return Found([Candidate(f"{hit.get('title', '?')} {hit.get('version_number', '?')}"
+                                f"{cross}", {"hit": hit})])
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        return _built(self.p._download_modrinth_hit(self.job.repo_url, candidate.data["hit"]))
+
+
+class _UpstreamSource(SourceStrategy):
+    """official_source: the repo's own branches, when one targets the exact version."""
+
+    name = "official_source"
+
+    def __init__(self, pipeline: "Pipeline", job: _RepoJob):
+        self.p, self.job = pipeline, job
+
+    def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
+        job = self.job
+        print("  \U0001f50d Fetching branches...")
+        all_branches = self.p.github.get_branches(job.owner, job.repo)
+        if not all_branches:
+            error = "Could not fetch branches from repository"
+            return Found(note=error, payload=CompilationResult(
+                repo_url=job.repo_url, success=False, error=error))
+        print(f"  \U0001f4ca Found {len(all_branches)} branches")
+        job.all_branches = all_branches
+
+        compatible, exact, close = self.p._upstream_branches(job.owner, job.repo, all_branches)
+        job.close = close
+        if not exact:
+            closest = f" (closest: MC {close[0].minecraft_version})" if close else ""
+            return Found(note=f"no branch of {job.owner}/{job.repo} targets MC "
+                              f"{self.p.config.mc_version}{closest}")
+        plan = self.p._ranked(BranchPlan(job.owner, job.repo, compatible))
+        return Found([Candidate(f"{job.owner}/{job.repo} branch {plan.branches[0].name}",
+                                {"plan": plan})])
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        self.job.upstream_tried = True
+        return _built(self.p._build_plan(self.job, candidate.data["plan"]))
+
+
+class _ForkBuildSource(SourceStrategy):
+    """fork: community forks, then the repo's close branches, then cross-loader branches."""
+
+    name = "fork"
+
+    def __init__(self, pipeline: "Pipeline", job: _RepoJob):
+        self.p, self.job = pipeline, job
+
+    def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
+        job = self.job
+        if job.all_branches is None:
+            return Found(note="skipped: the repository's branches could not be read")
+        plan = self.p._fork_plan(job.owner, job.repo, job.close, job.upstream_tried)
+        if not plan.branches:
+            outcome = self.p._no_branches_result(job.repo_url, job.owner, job.repo, plan)
+            if isinstance(outcome, CompilationResult):
+                return Found(note=outcome.error, payload=outcome)
+            plan = outcome  # cross-loader branches, already ranked
+        else:
+            plan = self.p._ranked(plan)
+        upstream = (plan.owner, plan.repo) == (job.owner, job.repo)
+        kind = ("close branches of the repo" if upstream and not plan.cross_loader
+                else "Fabric branches via bridge mods" if plan.cross_loader
+                else "community fork")
+        return Found([Candidate(f"{plan.owner}/{plan.repo} branch {plan.branches[0].name} "
+                                f"({kind})", {"plan": plan})])
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        return _built(self.p._build_plan(self.job, candidate.data["plan"]))
+
+
+class _RepoOlderOfficialSource(OlderOfficialSource):
+    """older_official for compile: the project is looked up by repo, only when needed."""
+
+    def __init__(self, pipeline: "Pipeline", job: _RepoJob):
+        self.p, self.job = pipeline, job
+
+    def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
+        if mod.project is None and mod.lookup_error is None:
+            found_mod = identify_repo(self.job.owner, self.job.repo, self.p.modrinth)
+            mod.project, mod.lookup_error = found_mod.project, found_mod.lookup_error
+        return super().find(mod, ctx)
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        outcome = super().deliver(candidate, mod, ctx)
+        if isinstance(outcome, Delivered):
+            outcome.payload = CompilationResult(
+                repo_url=self.job.repo_url, success=True, jar_path=str(outcome.jar_path),
+                mod_name=outcome.mod_name, mod_version=outcome.mod_version,
+                compiled_mc_version=candidate.data["built_for"], modrinth_download=True,
+            )
+            outcome.payload.caveat = outcome.caveat
+        return outcome
+
+
+def _most_useful_failure(repo_url: str, payloads: List) -> CompilationResult:
+    """The failure to report: a dependency failure (drives the mavenLocal retry), else the
+    last build failure, else the last planning failure."""
+    failures = [r for r in payloads if isinstance(r, CompilationResult) and not r.success]
+    for wanted in (
+        lambda r: r.failure_type == FailureType.DEPENDENCY_RESOLUTION,
+        lambda r: r.failure_type != FailureType.NONE,
+        lambda r: True,
+    ):
+        matching = [r for r in failures if wanted(r)]
+        if matching:
+            return matching[-1]
+    return CompilationResult(repo_url=repo_url, success=False,
+                             error="No source produced a JAR for this target")
+
+
+def _print_trail(trail: List[Step]) -> None:
+    """The path clone_and_compile took for this repo (also kept on the result)."""
+    if not trail:
+        return
+    print("\n  Tried:")
+    for st in trail:
+        print(f"    {'✓' if st.ok else '✗'} {strategy_label(st.strategy)}: {st.detail}")

@@ -144,6 +144,11 @@ class CompilationResult:
         self.mod_version = mod_version
         self.compiled_mc_version = compiled_mc_version
         self.failure_type = failure_type or FailureType.NONE
+        # Which source strategy produced the JAR, the path taken to get there, and a note
+        # for the user when it is not an official build for the exact target (resolver).
+        self.source: Optional[str] = None
+        self.trail: List[str] = []
+        self.caveat: Optional[str] = None
         self.missing_dependencies = missing_dependencies or []
         self.clone_dir = clone_dir
         self.is_cross_loader = is_cross_loader

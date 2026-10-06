@@ -73,7 +73,7 @@ def get_command(
     """Find and download/compile a mod in one step."""
     from modkeel.modrinth import ModrinthClient
     from modkeel.resolve import ResolveContext, Resolver
-    from modkeel.sources import identify_mod
+    from modkeel.sources import caveat_after_docker, identify_mod
 
     setup_logging()
 
@@ -137,10 +137,8 @@ def get_command(
         docker_test_delivered(delivered, make_config(github_token))
 
     if "docker_server" in delivered.evidence and delivered.caveat:
-        # The server check replaces the "test it" advice; client-side code is still untested
-        console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat.split('. ')[0])}. "
-                      f"A headless MC {mc_version} server booted with it (--docker-test); "
-                      "client-side features are not covered by that test.")
+        console.print(f"\n[yellow]Note:[/yellow] "
+                      f"{escape(caveat_after_docker(delivered.caveat, mc_version))}")
     elif delivered.caveat:
         console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat)}")
     console.print(

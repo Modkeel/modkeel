@@ -487,6 +487,25 @@ class ModrinthClient:
         others = [h for h in hits if h is not best]
         return best, others
 
+    def find_project_by_repo(self, owner: str, repo: str) -> Optional[Dict]:
+        """The Modrinth project whose source is github.com/owner/repo, or None.
+
+        For `compile`, which knows the repo rather than a name: searched by repo name with
+        no version filter, kept only when the project's source_url is that repo.
+        """
+        project, others = self.find_project(repo)
+        hits = [h for h in [project, *others] if h]
+        if not hits:
+            return None
+        matched = self._filter_hits_by_source(
+            hits, f"{owner}/{repo}", {"User-Agent": MODRINTH_USER_AGENT})
+        matched = [h for h in matched if h.get("_source_match")]
+        # One repo can publish several projects: the one named like the repo, then the
+        # most downloaded.
+        named = _norm_name(repo)
+        return max(matched, key=lambda h: (named in _name_keys(h), h.get("downloads", 0)),
+                   default=None)
+
     def project_versions(self, project_id: str, loader: str,
                          game_version: Optional[str] = None) -> Optional[List[Dict]]:
         """A project's versions for `loader` (and `game_version` when given), newest first.
