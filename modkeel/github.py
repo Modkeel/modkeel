@@ -318,6 +318,9 @@ class GitHubClient:
                 'contributor_count': contributor_count,
                 'topics': repo_data.get('topics', []),
                 'url': repo_data['html_url'],
+                # Raw timestamps: a fork never pushed to after creation is a plain copy
+                'created_at': repo_data.get('created_at'),
+                'pushed_at': repo_data.get('pushed_at'),
                 'trust_analysis': trust_analysis,
                 'is_independent_port': repo_data.get('_is_independent_port', False)
             }
@@ -667,6 +670,23 @@ class GitHubClient:
             print(f"  \u26a0\ufe0f  Error fetching branches: {e}")
             return branches
 
+    def commits_ahead(self, owner: str, repo: str, base_sha: str, head_sha: str
+                      ) -> Optional[int]:
+        """Commits reachable from head_sha but not from base_sha (compare API `ahead_by`).
+
+        Both are SHAs, so it works for a fork's commits through the upstream repo (a fork
+        network shares its objects). None when GitHub cannot compare them.
+        """
+        url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base_sha}...{head_sha}"
+        try:
+            response = requests.get(url, headers=self.config.github_headers, timeout=10)
+            if response.status_code != 200:
+                return None
+            ahead = response.json().get("ahead_by")
+            return ahead if isinstance(ahead, int) else None
+        except (requests.RequestException, ValueError):
+            return None
+
     def get_tree(self, owner: str, repo: str, branch: str) -> Optional[List[str]]:
         """List every file path in a branch with one API call (None on failure)."""
         url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}"
@@ -725,3 +745,46 @@ class GitHubClient:
                 pass
 
         return None
+
+
+def split_unchanged_branches(github: "GitHubClient", owner: str, repo: str,
+                             upstream_branches: List, fork_branches: List
+                             ) -> Tuple[List, List]:
+    """(branches with commits of their own, unchanged copies of upstream branches).
+
+    A fork branch is an unchanged copy when its head is the head of an upstream branch
+    (free: the SHAs are already known) or has no commit beyond the upstream branch of
+    the same name (one compare call). Anything GitHub cannot compare counts as changed,
+    so a real port is never dropped. Copies hold nothing upstream does not, and upstream
+    is tried first, so they need no pre-validation or build.
+    """
+    upstream_shas = {b.name: b.commit_sha for b in upstream_branches or []}
+    known = set(upstream_shas.values())
+    own, copies = [], []
+    for branch in fork_branches:
+        if branch.commit_sha in known:
+            copies.append(branch)
+            continue
+        base = upstream_shas.get(branch.name)
+        if base and github.commits_ahead(owner, repo, base, branch.commit_sha) == 0:
+            copies.append(branch)
+        else:
+            own.append(branch)
+    return own, copies
+
+
+def never_pushed(fork_info: Dict, slack_seconds: int = 60) -> bool:
+    """A fork nobody pushed to after creating it: an unchanged copy of its parent.
+
+    Free (the search results carry both timestamps) and decided before listing any branch.
+    Independent ports and entries without timestamps are never judged by it.
+    """
+    if fork_info.get("is_independent_port"):
+        return False
+    created, pushed = fork_info.get("created_at"), fork_info.get("pushed_at")
+    try:
+        created_dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ")
+        pushed_dt = datetime.strptime(pushed, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return False
+    return (pushed_dt - created_dt).total_seconds() <= slack_seconds

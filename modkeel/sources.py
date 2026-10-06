@@ -302,16 +302,30 @@ def _linkage_rejection(jar: Path, mc_version: str) -> Optional[Rejected]:
 # fork
 # ---------------------------------------------------------------------------
 
-def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10) -> List[Dict]:
+def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10,
+                    upstream: Optional[tuple] = None,
+                    copies: Optional[List[str]] = None) -> List[Dict]:
     """Forks (of the first `limit`) with at least one pre-validated branch.
 
     Each kept fork gets its best-scoring branch under "_best_branch". Only the GitHub API is
-    used (gradle.properties and friends); nothing is cloned.
+    used (gradle.properties and friends); nothing is cloned. With upstream
+    (owner, repo, branches), branches that are unchanged copies of upstream ones are dropped
+    before pre-validation, and forks made only of copies are named in `copies`.
     """
+    from modkeel.github import never_pushed, split_unchanged_branches
+
     validated = []
     for fork in forks[:limit]:
         fork_info = fork["fork"]
+        if never_pushed(fork_info):
+            if copies is not None:
+                copies.append(fork_info["full_name"])
+            continue
         branches = github.get_branches(fork_info["owner"], fork_info["repo"])
+        if branches and upstream and upstream[2]:
+            branches, unchanged = split_unchanged_branches(github, *upstream, branches)
+            if unchanged and not branches and copies is not None:
+                copies.append(fork_info["full_name"])
         if not branches:
             continue
         compatible = validator.pre_validate_branches(
@@ -366,10 +380,17 @@ class ForkSource(SourceStrategy):
                                   "(rate limit or no access): forks unknown")
             return Found(note="No GitHub forks found")
 
-        validated = prefilter_forks(github, BranchValidator(github, config), forks)
+        # Forks of the mod's own repo can be compared with it: unchanged copies are skipped
+        upstream = (owner, repo, github.get_branches(owner, repo)) if mod.source_repo else None
+        copies: List[str] = []
+        validated = prefilter_forks(github, BranchValidator(github, config), forks,
+                                    upstream=upstream, copies=copies)
         if not validated:
+            n = len(copies)
+            copied = (f"; {n} {'was an unchanged copy' if n == 1 else 'were unchanged copies'}"
+                      f" of {owner}/{repo}" if copies else "")
             return Found(note=f"No compatible forks found for MC {ctx.mc_version} + "
-                              f"{ctx.loader} ({len(forks)} checked)")
+                              f"{ctx.loader} ({len(forks)} checked{copied})")
         return Found(
             [
                 Candidate(

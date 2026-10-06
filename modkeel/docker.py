@@ -43,8 +43,12 @@ DOCKER_DEP_PATTERN = re.compile(
     r"Mod '([^']+)' .* requires .* '([^']+)'"
 )
 
+# A client-only mod on a dedicated server: Forge refuses it by dist; NeoForge and Fabric load
+# it and it dies reaching for a client class (net.minecraft.client.*), which servers lack.
+# Inconclusive rather than failed: the server cannot tell whether it works in a client.
 DOCKER_CLIENT_ONLY_PATTERN = re.compile(
     r"invalid dist DEDICATED_SERVER"
+    r"|(?:NoClassDefFoundError|ClassNotFoundException):? net[./]minecraft[./]client[./]"
 )
 
 DOCKER_LOADER_ERRORS = [
