@@ -107,6 +107,22 @@ modkeel compile repos.txt \
 modkeel search "Create" -m 1.21.10 -l neoforge -t "$(cat github_token.txt)"
 ```
 
+### Get One Mod
+
+```bash
+modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
+```
+
+`get` (and `search`, without downloading) tries, in order, and prints what it tried:
+
+1. The mod's official build for that Minecraft version.
+2. An official build for an older version of the same line that still runs on it: its
+   metadata must allow your version and every Minecraft class it uses must exist there.
+   A static check, so test it in game (or with `--docker-test`).
+3. A community fork compiled for that version (needs a token and `-lv`).
+
+It never downloads a different mod with a similar name: addons are listed separately.
+
 ### Check Status
 
 ```bash

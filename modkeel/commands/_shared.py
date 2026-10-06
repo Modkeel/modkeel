@@ -1,18 +1,17 @@
-"""Pieces every `modkeel` subcommand uses: console, banner, token and loader handling,
-fork pre-filtering and a Pipeline with a temporary work directory."""
+"""Pieces every `modkeel` subcommand uses: console, banner, token and loader handling, and
+how the resolver's outcome is shown (trail, near misses, Docker test of the delivered JAR)."""
 
-import shutil
-import tempfile
-from contextlib import contextmanager
-from typing import Dict, Iterator, List, Optional
+from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from modkeel.config import ModkeelConfig
 from modkeel.loaders import ALL_LOADERS
 from modkeel.models import ModCompilerConfig
-from modkeel.pipeline import Pipeline
+# Moved to modkeel/sources.py (the fork strategy uses them); re-exported for callers.
+from modkeel.sources import prefilter_forks, temp_pipeline  # noqa: F401
 from modkeel.utils import setup_windows_console
 
 BANNER = r"""    __  ___          ____             __
@@ -75,38 +74,55 @@ def require_valid_loader(loader: str) -> None:
         raise typer.Exit(1)
 
 
-def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10) -> List[Dict]:
-    """Forks (of the first `limit`) with at least one pre-validated branch.
+STRATEGY_LABELS = {
+    "official": "Official build",
+    "older_official": "Older official build",
+    "fork": "Community fork",
+}
 
-    Each kept fork gets its best-scoring branch under "_best_branch". Only the GitHub API is
-    used (gradle.properties and friends); nothing is cloned.
+
+def strategy_label(name: str) -> str:
+    """Human name of a source strategy for the trail ("older_official" -> "Older ...")."""
+    return STRATEGY_LABELS.get(name, name.replace("_", " ").capitalize())
+
+
+def print_trail(trail) -> None:
+    """The path the resolver took: one line per strategy or candidate, ✓ for the one used."""
+    if not trail:
+        return
+    console.print("\n[bold]Tried:[/bold]")
+    for step in trail:
+        mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
+        console.print(f"  {mark} {strategy_label(step.strategy):<22} {escape(step.detail)}")
+
+
+def print_related(mod, limit: int = 5) -> None:
+    """Near misses on Modrinth (addons, ports, similar names), never offered as the mod."""
+    others = [h for h in mod.related if h.get("title")][:limit]
+    if not others:
+        return
+    heading = (f"Related on Modrinth (not {escape(mod.title)})" if mod.project
+               else "Did you mean")
+    names = ", ".join(f"{escape(h['title'])} ({h.get('slug', '?')})" for h in others)
+    console.print(f"\n[dim]{heading}: {names}[/dim]")
+
+
+def docker_test_delivered(delivered, config: ModCompilerConfig) -> None:
+    """Boot a headless server with the delivered JAR and its dependencies, and say how it went.
+
+    The evidence layer in its current form (see modkeel/resolve.py): every strategy's JAR can
+    be tested, not only compiled ones.
     """
-    validated = []
-    for fork in forks[:limit]:
-        fork_info = fork["fork"]
-        branches = github.get_branches(fork_info["owner"], fork_info["repo"])
-        if not branches:
-            continue
-        compatible = validator.pre_validate_branches(
-            fork_info["owner"], fork_info["repo"], branches
-        )
-        if compatible:
-            fork["_best_branch"] = max(compatible, key=lambda b: validator.score_branch(b))
-            validated.append(fork)
-    return validated
+    from modkeel.docker import DockerTester
+    from modkeel.models import CompilationResult
 
-
-@contextmanager
-def temp_pipeline(config: ModCompilerConfig) -> Iterator[Pipeline]:
-    """A Pipeline with its own temporary work dir, removed on exit (success or not).
-
-    For one-off builds (search, get); `compile` uses Pipeline.process_repos, which manages
-    its own work dir.
-    """
-    pipeline = Pipeline(config)
-    pipeline.temp_dir = tempfile.mkdtemp(prefix="mod_compiler_")
-    try:
-        yield pipeline
-    finally:
-        if pipeline.temp_dir:
-            shutil.rmtree(pipeline.temp_dir, ignore_errors=True)
+    results = [CompilationResult(repo_url=str(delivered.jar_path), success=True,
+                                 jar_path=str(delivered.jar_path),
+                                 mod_name=delivered.mod_name)]
+    results += [CompilationResult(repo_url=str(dep), success=True, jar_path=str(dep),
+                                  modrinth_download=True)
+                for dep in delivered.dependencies]
+    DockerTester(config).test_mods_in_docker(results)
+    main = results[0]
+    if main.docker_test_passed:
+        delivered.evidence.append("docker_server")

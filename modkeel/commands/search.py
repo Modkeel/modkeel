@@ -1,7 +1,9 @@
-"""`modkeel search`: look a mod up on Modrinth, then in pre-filtered GitHub forks.
+"""`modkeel search`: what the resolver would use for a mod, without fetching it.
 
-Interactive runs offer to download the Modrinth build or compile the best fork; with
---no-prompt (or no terminal) it only reports.
+Runs the sources of modkeel/resolve.py in find-only mode and shows the first one with
+candidates (an official build, older official builds to verify, or pre-filtered forks), with
+the path that led there. Interactive runs offer to fetch it; with --no-prompt (or no
+terminal) it only reports.
 """
 
 from typing import Optional
@@ -13,9 +15,9 @@ from rich.table import Table
 
 from modkeel.commands._shared import (
     console,
-    prefilter_forks,
+    print_related,
+    print_trail,
     resolve_github_token,
-    temp_pipeline,
 )
 from modkeel.config import ModkeelConfig
 from modkeel.models import ModCompilerConfig
@@ -65,8 +67,9 @@ def search_command(
     ),
 ):
     """Search Modrinth and GitHub for a mod. Offers to download or compile."""
-    from modkeel.github import GitHubClient
     from modkeel.modrinth import ModrinthClient
+    from modkeel.resolve import ResolveContext, Resolver
+    from modkeel.sources import identify_mod
 
     modkeel_cfg = ModkeelConfig()
     github_token = resolve_github_token(github_token, modkeel_cfg)
@@ -79,7 +82,7 @@ def search_command(
         )
     )
 
-    # Searching needs no loader version; "0" is a placeholder until a compile is requested.
+    # "0" marks "no loader version given": searching doesn't need one, compiling does.
     def make_config(token: Optional[str]) -> ModCompilerConfig:
         return ModCompilerConfig(
             mc_version=mc_version,
@@ -90,134 +93,125 @@ def search_command(
             instance_path=instance,
         )
 
+    def token_on_demand() -> Optional[str]:
+        """The fork strategy calls this; a token is asked for only when forks are needed."""
+        nonlocal github_token
+        if not github_token:
+            github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
+        return github_token
+
     config = make_config(github_token)
-
     modrinth = ModrinthClient(config)
-    result = modrinth.check_modrinth(query)
+    mod = identify_mod(query, modrinth)
+    _print_identity(mod)
 
-    table = Table(title="Modrinth Results")
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="green")
+    ctx = ResolveContext(config=config, modrinth=modrinth,
+                         github_token=token_on_demand, make_config=make_config)
+    resolver = Resolver()
+    resolution = resolver.resolve(mod, ctx, deliver=False)
+    print_trail(resolution.trail)
 
-    if result:
-        table.add_row("Title", result["title"])
-        table.add_row("Slug", result["slug"])
-        table.add_row("Version", result["version_number"])
-        table.add_row("Type", result["version_type"])
-        size_mb = result["file_size"] / (1024 * 1024)
-        table.add_row("Size", f"{size_mb:.1f} MB")
-        table.add_row("Downloads", f"{result['downloads']:,}")
-        table.add_row("File", result["filename"])
-        if result.get("required_deps"):
-            table.add_row("Dependencies", str(len(result["required_deps"])))
-        console.print(table)
-
-        # Mod is on Modrinth -- skip fork search, offer download
-        is_interactive = not no_prompt and console.is_terminal
-        if is_interactive:
-            download = typer.confirm(
-                "\n  Available on Modrinth. Download?", default=True
+    strategy = resolution.pending_strategy
+    if strategy is None:
+        print_related(mod)
+        if not github_token:
+            console.print(
+                "\n[dim]Tip: Run 'modkeel token --set TOKEN' to enable "
+                "GitHub fork search.[/dim]"
             )
-            if download:
-                jar = modrinth.download_modrinth_mod(
-                    result["slug"], mc_version, loader.lower()
-                )
-                if jar:
-                    modrinth.download_modrinth_deps(result)
-                    console.print(f"\n[green]Downloaded to {output_dir}/[/green]")
-                else:
-                    console.print("[red]Download failed.[/red]")
         return
 
-    # Not found, or Modrinth could not be asked: say which, so a network problem
-    # is not mistaken for "this mod has no build for this version".
-    if modrinth.last_error:
-        reason = escape(modrinth.last_error)
-        table.add_row("Status", f"[red]Modrinth unavailable ({reason})[/red]")
+    _print_candidates(strategy, resolution, mc_version)
+    if strategy != "official":
+        print_related(mod)
+
+    is_interactive = not no_prompt and console.is_terminal
+    question = {
+        "official": "Download it?",
+        "older_official": "Download and verify them (nearest first)?",
+        "fork": "Compile the best fork?",
+    }.get(strategy, "Fetch it?")
+    if not is_interactive or (strategy == "fork" and not loader_version):
+        if strategy == "fork":
+            console.print(
+                "\n[dim]  Pre-filtered via gradle.properties. "
+                "Use 'modkeel get' with -lv to build, and "
+                "'--docker-test' to confirm compatibility.[/dim]"
+            )
+        return
+    if not typer.confirm(f"\n  {question}", default=strategy != "fork"):
+        return
+
+    shown = len(resolution.trail)
+    resolution = resolver.deliver_pending(resolution, mod, ctx)
+    print_trail(resolution.trail[shown:])
+    if resolution.delivered:
+        d = resolution.delivered
+        if d.caveat:
+            console.print(f"\n[yellow]Note:[/yellow] {escape(d.caveat)}")
+        console.print(f"\n[green]{d.verb.capitalize()} {escape(d.mod_name)} "
+                      f"v{escape(d.mod_version)} to {output_dir}/[/green]")
+    else:
+        console.print("\n[red]Nothing usable was found.[/red]")
+
+
+def _print_identity(mod) -> None:
+    """Which Modrinth project the query resolved to (or why there is none)."""
+    table = Table(title="Modrinth Project")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="green")
+    if mod.project:
+        table.add_row("Title", escape(mod.project["title"]))
+        table.add_row("Slug", mod.project["slug"])
+        table.add_row("Downloads", f"{mod.project.get('downloads', 0):,}")
+        if mod.source_repo:
+            table.add_row("Source", f"github.com/{mod.source_repo}")
+    elif mod.lookup_error:
+        table.add_row("Status", f"[red]Modrinth unavailable ({escape(mod.lookup_error)})[/red]")
     else:
         table.add_row("Status", "[yellow]Not found on Modrinth[/yellow]")
     console.print(table)
 
-    # The fork search needs a token; ask for one now if none was saved.
-    if not github_token:
-        github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
-        if github_token:
-            config = make_config(github_token)
 
-    if not github_token:
-        console.print(
-            "\n[dim]Tip: Run 'modkeel token --set TOKEN' to enable "
-            "GitHub fork search.[/dim]"
-        )
-        return
-
-    from modkeel.validation import BranchValidator
-
-    console.print("\n[bold]GitHub Forks:[/bold]")
-    github = GitHubClient(config)
-    forks = github.search_compatible_repos(query, query, False)
-    if not forks:
-        console.print("[yellow]No GitHub forks found.[/yellow]")
-        return
-
-    validated_forks = prefilter_forks(github, BranchValidator(github, config), forks)
-
-    fork_table = Table(
-        title=f"Pre-filtered GitHub Forks ({len(validated_forks)} of {len(forks)} passed)"
-    )
-    fork_table.add_column("Repository", style="cyan")
-    fork_table.add_column("Branch", style="blue")
-    fork_table.add_column("MC Version", style="green")
-    fork_table.add_column("Loader", style="yellow")
-    fork_table.add_column("Score", style="green", justify="right")
-
-    for fork in validated_forks:
-        best = fork["_best_branch"]
-        fork_table.add_row(
-            fork["fork"]["full_name"],
-            best.name,
-            best.minecraft_version or "?",
-            best.loader or "?",
-            str(fork["score"]),
-        )
-
-    console.print(fork_table)
-
-    if not validated_forks:
-        console.print(
-            "[yellow]No forks passed pre-filtering "
-            f"for MC {mc_version} + {loader}.[/yellow]"
-        )
-        return
-
-    # Offer compilation if interactive and a loader version was given
-    is_interactive = not no_prompt and console.is_terminal
-    if is_interactive and loader_version:
-        if typer.confirm("\n  Compile best fork?", default=False):
-            _compile_best_fork(validated_forks[0], make_config(github_token), output_dir)
-            return
-
-    console.print(
-        "\n[dim]  Pre-filtered via gradle.properties. "
-        "Use 'modkeel compile' to build and "
-        "'--docker-test' to confirm compatibility.[/dim]"
-    )
-
-
-def _compile_best_fork(best_fork: dict, config: ModCompilerConfig, output_dir: str) -> None:
-    """Build the fork's pre-selected branch (Modrinth already checked) and report it."""
-    repo_url = f"https://github.com/{best_fork['fork']['full_name']}"
-    with temp_pipeline(config) as pipeline:
-        comp_result = pipeline.clone_and_compile(
-            repo_url,
-            specific_branch=best_fork["_best_branch"].name,
-            skip_modrinth=True,
-        )
-    if comp_result.success:
-        console.print(
-            f"\n[green]Compiled {comp_result.mod_name} "
-            f"v{comp_result.mod_version} to "
-            f"{output_dir}/[/green]"
-        )
+def _print_candidates(strategy: str, resolution, mc_version: str) -> None:
+    """The pending candidates of the first strategy that has any."""
+    candidates = resolution.pending_candidates
+    if strategy == "official":
+        version = candidates[0].data["version"]
+        primary = next((f for f in version.get("files", []) if f.get("primary")),
+                       (version.get("files") or [{}])[0])
+        table = Table(title=f"Official build for MC {mc_version}")
+        table.add_column("Field", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Version", escape(version.get("version_number", "?")))
+        table.add_row("Type", version.get("version_type", "release"))
+        table.add_row("Size", f"{primary.get('size', 0) / (1024 * 1024):.1f} MB")
+        table.add_row("File", escape(primary.get("filename", "?")))
+        deps = [d for d in version.get("dependencies", [])
+                if d.get("dependency_type") == "required"]
+        if deps:
+            table.add_row("Dependencies", str(len(deps)))
+        console.print(table)
+    elif strategy == "older_official":
+        table = Table(title=f"Older official builds to verify on MC {mc_version}")
+        table.add_column("Build", style="cyan")
+        for c in candidates:
+            table.add_row(escape(c.label))
+        console.print(table)
+        console.print("[dim]  Each is checked before use: its metadata must allow "
+                      f"{mc_version} and its bytecode must resolve against it.[/dim]")
+    elif strategy == "fork":
+        table = Table(title=f"Pre-filtered GitHub Forks ({resolution.pending_note})")
+        table.add_column("Repository", style="cyan")
+        table.add_column("Branch", style="blue")
+        table.add_column("MC Version", style="green")
+        table.add_column("Loader", style="yellow")
+        for c in candidates:
+            fork = c.data["fork"]
+            best = fork["_best_branch"]
+            table.add_row(fork["fork"]["full_name"], best.name,
+                          best.minecraft_version or "?", best.loader or "?")
+        console.print(table)
     else:
-        console.print(f"\n[red]Compilation failed:[/red] {comp_result.error}")
+        for c in candidates:
+            console.print(f"  - {escape(c.label)}")
