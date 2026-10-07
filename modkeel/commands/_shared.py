@@ -1,6 +1,8 @@
 """Pieces every `modkeel` subcommand uses: console, banner, token and loader handling, and
 how the resolver's outcome is shown (trail, near misses, evidence line)."""
 
+import sys
+import time
 from typing import Optional
 
 import typer
@@ -101,3 +103,56 @@ def print_evidence(delivered, docker_requested: bool = False) -> None:
     if delivered.evidence:
         console.print(f"[dim]Evidence: "
                       f"{escape(evidence_line(delivered.evidence, docker_requested))}[/dim]")
+
+
+def countdown(message: str, seconds: int) -> bool:
+    """A cancellable countdown: True when it runs out or Enter is pressed, False on "n".
+
+    "<message> in 15s - press n to stop, Enter to start now", redrawn every second. Reads
+    stdin without blocking: select() on POSIX, msvcrt on Windows (whose select() only works
+    on sockets).
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        left = int(deadline - time.monotonic() + 0.999)
+        if left <= 0:
+            console.print()
+            return True
+        console.print(f"\r{message} in {left}s - press n to stop, Enter to start now ",
+                      end="", highlight=False)
+        answer = _read_key(timeout=1.0)
+        if answer is not None:
+            console.print()
+            return not answer.strip().lower().startswith("n")
+
+
+def _read_key(timeout: float) -> Optional[str]:
+    """A line (POSIX) or a key (Windows) typed within `timeout` seconds, else None."""
+    if sys.platform == "win32":
+        import msvcrt
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if msvcrt.kbhit():
+                return msvcrt.getwch()
+            time.sleep(0.05)
+        return None
+    import select
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    return sys.stdin.readline() if ready else None
+
+
+def offer_target(option, mode: str, interactive: bool, retry_hint: str) -> bool:
+    """Announce another Minecraft version for the pack and decide (target.fallback_decision).
+
+    Never silent: the proposal is printed in every mode, with the command to run it by hand
+    when it is not taken.
+    """
+    from modkeel.target import COUNTDOWN_SECONDS, fallback_decision
+
+    console.print(f"\n[bold]{escape(option.summary)}.[/bold]")
+    take = fallback_decision(
+        mode, interactive,
+        lambda: countdown(f"Searching MC {option.mc_version}", COUNTDOWN_SECONDS))
+    if not take:
+        console.print(f"[dim]Not searched. To try it: {escape(retry_hint)}[/dim]")
+    return take

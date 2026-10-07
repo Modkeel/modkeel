@@ -172,10 +172,65 @@ class TestCompile:
             self.results = [CompilationResult(repo_url=u, success=False) for u in urls]
         with patch.object(Pipeline, "process_repos", process), \
                 patch.object(Pipeline, "generate_report", return_value=""), \
+                patch.object(ModrinthClient, "find_project_by_repo", return_value=None), \
                 patch("modkeel.crowdsource.submit_reports"):
             result = invoke("compile", str(repos), "-m", "1.21.10", "-l", "neoforge",
                             "-lv", "64")
         assert result.exit_code == 1
+
+    def run_with_fallback(self, repos, *args, builds=None):
+        """Every repo fails on 1.21.10 and builds on any other version; both repos have a
+        Modrinth project with official builds per `builds`."""
+        runs = []
+
+        def process(self, urls):
+            runs.append(self.config)
+            ok = self.config.mc_version != "1.21.10"
+            self.results = [CompilationResult(repo_url=u, success=ok) for u in urls]
+
+        builds = builds or {"b-id": ["1.21.1"], "d-id": ["1.21.1"]}
+
+        def by_repo(self, owner, repo):
+            return {"project_id": f"{repo}-id", "slug": repo, "title": repo}
+
+        def versions(self, project_id, loader, game_version=None):
+            return [{"game_versions": builds.get(project_id, [])}]
+
+        with patch.object(Pipeline, "process_repos", process), \
+                patch.object(Pipeline, "generate_report", return_value="REPORT"), \
+                patch.object(ModrinthClient, "find_project_by_repo", by_repo), \
+                patch.object(ModrinthClient, "project_versions", versions), \
+                patch("modkeel.crowdsource.submit_reports"):
+            result = invoke("compile", str(repos), "-m", "1.21.10", "-l", "neoforge",
+                            "-lv", "21.10.64", *args)
+        return result, runs
+
+    def test_fallback_auto_rebuilds_the_pack_on_the_proposed_version(self, repos, tmp_path):
+        instance = tmp_path / "inst"
+        instance.mkdir()
+        result, runs = self.run_with_fallback(repos, "--fallback", "auto", "-i", str(instance))
+        assert result.exit_code == 0, result.output
+        assert "MC 1.21.1 has official builds of 2 of the 2 mods" in result.output
+        retry = runs[1]
+        assert (retry.mc_version, retry.loader_version) == ("1.21.1", "0")
+        assert retry.output_dir == Path("out/mc-1.21.1") and retry.mods_path is None
+        assert "Not installed into" in result.output
+
+    def test_without_a_terminal_the_proposal_is_only_reported(self, repos):
+        result, runs = self.run_with_fallback(repos)
+        assert result.exit_code == 1 and len(runs) == 1
+        assert "MC 1.21.1 has official builds of 2 of the 2 mods" in result.output
+        assert "modkeel compile" in result.output and "-m 1.21.1" in result.output
+
+    def test_strict_never_changes_version(self, repos):
+        result, runs = self.run_with_fallback(repos, "--strict", "--fallback", "auto")
+        assert result.exit_code == 1 and len(runs) == 1
+        assert "official builds of" not in result.output
+
+    def test_bad_fallback_value(self, repos):
+        result = invoke("compile", str(repos), "-m", "1.21.10", "-l", "neoforge", "-lv", "64",
+                        "--fallback", "maybe")
+        assert result.exit_code == 2 and "--fallback must be one of" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +519,57 @@ class TestGet:
 # ---------------------------------------------------------------------------
 # token / status / recommend
 # ---------------------------------------------------------------------------
+
+
+    def by_version(self, builds):
+        """project_versions answering per game version: {mc: [versions]}."""
+        def project_versions(self, project_id, loader, game_version=None):
+            self.last_error = None
+            if game_version:
+                return list(builds.get(game_version, []))
+            return [v for vs in builds.values() for v in vs]
+        return patch.object(ModrinthClient, "project_versions", project_versions)
+
+    def test_fallback_auto_gets_the_nearest_version_with_a_build(self, tmp_path):
+        instance = tmp_path / "inst"
+        instance.mkdir()
+        old = mr_version("6.0.6", ["1.21.1"], filename="create.jar", deps=())
+        with patched(*modrinth(project=CREATE)[:2], self.by_version({"1.21.1": [old]}),
+                     patch("modkeel.sources._download", fake_download),
+                     patch("modkeel.sources.validate_jar",
+                           return_value=(False, "create", "6.0.6",
+                                         "JAR declares incompatible MC version: [1.21.1]")),
+                     patch("modkeel.evidence.validate_jar",
+                           return_value=(False, "create", "6.0.6",
+                                         "JAR declares incompatible MC version: [1.21.1]")),
+                     patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK),
+                     patch("modkeel.relax.relax_jar", return_value=None)):
+            result = invoke("get", "Create", "-m", "1.21.10", "-i", str(instance),
+                            "--fallback", "auto")
+        assert result.exit_code == 0, result.output
+        assert "MC 1.21.1 has an official build of Create" in result.output
+        assert "Done! Create v6.0.6 for MC 1.21.1 downloaded to out/mc-1.21.1/" in result.output
+        assert Path("out/mc-1.21.1/create.jar").exists()
+        assert not (instance / "mods" / "create.jar").exists()
+        assert "Not installed into" in result.output
+
+    def test_without_a_terminal_the_proposal_is_only_reported(self):
+        old = mr_version("6.0.6", ["1.21.1"], filename="create.jar", deps=())
+        with patched(*modrinth(project=CREATE)[:2], self.by_version({"1.21.1": [old]}),
+                     patch("modkeel.sources._download", fake_download),
+                     patch("modkeel.sources.validate_jar",
+                           return_value=(False, "create", "6.0.6",
+                                         "JAR declares incompatible MC version: [1.21.1]")),
+                     patch("modkeel.evidence.validate_jar",
+                           return_value=(False, "create", "6.0.6",
+                                         "JAR declares incompatible MC version: [1.21.1]")),
+                     patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK),
+                     patch("modkeel.relax.relax_jar", return_value=None)):
+            result = invoke("get", "Create", "-m", "1.21.10")
+        assert result.exit_code == 1
+        assert "MC 1.21.1 has an official build of Create" in result.output
+        assert 'modkeel get "Create" -m 1.21.1 -l neoforge' in result.output
+        assert not Path("out/mc-1.21.1").exists()
 
 class TestToken:
     def test_lifecycle(self):

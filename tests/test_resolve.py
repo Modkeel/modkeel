@@ -438,7 +438,8 @@ class TestRelaxedOfficial:
     CAND = Candidate("1 for MC 1.21.9", {"version": version("1", ["1.21.9"], "mod.jar"),
                                           "built_for": "1.21.9"})
 
-    def deliver(self, ctx, valid, linkage=None, relaxed=True, boot=None, mixins=None):
+    def deliver(self, ctx, valid, linkage=None, relaxed=True, boot=None, mixins=None,
+                relax_error=None):
         from modkeel.relax import Relaxed
         linkage = linkage or Outcome("linkage", PASSED, "ok")
         mixins = mixins or Outcome("mixins", PASSED, "ok")
@@ -453,6 +454,8 @@ class TestRelaxedOfficial:
             dest.write_bytes(b"PK")
 
         def fake_relax(src, dest, built_for, target):
+            if relax_error:
+                raise relax_error
             if not relaxed:
                 return None
             dest.write_bytes(b"PK relaxed")
@@ -507,6 +510,11 @@ class TestRelaxedOfficial:
         out, _ = self.deliver(ctx, valid=[(False, None, None, "Invalid JAR file (corrupted)")])
         assert out.reason == ("refused for something other than its range "
                               "(Invalid JAR file (corrupted))")
+
+    def test_unreadable_jar_is_a_rejection_not_a_crash(self, ctx):
+        import zipfile
+        out, _ = self.deliver(ctx, valid=[self.RANGE], relax_error=zipfile.BadZipFile("bad"))
+        assert out.reason == "its metadata could not be rewritten (bad)"
 
     def test_nothing_to_rewrite(self, ctx):
         out, _ = self.deliver(ctx, valid=[self.RANGE], relaxed=False)

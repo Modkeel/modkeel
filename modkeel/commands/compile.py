@@ -1,4 +1,9 @@
-"""`modkeel compile`: build every repository in a list file through the full pipeline."""
+"""`modkeel compile`: build every repository in a list file through the full pipeline.
+
+The repositories are a pack: when some of them cannot be resolved on the requested version,
+the target layer (modkeel/target.py) may propose another Minecraft version for all of them
+(never with --strict), and re-run the whole list there into <output>/mc-<version>/.
+"""
 
 import logging
 from pathlib import Path
@@ -11,6 +16,7 @@ from modkeel.commands._shared import (
     BANNER,
     TAGLINE,
     console,
+    offer_target,
     require_valid_loader,
     resolve_github_token,
 )
@@ -108,10 +114,23 @@ def compile_command(
         False, "--no-symbol-check",
         help="Skip verifying Minecraft symbols against official mappings.",
     ),
+    fallback: Optional[str] = typer.Option(
+        None,
+        "--fallback",
+        help="When some repos fail, try the nearest version where more of them have an "
+             "official build: ask (countdown; default in a terminal), auto, never "
+             "(default otherwise). Never with --strict.",
+        case_sensitive=False,
+    ),
 ):
     """Compile mods from a list of GitHub repositories."""
+    from modkeel.target import FALLBACK_MODES
+
     setup_logging(log_file)
     require_valid_loader(loader)
+    if fallback is not None and fallback.lower() not in FALLBACK_MODES:
+        console.print(f"[red]Error:[/red] --fallback must be one of {', '.join(FALLBACK_MODES)}")
+        raise typer.Exit(2)
 
     # One URL per line; blank lines and # comments are skipped.
     with open(repos_file, "r", encoding="utf-8") as f:
@@ -190,6 +209,65 @@ def compile_command(
         except Exception as e:
             logging.getLogger("modkeel").debug("Crowdsource submission error: %s", e)
 
+    fallback_built = False
+    if not strict and any(not r.success for r in pipeline.results):
+        fallback_built = _pack_fallback(repo_urls, pipeline, config, repos_file, fallback)
+
     # Exit code 1 only when every repository failed (scripts can tell "nothing built").
-    if pipeline.results and not any(r.success for r in pipeline.results):
+    if pipeline.results and not any(r.success for r in pipeline.results) \
+            and not fallback_built:
         raise typer.Exit(1)
+
+
+def _pack_fallback(repo_urls, pipeline: Pipeline, config: ModCompilerConfig,
+                   repos_file: Path, fallback: Optional[str]) -> bool:
+    """The target layer for compile: propose a version for the whole list, decide, re-run.
+
+    The pack's mods are the repos' Modrinth projects (repos without one count as missing
+    everywhere). True when the fallback run built at least one mod.
+    """
+    from modkeel.github import parse_repo_url
+    from modkeel.modrinth import ModrinthClient
+    from modkeel.sources import identify_repo
+    from modkeel.target import default_mode, fallback_output, propose_targets
+
+    modrinth = ModrinthClient(config)
+    mods = []
+    for url in repo_urls:
+        try:
+            owner, repo, _ = parse_repo_url(url)
+        except ValueError:
+            mods.append((url, None))
+            continue
+        ref = identify_repo(owner, repo, modrinth)
+        mods.append((repo, ref.project.get("project_id") if ref.project else None))
+    resolved = sum(1 for r in pipeline.results if r.success)
+    options = propose_targets(mods, config.loader, config.mc_version, modrinth, resolved,
+                              limit=1)
+    if not options:
+        return False
+    option = options[0]
+    hint = f"modkeel compile {repos_file} -m {option.mc_version} -l {config.loader}"
+    mode = (fallback or default_mode(console.is_terminal)).lower()
+    if not offer_target(option, mode, console.is_terminal, hint):
+        return False
+
+    # Same run on the new version: own output folder, never the instance, no -lv (it named
+    # a loader build for the requested version).
+    out = fallback_output(config.output_dir, option.mc_version)
+    retry = ModCompilerConfig(
+        mc_version=option.mc_version, loader=config.loader, loader_version="0",
+        instance_path=None, github_token=config.github_token, strict_version=False,
+        output_dir=str(out), cross_loader=config.cross_loader, docker_test=config.docker_test,
+        docker_timeout=config.docker_timeout, prebuild_gate=config.prebuild_gate,
+        use_prebuilt=config.use_prebuilt, symbol_check=config.symbol_check)
+    second = Pipeline(retry)
+    second.process_repos(repo_urls)
+    print(second.generate_report())
+    built = sum(1 for r in second.results if r.success)
+    console.print(f"\n[green]MC {option.mc_version}: {built} of {len(repo_urls)} built "
+                  f"to {out}/[/green]")
+    if config.instance_path:
+        console.print(f"[yellow]Not installed into {config.instance_path}: these are for MC "
+                      f"{option.mc_version}, not {config.mc_version}.[/yellow]")
+    return built > 0

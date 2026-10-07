@@ -21,6 +21,7 @@ official_source comes before older_official.
 
 import shutil
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Union
@@ -343,7 +344,11 @@ class RelaxedOfficialSource(OlderOfficialSource):
 
         stem = primary["filename"].removesuffix(".jar")
         dest = ctx.config.output_dir / f"{stem}+modkeel-relaxed-mc{target}.jar"
-        change = relax_jar(jar, dest, built_for, target)
+        try:
+            change = relax_jar(jar, dest, built_for, target)
+        except (zipfile.BadZipFile, OSError, ValueError) as e:  # ValueError: broken JSON
+            dest.unlink(missing_ok=True)
+            return Rejected(f"its metadata could not be rewritten ({e})")
         if change is None:
             return Rejected("no Minecraft range in its metadata to rewrite")
         print(f"    \u270f\ufe0f  Relaxed {change.metadata_file}: MC {change.old_range} -> "
