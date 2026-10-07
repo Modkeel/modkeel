@@ -642,6 +642,19 @@ class TestProcessRepos:
             pipeline.process_repos(["r"])
         pipeline.docker.test_mods_in_docker.assert_called_once_with(pipeline.results)
 
+    def test_resolved_urls_are_kept_and_tested_with_the_rest(self, pipeline):
+        """A target fallback carries JARs over from the first run: they are not resolved
+        again, keep their place in the list and boot with the others."""
+        pipeline.config.docker_test = True
+        carried = CompilationResult(repo_url="a", success=True, jar_path="a.jar")
+        built = CompilationResult(repo_url="b", success=True)
+        with patch.object(Pipeline, "clone_and_compile", return_value=built) as compile_, \
+                patch("modkeel.pipeline.time.sleep"):
+            pipeline.process_repos(["a", "b"], resolved={"a": carried})
+        assert [c.args[0] for c in compile_.call_args_list] == ["b"]
+        assert pipeline.results == [carried, built]
+        pipeline.docker.test_mods_in_docker.assert_called_once_with([carried, built])
+
 
 # ---------------------------------------------------------------------------
 # generate_report

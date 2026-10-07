@@ -888,8 +888,15 @@ class Pipeline:
             print(f"    \U0001f4be Installed to: {instance_dest}")
         return dest_path
 
-    def process_repos(self, repo_urls: List[str]):
-        """Process a list of repository URLs with dependency-aware multi-pass."""
+    def process_repos(self, repo_urls: List[str],
+                      resolved: Optional[Dict[str, CompilationResult]] = None):
+        """Process a list of repository URLs with dependency-aware multi-pass.
+
+        resolved: results already known for some URLs (a target fallback carrying over JARs
+        from the first run, modkeel/target.py); they are kept as they are, not resolved
+        again, and still take part in the Docker test of the whole set.
+        """
+        resolved = resolved or {}
         self.temp_dir = tempfile.mkdtemp(prefix="mod_compiler_")
         print(f"\U0001f5c2\ufe0f  Using temporary directory: {self.temp_dir}")
 
@@ -900,6 +907,9 @@ class Pipeline:
 
             pass1_results: Dict[str, CompilationResult] = {}
             for repo_url in repo_urls:
+                if repo_url in resolved:
+                    pass1_results[repo_url] = resolved[repo_url]
+                    continue
                 try:
                     result = self.clone_and_compile(repo_url)
                 except Exception as e:
