@@ -13,10 +13,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from modkeel.evidence import PASSED, Outcome
 from modkeel.models import BranchCandidate, CompilationResult, FailureType, ModCompilerConfig
 from modkeel.pipeline import Pipeline
 
 REPO = "https://github.com/owner/mod"
+
+LINKAGE_OK = Outcome("linkage", PASSED, "ok")
 
 
 def branch(name: str, mc: str = "1.21.10", loader: str = "neoforge",
@@ -402,7 +405,8 @@ class TestSourceOrder:
             patch("modkeel.sources._download",
                   lambda url, dest: dest.write_bytes(b"PK" + b"x" * 20_000)),
             patch("modkeel.sources.validate_jar", return_value=(True, "mod", "6.0.9", "ok")),
-            patch("modkeel.sources._linkage_rejection", return_value=None),
+            patch("modkeel.evidence.validate_jar", return_value=(True, "mod", "6.0.9", "ok")),
+            patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK),
         ]
 
     def test_author_branch_failure_tries_older_official_before_forks(self, pipeline, build):

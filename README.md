@@ -128,6 +128,11 @@ modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
 
 It never downloads a different mod with a similar name: addons are listed separately.
 
+The last lines say what the JAR passed (`Evidence: metadata ✓ · linkage ✓ · ...`). With
+`--docker-test`, a headless server boots with each result before it is accepted: a JAR that
+crashes it (for example a mixin whose target changed) is removed and the next candidate is
+tried. Without Docker the JAR is kept and the output says the test did not run.
+
 `compile` follows the same order for each repository, with one more step after the official
 build: the author's own branch for that version, prebuilt or compiled, comes before an older
 build. `--strict` never uses an older build. The report says which source each mod came from

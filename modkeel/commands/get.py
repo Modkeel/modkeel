@@ -16,7 +16,7 @@ from modkeel.commands._shared import (
     BANNER,
     TAGLINE,
     console,
-    docker_test_delivered,
+    print_evidence,
     print_related,
     print_trail,
     require_valid_loader,
@@ -67,7 +67,8 @@ def get_command(
     docker_test: bool = typer.Option(
         False,
         "--docker-test",
-        help="Test compiled mod in Docker after compilation.",
+        help="Boot a headless server with the result; a JAR that crashes it is rejected "
+             "and the next candidate is tried.",
     ),
 ):
     """Find and download/compile a mod in one step."""
@@ -120,7 +121,8 @@ def get_command(
                       f"({mod.project['slug']}){repo}")
 
     ctx = ResolveContext(config=config, modrinth=modrinth,
-                         github_token=token_on_demand, make_config=make_config)
+                         github_token=token_on_demand, make_config=make_config,
+                         verify_runtime=docker_test)
     resolution = Resolver().resolve(mod, ctx)
     print_trail(resolution.trail)
 
@@ -133,14 +135,14 @@ def get_command(
         )
         raise typer.Exit(1)
 
-    if docker_test:
-        docker_test_delivered(delivered, make_config(github_token))
-
+    if delivered.unverified:
+        console.print(f"\n[yellow]Server test not run:[/yellow] {escape(delivered.unverified)}")
     if "docker_server" in delivered.evidence and delivered.caveat:
         console.print(f"\n[yellow]Note:[/yellow] "
                       f"{escape(caveat_after_docker(delivered.caveat, mc_version))}")
     elif delivered.caveat:
         console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat)}")
+    print_evidence(delivered, docker_requested=docker_test)
     console.print(
         f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
         f"{delivered.verb} to {output_dir}/[/green]"

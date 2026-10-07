@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from modkeel.cli import app
 from modkeel.config import ModkeelConfig
+from modkeel.evidence import PASSED, Outcome
 from modkeel.github import GitHubClient
 from modkeel.models import BranchCandidate, CompilationResult
 from modkeel.modrinth import ModrinthClient
@@ -32,6 +33,8 @@ MODRINTH_HIT = {
     "version_type": "release", "file_size": 2 * 1024 * 1024, "downloads": 1234,
     "filename": "jei.jar", "required_deps": ["dep"], "download_url": "u",
 }
+
+LINKAGE_OK = Outcome("linkage", PASSED, "ok")
 
 
 def set_everywhere(monkeypatch, name, value):
@@ -384,6 +387,9 @@ class TestGet:
                            lambda url, dest: downloads.append(url) or fake_download(url, dest)),
                      patch("modkeel.sources.validate_jar",
                            return_value=(False, "create", "6.0.6",
+                                         "JAR declares incompatible MC version: [1.21.1]")),
+                     patch("modkeel.evidence.validate_jar",
+                           return_value=(False, "create", "6.0.6",
                                          "JAR declares incompatible MC version: [1.21.1]"))):
             result = invoke("get", "Create", "-m", "1.21.10")
         assert result.exit_code == 1
@@ -399,11 +405,14 @@ class TestGet:
                      patch("modkeel.sources._download", fake_download),
                      patch("modkeel.sources.validate_jar",
                            return_value=(True, "create", "6.0.9", "ok")),
-                     patch("modkeel.sources._linkage_rejection", return_value=None)):
+                     patch("modkeel.evidence.validate_jar",
+                           return_value=(True, "create", "6.0.9", "ok")),
+                     patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK)):
             result = invoke("get", "Create", "-m", "1.21.10")
         assert result.exit_code == 0, result.output
         assert "Older official build" in result.output
         assert "Built for MC 1.21.9" in result.output
+        assert "Evidence: metadata ✓ · linkage ✓ · server boot not run" in result.output
         assert "Done! Create v6.0.9 downloaded to out/" in result.output
         assert Path("out/create.jar").exists()
 
@@ -418,6 +427,7 @@ class TestGet:
                      patch("modkeel.sources._download", fake_download),
                      patch.object(ModrinthClient, "download_modrinth_deps",
                                   return_value=[Path("out/dep.jar")]),
+                     patch("modkeel.docker.DockerTester.check_docker_available", return_value=True),
                      patch("modkeel.docker.DockerTester.test_mods_in_docker", docker)):
             result = invoke("get", "JEI", "-m", "1.21.1", "--docker-test")
         assert result.exit_code == 0, result.output
@@ -433,11 +443,15 @@ class TestGet:
                      patch("modkeel.sources._download", fake_download),
                      patch("modkeel.sources.validate_jar",
                            return_value=(True, "create", "6.0.9", "ok")),
-                     patch("modkeel.sources._linkage_rejection", return_value=None),
+                     patch("modkeel.evidence.validate_jar",
+                           return_value=(True, "create", "6.0.9", "ok")),
+                     patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK),
+                     patch("modkeel.docker.DockerTester.check_docker_available", return_value=True),
                      patch("modkeel.docker.DockerTester.test_mods_in_docker", docker)):
             result = invoke("get", "Create", "-m", "1.21.10", "--docker-test")
         assert "Built for MC 1.21.9. A headless MC 1.21.10 server booted with it" in result.output
         assert "before relying on it" not in result.output
+        assert "Evidence: metadata ✓ · linkage ✓ · server boot ✓" in result.output
 
     def test_invalid_loader(self):
         result = invoke("get", "JEI", "-m", "1.21.1", "-l", "rift")

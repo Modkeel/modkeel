@@ -29,6 +29,7 @@ import requests
 
 from modkeel.build import validate_jar
 from modkeel.constants import MODKEEL_HOME, MODRINTH_USER_AGENT
+from modkeel.evidence import Subject, gather
 from modkeel.loaders import get_profile
 from modkeel.models import ModCompilerConfig
 from modkeel.modrinth import ModrinthClient, pick_version
@@ -42,6 +43,9 @@ from modkeel.resolve import (
     SourceStrategy,
 )
 from modkeel.version import compare_versions
+
+# validate_jar's message when a JAR's declared Minecraft range excludes the target
+RANGE_REFUSAL = "JAR declares incompatible MC version"
 
 SOURCE_ORDER = ["official", "official_source", "older_official", "fork", "relaxed_official"]
 
@@ -267,15 +271,13 @@ class OlderOfficialSource(SourceStrategy):
         except requests.RequestException as e:
             return Rejected(f"download failed ({e})")
 
-        # Loaders refuse a mod whose declared Minecraft range excludes the game.
-        ok, _, _, message = validate_jar(jar, target)
-        if not ok:
-            return Rejected(message.replace("JAR declares incompatible MC version",
-                                            "its metadata only allows MC"))
-
-        rejected = _linkage_rejection(jar, target, built_for)
-        if rejected:
-            return rejected
+        # Loaders refuse a mod whose declared Minecraft range excludes the game; then its
+        # bytecode must resolve there. Both are required: an unverifiable JAR is not offered.
+        evidence = gather(Subject(jar, target, built_for, mod.title), ctx.config,
+                          ["metadata", "linkage"])
+        if not evidence.ok:
+            return Rejected(evidence.reason)
+        _print_linkage(evidence)
 
         dest = _install(jar, ctx.config)
 
@@ -283,7 +285,7 @@ class OlderOfficialSource(SourceStrategy):
         return Delivered(
             jar_path=dest, mod_name=mod.title,
             mod_version=version.get("version_number", "unknown"),
-            evidence=["metadata", "linkage"], dependencies=deps or [],
+            evidence=evidence.passed, dependencies=deps or [],
             caveat=(f"Built for MC {built_for}. Its metadata allows {target}, every "
                     f"Minecraft class it uses exists in {target} and no method or field it "
                     f"calls was removed or renamed since {built_for}, but that is a static "
@@ -324,35 +326,41 @@ class RelaxedOfficialSource(OlderOfficialSource):
         except requests.RequestException as e:
             return Rejected(f"download failed ({e})")
 
-        ok, _, _, _ = validate_jar(jar, target)
+        ok, _, _, message = validate_jar(jar, target, min_size=0)
         if ok:
             return Rejected("its metadata already allows the target (older_official's case)")
-        rejected = _linkage_rejection(jar, target, built_for)
-        if rejected:
-            return rejected
+        if RANGE_REFUSAL not in message:
+            # Only a declared range is rewritten; anything else stays a refusal
+            return Rejected(f"refused for something other than its range ({message})")
+        static = gather(Subject(jar, target, built_for, mod.title), ctx.config, ["linkage"])
+        if not static.ok:
+            return Rejected(static.reason)
+        _print_linkage(static)
 
         stem = primary["filename"].removesuffix(".jar")
         dest = ctx.config.output_dir / f"{stem}+modkeel-relaxed-mc{target}.jar"
         change = relax_jar(jar, dest, built_for, target)
         if change is None:
             return Rejected("no Minecraft range in its metadata to rewrite")
-        ok, _, _, message = validate_jar(dest, target)
-        if not ok:
-            dest.unlink(missing_ok=True)
-            return Rejected(f"still refused after rewriting its range ({message})")
         print(f"    \u270f\ufe0f  Relaxed {change.metadata_file}: MC {change.old_range} -> "
               f"{change.new_range}")
 
+        # The rewritten JAR must now pass metadata, and a server must boot with it: no
+        # Docker or an inconclusive boot is a rejection here, not a skipped check.
         deps = ctx.modrinth.download_modrinth_deps({"required_deps": _required_deps(version)})
-        rejected = _server_boot_rejection(dest, deps or [], mod.title, ctx)
-        if rejected:
+        runtime = gather(Subject(dest, target, built_for, mod.title, deps or []), ctx.config,
+                         ["metadata", "docker_server"])
+        if not runtime.ok:
             dest.unlink(missing_ok=True)
-            return rejected
+            failure = runtime.failure
+            if failure.check == "metadata":
+                return Rejected(f"still refused after rewriting its range ({failure.detail})")
+            return Rejected(failure.detail)
         _install(dest, ctx.config)
         return Delivered(
             jar_path=dest, mod_name=mod.title,
             mod_version=version.get("version_number", "unknown"),
-            evidence=["linkage", "metadata_relaxed", "docker_server"],
+            evidence=[*static.passed, "metadata_relaxed", *runtime.passed],
             dependencies=deps or [],
             caveat=(f"Built for MC {built_for}; its author declared {change.old_range}. "
                     f"Modkeel added {target} to that range ({change.new_range}) because every "
@@ -363,98 +371,16 @@ class RelaxedOfficialSource(OlderOfficialSource):
         )
 
 
-def _server_boot_rejection(jar: Path, deps: List[Path], name: str,
-                           ctx: ResolveContext) -> Optional[Rejected]:
-    """None when a headless server boots with the JAR (and its dependencies), else why not.
-
-    Uses the regular Docker tester (and its cache). Unavailable Docker, a client-only mod
-    and an infrastructure error are rejections too: without a boot there is no evidence.
-    """
-    from modkeel.docker import DockerTester
-    from modkeel.models import CompilationResult
-
-    tester = DockerTester(ctx.config)
-    if not tester.check_docker_available():
-        return Rejected("needs Docker to verify a relaxed build (a server must boot with it)")
-    results = [CompilationResult(repo_url=str(jar), success=True, jar_path=str(jar),
-                                 mod_name=name)]
-    results += [CompilationResult(repo_url=str(d), success=True, jar_path=str(d),
-                                  modrinth_download=True) for d in deps]
-    tester.test_mods_in_docker(results)
-    main = results[0]
-    if main.docker_test_passed:
-        return None
-    if main.docker_test_passed is None:
-        return Rejected(f"server test inconclusive ({main.docker_error or 'no result'})")
-    return Rejected(f"a server did not boot with it ({(main.docker_error or '')[:80]})")
-
-
 def _version_key(game_version: str):
     return tuple(int(p) for p in game_version.split("."))
 
 
-def _linkage_rejection(jar: Path, mc_version: str,
-                       built_for: Optional[str] = None) -> Optional[Rejected]:
-    """None when the JAR's bytecode resolves on mc_version, else why it is rejected.
+def _print_linkage(evidence) -> None:
+    """Show the linkage summary of evidence that passed it (what was checked, how much)."""
+    linkage = next((o for o in evidence.outcomes if o.check == "linkage" and o.passed), None)
+    if linkage:
+        print(f"    ✓ Linkage: {linkage.detail}")
 
-    Unlike the pipeline's prebuilt check, an inconclusive check rejects: an official build
-    for the exact target was not found, so a JAR we cannot verify is not offered as if it
-    were one.
-
-    With ``built_for`` (the version the build targets), methods and fields are checked as
-    well: one its owner declared in built_for and not in mc_version was removed or renamed,
-    so the build would throw NoSuchMethodError/NoSuchFieldError when that code runs. If the
-    built-for mappings cannot be loaded, the check falls back to classes only.
-    """
-    from modkeel.linkage import check_jar
-    from modkeel.mappings import load_index
-
-    index = load_index(mc_version)
-    if index is None:
-        return Rejected(f"cannot verify: no symbol table for MC {mc_version}")
-    built_for_index = load_index(built_for) if built_for and built_for != mc_version else None
-    report = check_jar(jar, index, built_for_index)
-    if not report.checked:
-        return Rejected(f"cannot verify ({report.skip_reason})")
-    if not report.is_clean:
-        # Which classes and members, not only how many: they say what part of the mod
-        # breaks, and how big the port would be
-        reasons = []
-        if report.missing_classes:
-            reasons.append(f"{len(report.missing_classes)} Minecraft classes it uses don't "
-                           f"exist in {mc_version} ({_first(report.missing_classes, _short_class)})")
-        if report.vanished_members:
-            reasons.append(f"{len(report.vanished_members)} methods/fields it calls were "
-                           f"removed or renamed after {built_for} "
-                           f"({_first(report.vanished_members, _short_member)})")
-        return Rejected("; ".join(reasons))
-    print(f"    ✓ Linkage: {report.summary}")
-    return None
-
-
-def _first(items: List[str], short, shown: int = 3) -> str:
-    """The first `shown` items in short form, then "..." if there are more."""
-    more = ", ..." if len(items) > shown else ""
-    return ", ".join(short(i) for i in items[:shown]) + more
-
-
-def _short_class(fqcn: str) -> str:
-    """net.minecraft.client.renderer.DimensionSpecialEffects -> DimensionSpecialEffects."""
-    return fqcn.rsplit(".", 1)[-1].rsplit("/", 1)[-1]
-
-
-def _short_member(entry: str) -> str:
-    """"method net.minecraft.x.Owner$Inner.name(I)V" -> "Owner$Inner.name()"; fields alike."""
-    kind, _, ref = entry.partition(" ")
-    if kind == "method":
-        ref = ref.split("(", 1)[0]
-    owner, _, name = ref.rpartition(".")
-    return f"{_short_class(owner)}.{name}" + ("()" if kind == "method" else "")
-
-
-# ---------------------------------------------------------------------------
-# fork
-# ---------------------------------------------------------------------------
 
 def possible_ports(fork_name: str, branches: List) -> List[str]:
     """Branches pre-validation rejected only because they declare another Minecraft range.

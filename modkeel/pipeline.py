@@ -192,25 +192,18 @@ class Pipeline:
         if not getattr(self.config, "symbol_check", True):
             return True
 
-        from modkeel.linkage import check_jar
-        from modkeel.mappings import load_index
+        from modkeel.evidence import NOT_RUN, Subject, check_linkage
 
-        index = load_index(self.config.mc_version)
-        if index is None:
+        outcome = check_linkage(Subject(jar_path, self.config.mc_version), self.config)
+        if outcome.status == NOT_RUN:
+            print(f"    \U0001f50e Linkage: {outcome.detail}")
             return True
 
-        report = check_jar(jar_path, index)
-        if not report.checked:
-            print(f"    \U0001f50e Linkage: {report.summary}")
+        if outcome.passed:
+            print(f"    ✓ Linkage: {outcome.detail}")
             return True
 
-        if report.is_clean:
-            print(f"    ✓ Linkage: {report.summary}")
-            return True
-
-        print(f"    ⚠️  Linkage: {report.summary} -- JAR targets a different version")
-        for finding in report.findings[:3]:
-            print(f"        - {finding}")
+        print(f"    ⚠️  Linkage: {outcome.detail} -- JAR targets a different version")
         print("    ℹ️  Rejecting pre-built JAR, compiling instead")
         return False
 
