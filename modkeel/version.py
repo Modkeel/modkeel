@@ -41,7 +41,14 @@ def is_version_in_maven_range(version: str, range_str: str) -> bool:
     - [1.21,1.22) = 1.21.x (inclusive 1.21, exclusive 1.22)
     - [1.21.1] = exactly 1.21.1
     - [1.21,) = 1.21 and above
+    - [1.21.6,1.21.8],[1.21.10] = either range (union)
     """
+    # A union of ranges ("[1.21.6,1.21.8],[1.21.10]", as Maven and NeoForge accept):
+    # the version is in it when it is in any of them.
+    union = re.findall(r'[\[(][^\])]*[\])]', range_str.strip())
+    if len(union) > 1:
+        return any(is_version_in_maven_range(version, part) for part in union)
+
     try:
         # Parse the range
         if range_str.startswith('[') or range_str.startswith('('):

@@ -120,6 +120,10 @@ modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
    metadata must allow your version and every Minecraft class it uses must exist there.
    A static check, so test it in game (or with `--docker-test`).
 3. A community fork compiled for that version (needs a token and `-lv`).
+4. Last resort: an older official build refused only by its declared Minecraft range. Modkeel
+   adds your version to that range, but keeps the result only if its bytecode resolves and a
+   headless server boots with it (needs Docker). The file is renamed `...+modkeel-relaxed-...`
+   and carries `META-INF/modkeel-relaxed.txt`.
 
 It never downloads a different mod with a similar name: addons are listed separately.
 

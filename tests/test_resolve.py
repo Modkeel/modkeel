@@ -27,10 +27,13 @@ from modkeel.sources import (
     ForkSource,
     OfficialSource,
     OlderOfficialSource,
+    RelaxedOfficialSource,
     _family,
     _linkage_rejection,
     default_strategies,
     in_source_order,
+    possible_ports,
+    possible_ports_note,
 )
 
 
@@ -57,7 +60,9 @@ class FakeSource(SourceStrategy):
 
 
 @pytest.fixture
-def ctx(tmp_path):
+def ctx(tmp_path, monkeypatch):
+    # downloads are cached under MODKEEL_HOME: keep them in this test's tmp dir
+    monkeypatch.setattr("modkeel.sources.MODKEEL_HOME", tmp_path / "home")
     config = ModCompilerConfig("1.21.10", "neoforge", "0", output_dir=str(tmp_path / "out"))
     return ResolveContext(config=config, modrinth=MagicMock(spec=ModrinthClient))
 
@@ -113,9 +118,11 @@ class TestResolver:
         assert res.pending is None
 
     def test_default_order(self):
-        assert SOURCE_ORDER == ["official", "official_source", "older_official", "fork"]
+        assert SOURCE_ORDER == ["official", "official_source", "older_official", "fork",
+                                "relaxed_official"]
         # get/search know no repo branches: official_source is skipped, order kept
-        assert [s.name for s in default_strategies()] == ["official", "older_official", "fork"]
+        assert [s.name for s in default_strategies()] == [
+            "official", "older_official", "fork", "relaxed_official"]
 
     def test_unknown_strategy_name_is_a_bug(self):
         with pytest.raises(KeyError):
@@ -239,11 +246,14 @@ class TestLinkageRejection:
         assert out.reason == "cannot verify (intermediary names)"
 
     def test_missing_classes(self):
-        report = MagicMock(checked=True, is_clean=False, missing_classes=["a", "b"])
+        report = MagicMock(checked=True, is_clean=False, missing_classes=[
+            "net.minecraft.client.renderer.FogRenderer", "net/minecraft/world/level/Old",
+            "net.minecraft.A", "net.minecraft.B"])
         with patch("modkeel.mappings.load_index", return_value=object()), \
                 patch("modkeel.linkage.check_jar", return_value=report):
             out = _linkage_rejection(Path("x.jar"), "1.21.10")
-        assert out.reason == "2 Minecraft classes it uses don't exist in 1.21.10"
+        assert out.reason == ("4 Minecraft classes it uses don't exist in 1.21.10 "
+                              "(FogRenderer, Old, A, ...)")
 
     def test_clean(self):
         report = MagicMock(checked=True, is_clean=True, summary="ok")
@@ -369,3 +379,131 @@ class TestFindProjectByRepo:
     def test_no_project_names_the_repo(self):
         hits = [hit("flywheel", "Flywheel (Legacy)")]
         assert self.by_repo(hits, {"flywheel": "Jozufozu/Flywheel"}) is None
+
+
+# ---------------------------------------------------------------------------
+# relaxed_official
+# ---------------------------------------------------------------------------
+
+class TestRelaxedOfficial:
+    CAND = Candidate("1 for MC 1.21.9", {"version": version("1", ["1.21.9"], "mod.jar"),
+                                          "built_for": "1.21.9"})
+
+    def deliver(self, ctx, valid, linkage=None, relaxed=True, boot=None):
+        from modkeel.relax import Relaxed
+        ctx.modrinth.download_modrinth_deps.return_value = []
+        downloads = []
+
+        def fake_download(url, dest):
+            downloads.append(url)
+            dest.write_bytes(b"PK")
+
+        def fake_relax(src, dest, built_for, target):
+            if not relaxed:
+                return None
+            dest.write_bytes(b"PK relaxed")
+            return Relaxed("META-INF/neoforge.mods.toml", "[1.21.9]", f"[1.21.9,{target}]")
+
+        with patch("modkeel.sources._download", fake_download), \
+                patch("modkeel.sources.validate_jar", side_effect=valid), \
+                patch("modkeel.sources._linkage_rejection", return_value=linkage), \
+                patch("modkeel.relax.relax_jar", fake_relax), \
+                patch("modkeel.sources._server_boot_rejection", return_value=boot):
+            out = RelaxedOfficialSource().deliver(self.CAND, MOD, ctx)
+        return out, downloads
+
+    def test_relaxed_and_marked(self, ctx):
+        out, _ = self.deliver(ctx, valid=[(False, "m", "1", "range"), (True, "m", "1", "ok")])
+        assert isinstance(out, Delivered)
+        assert out.jar_path.name == "mod+modkeel-relaxed-mc1.21.10.jar"
+        assert out.evidence == ["linkage", "metadata_relaxed", "docker_server"]
+        assert "declared [1.21.9]" in out.caveat and "server booted" in out.caveat
+
+    def test_not_delivered_unless_a_server_boots(self, ctx):
+        """TorchMaster 21.8.2 relaxed to 1.21.9 passed linkage and crashed on boot."""
+        out, _ = self.deliver(ctx, valid=[(False, "m", "1", "range"), (True, "m", "1", "ok")],
+                              boot=Rejected("a server did not boot with it (NoSuchMethodError)"))
+        assert isinstance(out, Rejected) and "did not boot" in out.reason
+        assert not list(ctx.config.output_dir.glob("*.jar"))
+
+    def test_metadata_already_allows_target(self, ctx):
+        out, _ = self.deliver(ctx, valid=[(True, "m", "1", "ok")])
+        assert isinstance(out, Rejected) and "older_official's case" in out.reason
+
+    def test_linkage_must_pass(self, ctx):
+        out, _ = self.deliver(ctx, valid=[(False, "m", "1", "range")],
+                              linkage=Rejected("3 Minecraft classes it uses don't exist"))
+        assert isinstance(out, Rejected) and "3 Minecraft classes" in out.reason
+        assert not list(ctx.config.output_dir.glob("*.jar"))
+
+    def test_nothing_to_rewrite(self, ctx):
+        out, _ = self.deliver(ctx, valid=[(False, "m", "1", "range")], relaxed=False)
+        assert out.reason == "no Minecraft range in its metadata to rewrite"
+
+    def test_still_refused_after_rewrite_is_removed(self, ctx):
+        out, _ = self.deliver(ctx, valid=[(False, "m", "1", "range"),
+                                          (False, "m", "1", "other")])
+        assert "still refused" in out.reason
+        assert not list(ctx.config.output_dir.glob("*.jar"))
+
+    def test_download_is_shared_with_older_official(self, ctx):
+        """older_official rejects it on metadata, relaxed_official reuses the same file."""
+        ctx.modrinth.download_modrinth_deps.return_value = []
+        downloads = []
+
+        def fake_download(url, dest):
+            downloads.append(url)
+            dest.write_bytes(b"PK")
+
+        with patch("modkeel.sources._download", fake_download), \
+                patch("modkeel.sources.validate_jar",
+                      return_value=(False, "m", "1", "JAR declares incompatible MC version: x")):
+            OlderOfficialSource().deliver(self.CAND, MOD, ctx)
+            with patch("modkeel.sources._linkage_rejection", return_value=Rejected("no")):
+                RelaxedOfficialSource().deliver(self.CAND, MOD, ctx)
+        assert downloads == ["https://cdn/mod.jar"]
+
+
+class TestPossiblePorts:
+    def test_only_range_rejections_are_listed(self):
+        from modkeel.models import BranchCandidate
+
+        def b(name, error, rng=None):
+            br = BranchCandidate(name, "s", "")
+            br.validation_error, br.version_range = error, rng
+            return br
+
+        branches = [b("port", "MC 1.21.10 not in declared range [1.21.1]", "[1.21.1]"),
+                    b("fab", "Fabric-only mod (no neoforge version)"),
+                    b("old", "MC version mismatch: 1.20.1 != 1.21.10")]
+        found = possible_ports("alice/mod", branches)
+        assert found == ["alice/mod port (declares [1.21.1])"]
+        assert possible_ports_note(found).startswith("; possible ports not tried")
+        assert possible_ports_note([]) == ""
+        assert possible_ports_note(["a", "b", "c", "d", "e"]).endswith("a, b, c (+2 more)")
+
+
+class TestServerBootRejection:
+    def run(self, ctx, available=True, passed=True, error=None):
+        from modkeel.sources import _server_boot_rejection
+
+        def fake_test(self, results):
+            results[0].docker_test_passed = passed
+            results[0].docker_error = error
+
+        with patch("modkeel.docker.DockerTester.check_docker_available", return_value=available), \
+                patch("modkeel.docker.DockerTester.test_mods_in_docker", fake_test):
+            return _server_boot_rejection(Path("m.jar"), [Path("dep.jar")], "M", ctx)
+
+    def test_boots(self, ctx):
+        assert self.run(ctx) is None
+
+    def test_no_docker(self, ctx):
+        assert "needs Docker" in self.run(ctx, available=False).reason
+
+    def test_client_only_is_unverified(self, ctx):
+        out = self.run(ctx, passed=None, error="[CLIENT-ONLY] Mod uses client-side classes")
+        assert "inconclusive" in out.reason and "CLIENT-ONLY" in out.reason
+
+    def test_crash(self, ctx):
+        assert "did not boot" in self.run(ctx, passed=False, error="NoSuchMethodError").reason

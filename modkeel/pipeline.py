@@ -45,9 +45,12 @@ from modkeel.resolve import (
 )
 from modkeel.sources import (
     OlderOfficialSource,
+    RelaxedOfficialSource,
     caveat_after_docker,
     identify_repo,
     in_source_order,
+    possible_ports,
+    possible_ports_note,
     strategy_label,
 )
 from modkeel.utils import safe_rmtree
@@ -104,8 +107,10 @@ class Pipeline:
         )
         self.results: List[CompilationResult] = []
         self.temp_dir = None
-        # Forks the last fork search skipped as unchanged copies of upstream (for the trail)
+        # Forks the last fork search skipped as unchanged copies of upstream, and branches
+        # of forks with own commits rejected only for their declared range (for the trail)
         self.fork_copies: List[str] = []
+        self.fork_possible: List[str] = []
 
     def _try_prebuilt(
         self, repo_url: str, owner: str, repo: str, branch
@@ -246,7 +251,7 @@ class Pipeline:
           fork             community forks, close upstream branches, cross-loader branches
         A named branch (argument or URL) builds only that branch. skip_modrinth (the
         mavenLocal pass, which needs a compiled checkout) leaves out both Modrinth sources;
-        --strict leaves out older_official.
+        --strict leaves out older_official and relaxed_official.
 
         On failure, returns the most useful failed result: a dependency failure first (it
         drives process_repos' mavenLocal retry), else the last build failure, else the last
@@ -284,7 +289,8 @@ class Pipeline:
                 strategies.append(_ModrinthSource(self, job))
                 # --strict asks for the exact version; an older build is never that
                 if not self.config.strict_version:
-                    strategies.append(_RepoOlderOfficialSource(self, job))
+                    strategies += [_RepoOlderOfficialSource(self, job),
+                                   _RepoRelaxedOfficialSource(self, job)]
 
             mod = ModRef(query=repo, source_repo=f"{owner}/{repo}")
             ctx = ResolveContext(config=self.config, modrinth=self.modrinth)
@@ -560,6 +566,7 @@ class Pipeline:
         fork_compatible = self.validator.pre_validate_branches(
             fork_owner, fork_repo, fork_branches
         )
+        self.fork_possible += possible_ports(fork_info["full_name"], fork_branches)
 
         fork_exact = [b for b in fork_compatible if b.minecraft_version == self.config.mc_version]
         if fork_exact:
@@ -1324,6 +1331,7 @@ class _ForkBuildSource(SourceStrategy):
         if job.all_branches is None:
             return Found(note="skipped: the repository's branches could not be read")
         self.p.fork_copies = []
+        self.p.fork_possible = []
         plan = self.p._fork_plan(job.owner, job.repo, job.close, job.upstream_tried,
                                  job.all_branches)
         if not plan.branches:
@@ -1335,6 +1343,7 @@ class _ForkBuildSource(SourceStrategy):
                     note += (f" ({n} fork{'s' if n > 1 else ''} named for it "
                              f"{'were' if n > 1 else 'was an'} unchanged "
                              f"cop{'ies' if n > 1 else 'y'} of {job.owner}/{job.repo})")
+                note += possible_ports_note(self.p.fork_possible)
                 return Found(note=note, payload=outcome)
             plan = outcome  # cross-loader branches, already ranked
         else:
@@ -1351,8 +1360,9 @@ class _ForkBuildSource(SourceStrategy):
         return _built(self.p._build_plan(self.job, candidate.data["plan"]))
 
 
-class _RepoOlderOfficialSource(OlderOfficialSource):
-    """older_official for compile: the project is looked up by repo, only when needed."""
+class _RepoModrinthBuild:
+    """Mixin for Modrinth-build sources in compile: the project is looked up by repo only
+    when the source runs, and a delivery becomes the CompilationResult compile reports."""
 
     def __init__(self, pipeline: "Pipeline", job: _RepoJob):
         self.p, self.job = pipeline, job
@@ -1374,6 +1384,14 @@ class _RepoOlderOfficialSource(OlderOfficialSource):
             )
             outcome.payload.caveat = outcome.caveat
         return outcome
+
+
+class _RepoOlderOfficialSource(_RepoModrinthBuild, OlderOfficialSource):
+    """older_official for compile."""
+
+
+class _RepoRelaxedOfficialSource(_RepoModrinthBuild, RelaxedOfficialSource):
+    """relaxed_official for compile."""
 
 
 def _most_useful_failure(repo_url: str, payloads: List) -> CompilationResult:
