@@ -272,3 +272,41 @@ class TestInjectionPoints:
         report = self.redirect(tmp_path, at("INVOKE", f"{self.LEVEL}inheritedCall()V"),
                                default_require=1)
         assert (report.fatal, report.warnings) == ([], [])
+
+
+class TestRefmap:
+    """Fabric JARs for obfuscated versions: strings in author names, refmap to intermediary."""
+
+    def test_selectors_and_points_go_through_the_refmap(self, tmp_path):
+        import json
+        from modkeel.mappings import parse_tiny_v2
+        from modkeel.mixinscan import uses_intermediary
+        tiny = ("tiny\t2\t0\tofficial\tintermediary\n"
+                "c\ta\tnet/minecraft/class_1\n"
+                "\tm\t()V\tb\tmethod_10\n"
+                "c\tc\tnet/minecraft/class_2\n"
+                "\tm\t(I)V\td\tmethod_20\n")
+        built = parse_tiny_v2(tiny, "1.21.1")
+        target = parse_tiny_v2(tiny.replace("\tm\t(I)V\td\tmethod_20\n", ""), "1.21.4")
+        data = mixin_class("mod/mixin/M", ["net/minecraft/class_1"], [
+            ("h", [(REDIRECT, {"method": ["tick"],
+                               "at": at("INVOKE", "Lnet/minecraft/Other;play(I)V")})], "()V")])
+        jar = tmp_path / "fabric.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("mod/mixin/M.class", data)
+            z.writestr("mod.mixins.json", json.dumps(
+                {"package": "mod.mixin", "mixins": ["M"], "refmap": "mod-refmap.json",
+                 "injectors": {"defaultRequire": 1}}))
+            z.writestr("mod-refmap.json", json.dumps({"mappings": {"mod/mixin/M": {
+                "tick": "Lnet/minecraft/class_1;method_10()V",
+                "Lnet/minecraft/Other;play(I)V": "Lnet/minecraft/class_2;method_20(I)V"}}}))
+        assert uses_intermediary(jar)
+        assert check_mixin_targets(jar, built, built).fatal == []
+        assert check_mixin_targets(jar, target, built).fatal == [
+            "M -> class_1.method_10: injection point gone (Redirect at class_2.method_20())"]
+
+    def test_mojang_named_jar_is_not_intermediary(self, tmp_path):
+        from modkeel.mixinscan import uses_intermediary
+        jar = mixin_jar(tmp_path, {"mod/mixin/M": mixin_class(
+            "mod/mixin/M", ["net/minecraft/world/level/Level"], [])})
+        assert not uses_intermediary(jar)

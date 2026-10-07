@@ -35,7 +35,9 @@ Constructors are not in the symbol table and are not checked.
 
 **Naming scheme.** Production JARs are not always in Mojang names: Fabric mods ship
 remapped to intermediary, Forge and pre-1.20.2 NeoForge to SRG. ``detect_naming_scheme``
-refuses to check what it cannot interpret rather than declaring everything missing.
+refuses to check what it cannot interpret rather than declaring everything missing; an
+intermediary JAR is checked against an index in intermediary names
+(``mappings.load_index(v, "intermediary")``), SRG JARs stay unchecked.
 """
 
 import logging
@@ -400,7 +402,10 @@ def check_refs(refs: ClassRefs, index: SymbolIndex,
     members are checked too: see find_vanished_members.
     """
     scheme = detect_naming_scheme(refs)
-    if scheme != SCHEME_MOJANG:
+    # The index must be in the JAR's names: Mojang's, or Fabric's intermediary
+    # (mappings.load_index(v, "intermediary")) for an intermediary JAR.
+    index_scheme = SCHEME_INTERMEDIARY if index.flavor == SCHEME_INTERMEDIARY else SCHEME_MOJANG
+    if scheme != index_scheme:
         return LinkageReport.skipped(
             f"JAR uses {scheme} names, not Mojang names", scheme=scheme
         )

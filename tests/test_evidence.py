@@ -107,18 +107,41 @@ class TestLinkage:
         assert out.status == PASSED
         assert check.call_args.args[1:] == ("target", None)
 
+    def test_intermediary_jar_is_checked_again_in_its_names(self, config):
+        loads = []
+
+        def load(v, flavor="mojmap"):
+            loads.append((v, flavor))
+            return f"{flavor}-{v}"
+
+        skipped = MagicMock(checked=False, scheme="intermediary")
+        clean = MagicMock(checked=True, is_clean=True, summary="ok")
+        with patch("modkeel.mappings.load_index", side_effect=load), \
+                patch("modkeel.linkage.check_jar", side_effect=[skipped, clean]) as check:
+            out = check_linkage(subject("1.21.4", "1.21.1"), config)
+        assert out.status == PASSED
+        assert check.call_args.args[1:] == ("intermediary-1.21.4", "intermediary-1.21.1")
+
     def test_clean(self, config):
         out, _ = self.run(config, MagicMock(checked=True, is_clean=True, summary="ok"))
         assert (out.status, out.detail) == (PASSED, "ok")
 
 
 class TestMixins:
-    def run(self, config, report=None, built_for="1.21.10", indexes=None, error=None):
+    def run(self, config, report=None, built_for="1.21.10", indexes=None, error=None,
+            intermediary=False):
         from modkeel.mixinscan import MixinReport
-        load = indexes.get if indexes is not None else (lambda v: object())
+        loads = []
+
+        def load(v, flavor="mojmap"):
+            loads.append(flavor)
+            return indexes.get(v) if indexes is not None else MagicMock(flavor=flavor)
+
         scan = patch("modkeel.mixinscan.check_mixin_targets",
                      side_effect=error, return_value=report or MixinReport(checked=3))
-        with patch("modkeel.mappings.load_index", side_effect=load), scan:
+        with patch("modkeel.mappings.load_index", side_effect=load), scan, \
+                patch("modkeel.mixinscan.uses_intermediary", return_value=intermediary):
+            self.loads = loads
             return check_mixins(subject("1.21.11", built_for), config)
 
     def test_needs_the_build_version(self, config):
@@ -132,6 +155,16 @@ class TestMixins:
         import zipfile
         out = self.run(config, error=zipfile.BadZipFile("not a zip"))
         assert out.status == NOT_RUN and "unreadable JAR" in out.detail
+
+    def test_intermediary_jar_is_judged_in_intermediary_names(self, config):
+        assert self.run(config, intermediary=True).status == PASSED
+        assert self.loads == ["intermediary", "intermediary"]
+
+    def test_intermediary_build_on_an_unobfuscated_target_is_not_run(self, config):
+        indexes = {"1.21.11": MagicMock(flavor="unobfuscated"),
+                   "1.21.10": MagicMock(flavor="intermediary")}
+        out = self.run(config, indexes=indexes, intermediary=True)
+        assert out.status == NOT_RUN and "name the game differently" in out.detail
 
     def test_fatal_injections_fail_and_are_named(self, config):
         from modkeel.mixinscan import MixinReport

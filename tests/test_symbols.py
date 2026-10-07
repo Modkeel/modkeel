@@ -514,3 +514,74 @@ class TestSymbolReport:
     def test_findings_are_human_readable(self):
         report = SymbolReport(mc_version="1.21.1", missing_classes=["net.minecraft.X"])
         assert report.findings == ["class not in 1.21.1: net.minecraft.X"]
+
+
+class TestTinyV2:
+    """Fabric intermediary mappings (mappings.parse_tiny_v2, mappings.load_index)."""
+
+    TINY = ("tiny\t2\t0\tofficial\tintermediary\n"
+            "c\ta\tnet/minecraft/class_1\n"
+            "\tm\t(Lb;I)La;\tc\tmethod_7\n"
+            "\t\tp\t1\t\tcount\n"
+            "\tf\tLb;\td\tfield_3\n"
+            "c\tb\tnet/minecraft/class_2\n"
+            "c\tcom/google/Foo\tcom/google/Foo\n")
+
+    def test_indexes_the_intermediary_namespace(self):
+        from modkeel.mappings import parse_tiny_v2
+        index = parse_tiny_v2(self.TINY, "1.21.1")
+        assert index.flavor == "intermediary"
+        assert index.classes == {"net.minecraft.class_1", "net.minecraft.class_2"}
+        assert index.has_descriptor("net.minecraft.class_1", "method_7",
+                                    "(Lnet/minecraft/class_2;I)Lnet/minecraft/class_1;")
+        assert index.has_field("net.minecraft.class_1", "field_3")
+
+    def test_namespace_order_comes_from_the_header(self):
+        from modkeel.mappings import parse_tiny_v2
+        swapped = "tiny\t2\t0\tintermediary\tofficial\nc\tnet/minecraft/class_9\tz\n"
+        assert parse_tiny_v2(swapped, "1.21.1").classes == {"net.minecraft.class_9"}
+
+    def test_not_tiny(self):
+        import pytest
+        from modkeel.mappings import parse_tiny_v2
+        with pytest.raises(ValueError):
+            parse_tiny_v2("net.minecraft.A -> a:", "1.21.1")
+
+    def test_load_index_downloads_and_caches(self, tmp_path):
+        import io
+        import zipfile
+        from unittest.mock import MagicMock, patch
+        from modkeel import mappings
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("mappings/mappings.tiny", self.TINY)
+        response = MagicMock(content=buf.getvalue())
+        mojmap = parse_proguard_mappings(
+            "com.mojang.blaze3d.systems.RenderSystem -> com.mojang.blaze3d.systems.RenderSystem:\n"
+            "    1:1:void enableBlend() -> enableBlend\n", "1.21.1")
+        real_load = mappings.load_index
+        with patch.object(mappings, "CACHE_DIR", tmp_path), \
+                patch("modkeel.mappings.requests.get", return_value=response) as get, \
+                patch("modkeel.mappings.load_index",
+                      side_effect=lambda v, f="mojmap", r=False:
+                      mojmap if f == "mojmap" else real_load(v, f, r)):
+            first = mappings.load_index("1.21.1", "intermediary")
+            second = mappings.load_index("1.21.1", "intermediary")
+        assert "intermediary/1.21.1/intermediary-1.21.1-v2.jar" in get.call_args.args[0]
+        assert get.call_count == 1 and first.classes == second.classes
+        # classes Mojang leaves unobfuscated keep their names in Fabric JARs
+        assert first.has_descriptor("com.mojang.blaze3d.systems.RenderSystem",
+                                    "enableBlend", "()V")
+
+    def test_unobfuscated_version_uses_mojang_names(self, tmp_path):
+        import requests
+        from unittest.mock import patch
+        from modkeel import mappings
+        from modkeel.symbols import SymbolIndex
+        unobf = SymbolIndex(flavor="unobfuscated", mc_version="26.1", classes={"net.minecraft.A"})
+        with patch.object(mappings, "CACHE_DIR", tmp_path), \
+                patch("modkeel.mappings.requests.get",
+                      side_effect=requests.RequestException("404")), \
+                patch("modkeel.mappings.SymbolIndex.load",
+                      side_effect=lambda p: unobf if "mojmap" in str(p) else None):
+            assert mappings.load_index("26.1", "intermediary") is unobf

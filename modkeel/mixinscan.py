@@ -309,6 +309,76 @@ def _default_requires(archive: zipfile.ZipFile) -> Dict[str, int]:
     return out
 
 
+INTERMEDIARY_TARGET = re.compile(r"^net/minecraft/class_\d+$")
+
+
+def uses_intermediary(jar_path: Path) -> bool:
+    """Whether the JAR's mixins target the game by intermediary names (Fabric JARs for
+    obfuscated versions): their @Mixin class literals are remapped at build time."""
+    with zipfile.ZipFile(jar_path) as archive:
+        for info in archive.infolist():
+            if not info.filename.endswith(".class") or \
+                    info.filename.startswith("META-INF/versions/"):
+                continue
+            try:
+                mixin = parse_mixin(archive.read(info))
+            except (ClassFileError, struct.error):
+                continue
+            if mixin and any(INTERMEDIARY_TARGET.match(t) for t in mixin.targets):
+                return True
+    return False
+
+
+def _refmaps(archive: zipfile.ZipFile) -> Dict[str, Dict[str, str]]:
+    """{mixin class: {selector as written: selector in the JAR's names}} from refmaps.
+
+    A JAR remapped at build (Fabric to intermediary) keeps its mixins' strings (method
+    selectors, @At targets, string @Mixin targets) in the names the author wrote and ships
+    a refmap the mixin config points to, which Mixin reads at runtime.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    names = set(archive.namelist())
+    for info in archive.infolist():
+        if not info.filename.endswith(".json") or info.file_size > 256 * 1024:
+            continue
+        try:
+            config = json.loads(archive.read(info))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(config, dict) or not isinstance(config.get("refmap"), str) \
+                or config["refmap"] not in names:
+            continue
+        try:
+            refmap = json.loads(archive.read(config["refmap"]))
+        except (ValueError, UnicodeDecodeError, KeyError):
+            continue
+        if not isinstance(refmap, dict):
+            continue
+        tables = [refmap.get("mappings")]
+        tables += list((refmap.get("data") or {}).values()) \
+            if isinstance(refmap.get("data"), dict) else []
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            for mixin, entries in table.items():
+                if isinstance(entries, dict):
+                    out.setdefault(mixin.replace(".", "/"), {}).update(
+                        {k: v for k, v in entries.items() if isinstance(v, str)})
+    return out
+
+
+def _remapped(mixin: MixinClass, remap: Dict[str, str]) -> MixinClass:
+    """The mixin with its strings translated through its refmap entries."""
+    if not remap:
+        return mixin
+    targets = [remap.get(t, remap.get(t.replace("/", "."), t)).replace(".", "/")
+               for t in mixin.targets]
+    injections = [Injection(i.kind, [remap.get(m, m) for m in i.methods], i.handler,
+                            i.require, [(v, remap.get(t, t)) for v, t in i.points])
+                  for i in mixin.injections]
+    return MixinClass(mixin.name, targets, injections)
+
+
 def check_mixin_targets(jar_path: Path, index, built_for_index) -> MixinReport:
     """Which of the JAR's mixins would fail to apply on `index`'s version.
 
@@ -332,10 +402,13 @@ def check_mixin_targets(jar_path: Path, index, built_for_index) -> MixinReport:
       method matches. Fatal or a warning by the same require rule (_vanished_points).
 
     Mixins of nested jars (bundled libraries) are left out: their own mods carry them.
+    A JAR remapped at build (Fabric, intermediary) is read through its refmap: pass
+    indexes in the JAR's names (mappings.load_index(v, "intermediary")).
     """
     report = MixinReport()
     with zipfile.ZipFile(jar_path) as archive:
         requires = _default_requires(archive)
+        refmaps = _refmaps(archive)
         for info in archive.infolist():
             if not info.filename.endswith(".class") or \
                     info.filename.startswith("META-INF/versions/"):
@@ -347,6 +420,7 @@ def check_mixin_targets(jar_path: Path, index, built_for_index) -> MixinReport:
                 continue
             if mixin is None:
                 continue
+            mixin = _remapped(mixin, refmaps.get(mixin.name, {}))
             default = next((r for pkg, r in requires.items()
                             if mixin.name.startswith(pkg)), 0)
             for target in mixin.targets:
