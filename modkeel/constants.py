@@ -6,7 +6,7 @@ from pathlib import Path
 # config, caches and downloads; the MODKEEL_HOME environment variable moves it
 MODKEEL_HOME = Path(os.environ.get("MODKEEL_HOME", Path.home() / ".modkeel"))
 
-MODKEEL_VERSION = "1.0.0"
+MODKEEL_VERSION = "0.1.0"
 MODRINTH_USER_AGENT = f"Modkeel/{MODKEEL_VERSION} (github.com/Modkeel/modkeel)"
 
 # Crowdsource API. Empty = sharing off: no first-run prompt, no reports sent.

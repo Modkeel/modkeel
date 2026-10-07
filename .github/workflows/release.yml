@@ -1,0 +1,92 @@
+# Release the CLI when a version tag (vX.Y.Z) reaches this repo: build the wheel and sdist
+# once, then create the GitHub Release (notes = the tag's message) and upload the same files
+# to PyPI. The tag is created by the maintainers' publishing job when the package version
+# changes; nobody pushes it by hand.
+#
+# PyPI uses trusted publishing (OIDC): no token is stored. The project on pypi.org trusts
+# this repository, this workflow file and the environment "pypi".
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'Modkeel/modkeel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tag and the package must agree, or the release would ship another version.
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          pip install build twine
+          python -m build
+          version=$(python -c "import re,pathlib;print(re.search(r'MODKEEL_VERSION = \"([^\"]+)\"', pathlib.Path('modkeel/constants.py').read_text())[1])")
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match the package version $version"
+            exit 1
+          fi
+          twine check --strict dist/*
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # actions/checkout leaves the tag as a plain ref; fetch the annotated tag to read its
+      # message: first line = title, the rest = notes.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          git tag -l --format='%(contents:body)' "$TAG" > notes.md
+          title=$(git tag -l --format='%(contents:subject)' "$TAG")
+          gh release create "$TAG" dist/* --verify-tag --title "${title:-$TAG}" \
+            --notes-file notes.md
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: pypi
+      url: https://pypi.org/project/modkeel/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@v1.12.4
