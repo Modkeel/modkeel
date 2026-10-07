@@ -16,7 +16,8 @@ Checks run cheapest first, in EVIDENCE_ORDER:
                            version it was built for is known, no method or field it calls
                            was removed or renamed since (modkeel/linkage.py)
   mixins         seconds   its mixins still apply: every target method they name still
-                           exists and every @Inject handler still matches its parameters,
+                           exists, every @Inject handler still matches its parameters and
+                           the calls/fields their @At points hook still exist,
                            when the version it was built for is known (modkeel/mixinscan.py)
   docker_server  ~1 min    a headless server boots with it and its dependencies
   client         minutes   a real client boots (the Companion e2e; not wired here yet)

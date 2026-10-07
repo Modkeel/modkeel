@@ -14,25 +14,47 @@ REDIRECT = "Lorg/spongepowered/asm/mixin/injection/Redirect;"
 OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;"
 
 
+AT = "Lorg/spongepowered/asm/mixin/injection/At;"
+
+
+def at(value, target=""):
+    """A nested @At(value = ..., target = ...) for an injector's "at" element."""
+    return {"@": AT, "value": [value], **({"target": [target]} if target else {})}
+
+
 def annotations(p, anns):
     """RuntimeInvisibleAnnotations attribute: [(type, {key: [strings]} | {key: class})]."""
     body = struct.pack(">H", len(anns))
     for kind, values in anns:
-        body += struct.pack(">HH", p.utf8(kind), len(values))
-        for key, value in values.items():
-            body += struct.pack(">H", p.utf8(key))
-            if isinstance(value, int):  # int constant, e.g. require = 1
-                body += b"I" + struct.pack(">H", p._add(("i", value),
-                                                        b"\x03" + struct.pack(">i", value)))
-            elif isinstance(value, tuple):  # class literals
-                body += b"[" + struct.pack(">H", len(value))
-                for c in value:
-                    body += b"c" + struct.pack(">H", p.utf8(f"L{c};"))
-            else:
-                body += b"[" + struct.pack(">H", len(value))
-                for s in value:
-                    body += b"s" + struct.pack(">H", p.utf8(s))
+        body += annotation_body(p, kind, values)
     return struct.pack(">HI", p.utf8("RuntimeInvisibleAnnotations"), len(body)) + body
+
+
+def annotation_body(p, kind, values):
+    """One annotation; values: [strings], int, (class literals,), at(...) or [at(...)]."""
+    body = struct.pack(">HH", p.utf8(kind), len(values))
+    for key, value in values.items():
+        body += struct.pack(">H", p.utf8(key))
+        if isinstance(value, dict):  # a nested annotation, e.g. at = @At(...)
+            nested = {k: v for k, v in value.items() if k != "@"}
+            body += b"@" + annotation_body(p, value["@"], nested)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            body += b"[" + struct.pack(">H", len(value))
+            for v in value:
+                nested = {k: x for k, x in v.items() if k != "@"}
+                body += b"@" + annotation_body(p, v["@"], nested)
+        elif isinstance(value, int):  # int constant, e.g. require = 1
+            body += b"I" + struct.pack(">H", p._add(("i", value),
+                                                    b"\x03" + struct.pack(">i", value)))
+        elif isinstance(value, tuple):  # class literals
+            body += b"[" + struct.pack(">H", len(value))
+            for c in value:
+                body += b"c" + struct.pack(">H", p.utf8(f"L{c};"))
+        else:
+            body += b"[" + struct.pack(">H", len(value))
+            for s in value:
+                body += b"s" + struct.pack(">H", p.utf8(s))
+    return body
 
 
 def mixin_class(name, targets, methods):
@@ -106,6 +128,10 @@ net.minecraft.world.entity.player.Player$BedSleepingProblem) -> a
 net.minecraft.client.gui.Entry -> b:
     1:1:void render(int) -> a
     2:2:void tooltip() -> b
+net.minecraft.world.level.Level -> c:
+    int dayTime -> a
+    1:1:void playSound(int) -> b
+    2:2:void tickTime() -> c
 """.replace("\\\n", ""), "1.21.10")
 TARGET = parse_proguard_mappings("""\
 net.minecraft.world.level.block.BedBlock -> a:
@@ -114,6 +140,9 @@ net.minecraft.network.chat.Component) -> a
     2:2:void tick() -> b
 net.minecraft.client.gui.Entry -> b:
     1:1:void renderContent(int) -> a
+net.minecraft.world.level.Level -> c:
+    1:1:void playSound(long) -> b
+    2:2:void tickTime() -> c
 """.replace("\\\n", ""), "1.21.11")
 
 
@@ -188,3 +217,58 @@ class TestCheckMixinTargets:
         assert check(tmp_path, methods, default_require=1).checked == 0
         unknown = check(tmp_path, methods, target="net/minecraft/class_2244")
         assert (unknown.checked, unknown.fatal) == (0, [])
+
+
+class TestInjectionPoints:
+    """@At(INVOKE/FIELD) targets: the call or field an injector hooks inside its method."""
+
+    LEVEL = "Lnet/minecraft/world/level/Level;"
+
+    def redirect(self, tmp_path, ats, **kw):
+        values = {"method": ["tick"], "at": ats}
+        return check(tmp_path, [("h", [(REDIRECT, values)], "()V")], **kw)
+
+    def test_parse_reads_the_points(self):
+        m = parse_mixin(mixin_class("mod/M", ["net/minecraft/A"], [
+            ("h", [(INJECT, {"method": ["tick"],
+                             "at": [at("HEAD"), at("INVOKE", "Lnet/minecraft/B;c()V")]})]),
+            ("r", [(REDIRECT, {"method": ["tick"], "at": at("FIELD", "Lnet/minecraft/B;d:I")})]),
+        ]))
+        assert [i.points for i in m.injections] == [
+            [("HEAD", ""), ("INVOKE", "Lnet/minecraft/B;c()V")],
+            [("FIELD", "Lnet/minecraft/B;d:I")]]
+
+    def test_call_whose_descriptor_changed_is_gone(self, tmp_path):
+        report = self.redirect(tmp_path, at("INVOKE", f"{self.LEVEL}playSound(I)V"),
+                               default_require=1)
+        assert report.fatal == [
+            "M -> BedBlock.tick: injection point gone (Redirect at Level.playSound())"]
+
+    def test_owner_dot_member_form(self, tmp_path):
+        """Mixin also takes "net/x/A.m(I)V" (Ferrite Core, Clumps write it so)."""
+        report = self.redirect(tmp_path, at("INVOKE", "net/minecraft/world/level/Level."
+                                                      "playSound(I)V"), default_require=1)
+        assert report.fatal == [
+            "M -> BedBlock.tick: injection point gone (Redirect at Level.playSound())"]
+
+    def test_field_that_vanished_is_gone(self, tmp_path):
+        report = self.redirect(tmp_path, at("FIELD", f"{self.LEVEL}dayTime:I"))
+        assert report.fatal == [] and report.warnings == [
+            "M -> BedBlock.tick: injection point gone (Redirect at Level.dayTime)"]
+
+    def test_surviving_call_is_fine(self, tmp_path):
+        report = self.redirect(tmp_path, at("INVOKE", f"{self.LEVEL}tickTime()V"),
+                               default_require=1)
+        assert (report.fatal, report.warnings) == ([], [])
+
+    def test_one_point_that_may_still_match_is_enough(self, tmp_path):
+        """HEAD always matches; a call into another mod cannot be judged."""
+        for other in (at("HEAD"), at("INVOKE", "Lother/Mod;x()V")):
+            report = self.redirect(tmp_path, [at("INVOKE", f"{self.LEVEL}playSound(I)V"),
+                                              other], default_require=1)
+            assert (report.fatal, report.warnings) == ([], [])
+
+    def test_member_the_owner_only_inherits_is_not_judged(self, tmp_path):
+        report = self.redirect(tmp_path, at("INVOKE", f"{self.LEVEL}inheritedCall()V"),
+                               default_require=1)
+        assert (report.fatal, report.warnings) == ([], [])

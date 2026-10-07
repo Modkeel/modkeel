@@ -44,6 +44,8 @@ class Injection:
     methods: List[str]  # target method selectors as written ("render", "tick()V", ...)
     handler: str = ""   # the mixin method carrying the annotation: name + descriptor
     require: Optional[int] = None  # the annotation's require = N, when written
+    # its @At injection points as (value, target): ("INVOKE", "Lnet/x/A;m(I)V"), ("HEAD", "")
+    points: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -53,8 +55,12 @@ class MixinClass:
     injections: List[Injection] = field(default_factory=list)
 
 
-def _annotations(attr: bytes, pool) -> List[Tuple[str, Dict[str, List[str]]]]:
-    """Every top-level annotation as (type descriptor, {element: string/class values})."""
+def _annotations(attr: bytes, pool) -> List[Tuple[str, Dict[str, list]]]:
+    """Every top-level annotation as (type descriptor, {element: values}).
+
+    Values are strings (string, class and int constants) or, for a nested annotation such
+    as an injector's @At, that annotation's own {element: values} dict.
+    """
     out: List[Tuple[str, Dict[str, List[str]]]] = []
 
     def u2(at: int) -> int:
@@ -80,7 +86,12 @@ def _annotations(attr: bytes, pool) -> List[Tuple[str, Dict[str, List[str]]]]:
                             else desc)
             return at + 2
         if tag == "@":
-            return annotation(at, None)
+            if sink is None:
+                return annotation(at, None)
+            nested: list = []
+            at = annotation(at, nested)
+            sink.append(nested[0][1])
+            return at
         if tag == "[":
             n, at = u2(at), at + 2
             for _ in range(n):
@@ -107,6 +118,10 @@ def _annotations(attr: bytes, pool) -> List[Tuple[str, Dict[str, List[str]]]]:
     except (struct.error, IndexError, ClassFileError):
         pass
     return out
+
+
+def _first_str(values: Optional[list]) -> str:
+    return next((v for v in values or () if isinstance(v, str)), "")
 
 
 def _simple(desc: str) -> str:
@@ -157,7 +172,10 @@ def parse_mixin(data: bytes) -> Optional[MixinClass]:
             if kind == OVERWRITE:
                 injections.append(Injection("Overwrite", [handler], handler, require))
             elif kind.startswith(INJECTOR_PACKAGES) and "method" in values:
-                injections.append(Injection(_simple(kind), values["method"], handler, require))
+                points = [(_first_str(a.get("value")), _first_str(a.get("target")))
+                          for a in values.get("at", []) if isinstance(a, dict)]
+                injections.append(Injection(_simple(kind), values["method"], handler, require,
+                                            points))
     targets: List[str] = []
     class_anns, _ = annotated(offset + 2, u2(offset))
     for kind, values in class_anns:
@@ -309,6 +327,9 @@ def check_mixin_targets(jar_path: Path, index, built_for_index) -> MixinReport:
       rejects the handler ("Invalid descriptor") and the game stops. Monsters in the Closet
       1.0.3 (built for 1.21.10) on 1.21.11: lambda$useWithoutItem$2 went from
       (Player, Player$BedSleepingProblem) to (Player, Component).
+    - an injector whose method still exists but whose every @At(INVOKE/FIELD) point names a
+      call or field its owner declared in built_for and no longer declares: nothing in the
+      method matches. Fatal or a warning by the same require rule (_vanished_points).
 
     Mixins of nested jars (bundled libraries) are left out: their own mods carry them.
     """
@@ -370,10 +391,72 @@ def _judge(report: MixinReport, mixin: str, owner: str, injection: Injection,
                     not any(_params(d) == wanted for d in after):
                 report.fatal.append(
                     f"{short}.{name}: parameters changed, @Inject handler no longer matches")
+    require = injection.require if injection.require is not None else default_require
     if vanished and not found_any:
-        require = injection.require if injection.require is not None else default_require
         line = f"{short}.{', '.join(vanished)}: target method gone ({injection.kind})"
         if injection.kind == "Overwrite" or require >= 1:
             report.fatal.append(line)
         else:
             report.warnings.append(line)
+    elif found_any and injection.points:
+        gone = _vanished_points(injection.points, index, built_for_index)
+        if gone:
+            report.checked += 1
+            line = (f"{short}.{', '.join(_split_selector(m)[0] for m in injection.methods)}: "
+                    f"injection point gone ({injection.kind} at {', '.join(gone)})")
+            (report.fatal if require >= 1 else report.warnings).append(line)
+
+
+def _split_member(target: str) -> Tuple[str, str]:
+    """An @At target as (owner fqcn, member): Mixin accepts "Lnet/x/A;m(I)V", "net/x/A;m"
+    and "net/x/A.m(I)V" alike. ("", "") when it names no owner."""
+    head = target.split("(", 1)[0].split(":", 1)[0]
+    if ";" in head:
+        owner, _, member = target.partition(";")
+        owner = owner[1:] if owner.startswith("L") else owner
+    elif "." in head:
+        owner, member = head.rsplit(".", 1)[0], target[len(head.rsplit(".", 1)[0]) + 1:]
+    else:
+        return "", ""
+    return owner.replace("/", "."), member
+
+
+# @At values whose target names a call or a field access
+INVOKE_POINTS = ("INVOKE", "INVOKE_ASSIGN", "INVOKE_STRING")
+
+
+def _vanished_points(points: List[Tuple[str, str]], index, built_for_index) -> List[str]:
+    """The injection's call/field points that vanished, when every one of them did.
+
+    An injector applies where any of its points matches, so one surviving point (or one
+    that cannot be judged: HEAD, RETURN, a call into another mod, a member the owner only
+    inherits) means it may still apply, and nothing is reported. A point is gone when its
+    owner declared that method (with that descriptor) or field in built_for and no longer
+    declares it: the call cannot be in the target method any more, so nothing matches.
+    """
+    gone = []
+    for value, target in points:
+        if value not in INVOKE_POINTS and value != "FIELD":
+            return []
+        owner, member = _split_member(target)
+        if not owner:
+            return []
+        if owner not in built_for_index.classes or owner not in index.classes:
+            return []
+        short = f"{owner.rsplit('.', 1)[-1]}.{member.split('(', 1)[0].split(':', 1)[0]}"
+        if value == "FIELD":
+            name = member.split(":", 1)[0]
+            if name not in built_for_index.fields.get(owner, ()) or \
+                    name in index.fields.get(owner, ()):
+                return []
+            gone.append(short)
+            continue
+        name, desc = _split_selector(member)
+        before = _descriptors(built_for_index, owner, name)
+        after = _descriptors(index, owner, name)
+        if desc:
+            before, after = [d for d in before if d == desc], [d for d in after if d == desc]
+        if not before or after:
+            return []
+        gone.append(short + "()")
+    return gone
