@@ -262,6 +262,30 @@ class TestCheckRefs:
         assert report.scheme == SCHEME_INTERMEDIARY
         assert "intermediary" in report.skip_reason
 
+    def test_intermediary_jar_against_an_intermediary_index(self):
+        """Fabric JARs for obfuscated versions, judged in their own names."""
+        from modkeel.mappings import parse_tiny_v2
+        tiny = ("tiny\t2\t0\tofficial\tintermediary\n"
+                "c\tdhi\tnet/minecraft/class_1937\n"
+                "\tm\t(Ldhi;)V\ta\tmethod_8500\n"
+                "\tf\tI\tb\tfield_9236\n")
+        built, target = parse_tiny_v2(tiny, "1.21.1"), parse_tiny_v2(
+            tiny.replace("\tm\t(Ldhi;)V\ta\tmethod_8500\n", ""), "1.21.4")
+        refs = ClassRefs(classes={"net.minecraft.class_1937"}, classes_parsed=1,
+                         methods={("net.minecraft.class_1937", "method_8500",
+                                   "(Lnet/minecraft/class_1937;)V")},
+                         fields={("net.minecraft.class_1937", "field_9236", "I")})
+        assert check_refs(refs, built).is_clean
+        report = check_refs(refs, target, built)
+        assert report.vanished_members == [
+            "method net.minecraft.class_1937.method_8500(Lnet/minecraft/class_1937;)V"]
+
+    def test_mojang_jar_against_an_intermediary_index_is_skipped(self, index):
+        from modkeel.mappings import parse_tiny_v2
+        tiny = "tiny\t2\t0\tofficial\tintermediary\nc\ta\tnet/minecraft/class_1\n"
+        refs = ClassRefs(classes={"net.minecraft.world.level.Level"}, classes_parsed=1)
+        assert not check_refs(refs, parse_tiny_v2(tiny, "1.21.1")).checked
+
     def test_srg_jar_is_skipped(self, index):
         refs = ClassRefs(
             classes={"net.minecraft.world.level.Level"},

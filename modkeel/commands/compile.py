@@ -229,10 +229,10 @@ def _pack_fallback(repo_urls, pipeline: Pipeline, config: ModCompilerConfig,
     from modkeel.github import parse_repo_url
     from modkeel.modrinth import ModrinthClient
     from modkeel.sources import identify_repo
-    from modkeel.target import default_mode, fallback_output, propose_targets
+    from modkeel.target import carry_over, default_mode, fallback_output, propose_targets
 
     modrinth = ModrinthClient(config)
-    mods = []
+    mods = []          # (title, Modrinth project id), parallel to repo_urls
     for url in repo_urls:
         try:
             owner, repo, _ = parse_repo_url(url)
@@ -261,12 +261,19 @@ def _pack_fallback(repo_urls, pipeline: Pipeline, config: ModCompilerConfig,
         output_dir=str(out), cross_loader=config.cross_loader, docker_test=config.docker_test,
         docker_timeout=config.docker_timeout, prebuild_gate=config.prebuild_gate,
         use_prebuilt=config.use_prebuilt, symbol_check=config.symbol_check)
+    # What the first run resolved is reused when it also passes there, except for mods
+    # with an official build on the new version (that build wins): no repo is built twice
+    # for nothing.
+    official_there = {url for url, (title, _) in zip(repo_urls, mods)
+                      if title in option.covered}
+    carried = carry_over(pipeline.results, retry, config.mc_version, official_there)
     second = Pipeline(retry)
-    second.process_repos(repo_urls)
+    second.process_repos(repo_urls, resolved=carried)
     print(second.generate_report())
     built = sum(1 for r in second.results if r.success)
+    reused = f" ({len(carried)} reused from the MC {config.mc_version} run)" if carried else ""
     console.print(f"\n[green]MC {option.mc_version}: {built} of {len(repo_urls)} built "
-                  f"to {out}/[/green]")
+                  f"to {out}/{reused}[/green]")
     if config.instance_path:
         console.print(f"[yellow]Not installed into {config.instance_path}: these are for MC "
                       f"{option.mc_version}, not {config.mc_version}.[/yellow]")

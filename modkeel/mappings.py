@@ -1,14 +1,20 @@
 """Fetch, cache and index Minecraft mappings.
 
-Phase A supports Mojang official mappings only (``mojmap``). Flavor detection is built out
-in full regardless, so Yarn and MCP builds return a clear skip instead of being checked
+Source checks use Mojang official mappings (``mojmap``); flavor detection is built out in
+full regardless, so Yarn and MCP builds return a clear skip instead of being checked
 against the wrong symbol table -- see docs/symbol-check-design.md.
+
+Bytecode checks also read Fabric's ``intermediary`` names: Fabric JARs for obfuscated
+versions (up to 1.21.11) are remapped to them, and they are stable across versions (a
+member keeps its intermediary name while it exists), so an index in those names lets the
+linkage and mixin checks judge a Fabric JAR exactly as they judge a Mojang-named one.
 
 Mojang's mappings carry a EULA that permits modding use but restricts redistribution:
 they are downloaded at runtime and cached under the user's home, never vendored.
 """
 
 import functools
+import io
 import logging
 import re
 import zipfile
@@ -31,6 +37,10 @@ CACHE_DIR = MODKEEL_HOME / "mappings"
 FLAVOR_MOJMAP = "mojmap"
 FLAVOR_YARN = "yarn"
 FLAVOR_MCP = "mcp"
+FLAVOR_INTERMEDIARY = "intermediary"
+
+INTERMEDIARY_URL = ("https://maven.fabricmc.net/net/fabricmc/intermediary/{v}/"
+                    "intermediary-{v}-v2.jar")
 
 # Detection is inverted relative to intuition: yarn and mcp are the *marked* cases and
 # mojmap is the default. Modern NeoForge builds (ModDevGradle, NeoGradle) never write an
@@ -199,6 +209,81 @@ def resolve_mappings_url(mc_version: str, timeout: int = 15) -> Optional[str]:
     return mappings.get("url")
 
 
+def _remap_descriptor(desc: str, classes: Dict[str, str]) -> str:
+    """Rewrite the class names of a descriptor through `classes` (internal names)."""
+    return re.sub(r"L([^;]+);", lambda m: f"L{classes.get(m.group(1), m.group(1))};", desc)
+
+
+def parse_tiny_v2(text: str, mc_version: str) -> SymbolIndex:
+    """Index the intermediary namespace of a Tiny v2 file (namespaces official, intermediary).
+
+    Member descriptors are written in the first namespace, so they are rewritten through
+    the class map. Parameters, locals and comments (deeper indentation) are skipped.
+    """
+    index = SymbolIndex(flavor=FLAVOR_INTERMEDIARY, mc_version=mc_version)
+    lines = text.splitlines()
+    header = lines[0].split("\t") if lines else []
+    if header[:3] != ["tiny", "2", "0"] or len(header) < 5:
+        raise ValueError("not a Tiny v2 file")
+    src, dst = header.index("official") - 3, header.index("intermediary") - 3
+    classes: Dict[str, str] = {}
+    for line in lines[1:]:
+        if line.startswith("c\t"):
+            names = line.split("\t")[1:]
+            classes[names[src]] = names[dst]
+    owner: Optional[str] = None
+    for line in lines[1:]:
+        parts = line.split("\t")
+        if parts[0] == "c":
+            owner = parts[1 + dst].replace("/", ".")
+            owner = owner if is_candidate(owner) else None
+            if owner:
+                index.classes.add(owner)
+        elif owner and len(parts) >= 5 and parts[0] == "" and parts[1] in ("m", "f"):
+            kind, desc, names = parts[1], parts[2], parts[3:]
+            name = names[dst] if dst < len(names) else ""
+            if not name:
+                continue
+            if kind == "f":
+                index.fields.setdefault(owner, set()).add(name)
+            else:
+                desc = _remap_descriptor(desc, classes)
+                index.methods.setdefault(owner, set()).add((name, _param_count(desc)))
+                index.descriptors.setdefault(owner, set()).add(f"{name}{desc}")
+    return index
+
+
+def _add_unobfuscated(index: SymbolIndex, mojmap: SymbolIndex) -> None:
+    """Add the classes Mojang does not obfuscate (com.mojang.blaze3d.systems.RenderSystem,
+    the entry points...) to an intermediary index.
+
+    Intermediary renames every obfuscated class to net/minecraft/class_N and leaves the
+    rest out of its file: in a Fabric JAR those keep their real names, so Mojang's names
+    are the right table for them. Obfuscated classes come along under their Mojang names
+    too, which is harmless: an intermediary JAR never references a class by them.
+    """
+    for fqcn in mojmap.classes - index.classes:
+        index.classes.add(fqcn)
+        for table in ("fields", "methods", "descriptors"):
+            entries = getattr(mojmap, table).get(fqcn)
+            if entries:
+                getattr(index, table)[fqcn] = set(entries)
+
+
+def _load_intermediary(mc_version: str) -> Optional[SymbolIndex]:
+    """Download Fabric's intermediary mappings for a version and index them, or None."""
+    try:
+        response = requests.get(INTERMEDIARY_URL.format(v=mc_version), timeout=60)
+        response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as jar:
+            text = jar.read("mappings/mappings.tiny").decode("utf-8")
+        return parse_tiny_v2(text, mc_version)
+    except (requests.RequestException, zipfile.BadZipFile, KeyError, ValueError,
+            UnicodeDecodeError) as e:
+        logger.debug("intermediary mappings unavailable for %s: %s", mc_version, e)
+        return None
+
+
 def cache_path(mc_version: str, flavor: str) -> Path:
     return CACHE_DIR / f"{flavor}-{mc_version}.json.gz"
 
@@ -210,7 +295,31 @@ def load_index(
 
     Returns None when the flavor is unsupported or the mappings cannot be fetched. The
     caller must treat None as "cannot check", never as "nothing found".
+
+    intermediary: Fabric's names for an obfuscated version, plus Mojang's for the classes it
+    does not obfuscate (so it needs the Mojang mappings too). An unobfuscated version (26.1
+    and later) has no intermediary; there Fabric uses Mojang's names, and that index is
+    returned (flavor "unobfuscated").
     """
+    if flavor == FLAVOR_INTERMEDIARY:
+        path = cache_path(mc_version, FLAVOR_INTERMEDIARY)
+        cached = None if refresh else SymbolIndex.load(path)
+        if cached is not None:
+            return cached
+        index = _load_intermediary(mc_version)
+        mojmap = load_index(mc_version, FLAVOR_MOJMAP, refresh)
+        if index is None:
+            # No intermediary published: an unobfuscated version, or a fetch failure
+            return mojmap if mojmap is not None and mojmap.flavor == "unobfuscated" else None
+        if mojmap is None:
+            return None
+        _add_unobfuscated(index, mojmap)
+        try:
+            index.save(path)
+        except OSError as e:
+            logger.debug("could not cache intermediary index: %s", e)
+        return index
+
     path = cache_path(mc_version, FLAVOR_MOJMAP)
 
     if not refresh:

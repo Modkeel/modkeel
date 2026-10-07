@@ -4,8 +4,11 @@ that announces a change of target (modkeel/commands/_shared.py)."""
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from modkeel.evidence import FAILED, NOT_RUN, PASSED, Outcome
+from modkeel.models import CompilationResult, ModCompilerConfig
 from modkeel.target import (
     TargetOption,
+    carry_over,
     default_mode,
     fallback_decision,
     fallback_output,
@@ -113,3 +116,86 @@ class TestCountdown:
 def test_option_summary_for_a_full_pack():
     option = TargetOption("1.21.1", ["A", "B"], [])
     assert option.summary == "MC 1.21.1 has official builds of 2 of the 2 mods"
+
+
+class TestCarryOver:
+    """A fallback run of a list reuses first-run JARs that also pass on the new target."""
+
+    def setup(self, tmp_path, **result):
+        jar = tmp_path / "first" / "a.jar"
+        jar.parent.mkdir()
+        jar.write_bytes(b"jar")
+        fields = dict(repo_url="https://github.com/o/a", success=True, jar_path=str(jar),
+                      mod_name="A", mod_version="1", compiled_mc_version="1.21.10")
+        fields.update(result)
+        source = fields.pop("source", "official_source")
+        r = CompilationResult(**fields)
+        r.source = source
+        config = ModCompilerConfig("1.21.1", "neoforge", "0",
+                                   output_dir=str(tmp_path / "out" / "mc-1.21.1"))
+        return r, config
+
+    def run(self, results, config, outcomes=None, resolve_again=()):
+        outcomes = outcomes or {}
+        seen = []
+
+        def check(name):
+            def run(subject, cfg):
+                seen.append((name, subject.mc_version, subject.built_for))
+                return outcomes.get(name, Outcome(name, PASSED))
+            return run
+
+        with patch("modkeel.evidence.check_metadata", check("metadata")), \
+                patch("modkeel.evidence.check_linkage", check("linkage")), \
+                patch("modkeel.evidence.check_mixins", check("mixins")):
+            return carry_over(results, config, "1.21.10", set(resolve_again)), seen
+
+    def test_a_jar_that_passes_is_copied_not_rebuilt(self, tmp_path):
+        r, config = self.setup(tmp_path)
+        carried, seen = self.run([r], config)
+        new = carried[r.repo_url]
+        assert Path(new.jar_path) == Path(config.output_dir) / "a.jar"
+        assert Path(new.jar_path).read_bytes() == b"jar"
+        assert (new.source, new.compiled_mc_version) == ("official_source", "1.21.10")
+        assert new.trail[0].startswith("✓ Reused from the MC 1.21.10 run: metadata ✓")
+        assert "Built for MC 1.21.10. Its metadata allows 1.21.1" in new.caveat
+        assert [s[0] for s in seen] == ["metadata", "linkage", "mixins"]
+        assert seen[0][1:] == ("1.21.1", "1.21.10")
+        assert r.jar_path != new.jar_path          # the first run's result is untouched
+
+    def test_judged_against_the_version_it_was_built_for(self, tmp_path):
+        """An older official build delivered on 1.21.10 was built for 1.21.8."""
+        r, config = self.setup(tmp_path, compiled_mc_version="1.21.8", source="older_official")
+        _, seen = self.run([r], config)
+        assert seen[0][2] == "1.21.8"
+
+    def test_a_failing_check_leaves_it_to_the_sources(self, tmp_path, capsys):
+        r, config = self.setup(tmp_path)
+        refused = Outcome("metadata", FAILED, "its metadata only allows MC: [1.21.10]")
+        carried, _ = self.run([r], config, {"metadata": refused})
+        assert carried == {} and not (Path(config.output_dir) / "a.jar").exists()
+        assert "not reused for MC 1.21.1 (its metadata only allows MC" in capsys.readouterr().out
+
+    def test_mixins_that_cannot_be_checked_do_not_block(self, tmp_path):
+        r, config = self.setup(tmp_path)
+        carried, _ = self.run([r], config, {"mixins": Outcome("mixins", NOT_RUN, "no table")})
+        assert r.repo_url in carried
+
+    def test_skipped_when_the_new_version_has_an_official_build(self, tmp_path):
+        r, config = self.setup(tmp_path)
+        carried, seen = self.run([r], config, resolve_again=[r.repo_url])
+        assert carried == {} and seen == []
+
+    def test_never_carried(self, tmp_path):
+        """Failures, relaxed JARs (metadata rewritten for the first target), cross-loader
+        JARs (their bridge mods are for the first target) and JARs no longer on disk."""
+        dirs = [tmp_path / d for d in "abcd"]
+        for d in dirs:
+            d.mkdir()
+        failed, config = self.setup(dirs[0], success=False)
+        relaxed, _ = self.setup(dirs[1], source="relaxed_official")
+        bridged, _ = self.setup(dirs[2], is_cross_loader=True)
+        gone, _ = self.setup(dirs[3])
+        Path(gone.jar_path).unlink()
+        carried, seen = self.run([failed, relaxed, bridged, gone], config)
+        assert carried == {} and seen == []

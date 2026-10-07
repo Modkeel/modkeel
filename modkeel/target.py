@@ -21,11 +21,20 @@ decides with `fallback_decision`:
 
 A fallback run writes to <output>/mc-<version>/ and never into --instance: a JAR for
 another Minecraft version must not land in a game it does not run on.
+
+A fallback run of a list (compile) first carries over what the first run already resolved
+(`carry_over`): a JAR whose metadata allows the new version and whose classes, calls and
+mixins still resolve there is copied, not built again. Mods with an official build on the
+new version are always resolved again: the author's build for that version beats a JAR
+built for another one.
 """
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Collection, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from modkeel.models import CompilationResult, ModCompilerConfig
 
 FALLBACK_MODES = ("ask", "auto", "never")
 COUNTDOWN_SECONDS = 15
@@ -113,3 +122,56 @@ def fallback_decision(mode: str, interactive: bool,
 def fallback_output(output_dir: Path, mc_version: str) -> Path:
     """Where a fallback run writes: beside the requested target's files, never mixed in."""
     return Path(output_dir) / f"mc-{mc_version}"
+
+
+# Sources whose JAR is not carried over to another target: a relaxed JAR's metadata was
+# rewritten for the first target (stacking a second guess on it is not evidence), and a
+# cross-loader JAR needs the bridge mods the run downloads for its own target.
+NOT_CARRIED = ("relaxed_official",)
+
+
+def carry_over(previous: Iterable[CompilationResult], config: ModCompilerConfig, first_target: str,
+               resolve_again: Collection[str]) -> Dict[str, CompilationResult]:
+    """First-run results whose JAR also passes on config.mc_version, by repo URL.
+
+    previous: the first run's CompilationResults. resolve_again: repo URLs that must go
+    through the sources again (those with an official build on the new target). A JAR is
+    judged as older_official judges one: metadata and linkage required, mixins when they
+    can be checked, built for the version it was compiled or published for. A carried JAR
+    is copied to config.output_dir and comes back as a new result whose trail says so.
+    """
+    from modkeel.evidence import Subject, evidence_line, gather
+
+    target = config.mc_version
+    carried: Dict[str, CompilationResult] = {}
+    for r in previous:
+        if (not r.success or r.repo_url in resolve_again or not r.jar_path
+                or r.is_cross_loader or r.source in NOT_CARRIED
+                or not Path(r.jar_path).is_file()):
+            continue
+        built_for = r.compiled_mc_version or first_target
+        name = r.mod_name or r.repo_url
+        evidence = gather(Subject(Path(r.jar_path), target, built_for, name), config,
+                          ["metadata", "linkage", "mixins"], required=["metadata", "linkage"])
+        if not evidence.ok:
+            print(f"  ↻ {name}: not reused for MC {target} ({evidence.reason})")
+            continue
+        out = Path(config.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        dest = out / Path(r.jar_path).name
+        shutil.copy2(r.jar_path, dest)
+        line = evidence_line(evidence.passed, config.docker_test)
+        print(f"  ↻ {name}: the MC {first_target} JAR also passes on {target} ({line})")
+        result = CompilationResult(
+            repo_url=r.repo_url, success=True, branch=r.branch, jar_path=str(dest),
+            mod_name=r.mod_name, mod_version=r.mod_version, compiled_mc_version=built_for,
+            modrinth_download=r.modrinth_download)
+        result.source = r.source
+        result.trail = [f"✓ Reused from the MC {first_target} run: {line}"]
+        result.caveat = (f"Built for MC {built_for}. Its metadata allows {target}, every "
+                         f"Minecraft class it uses exists in {target}, no method or field it "
+                         f"calls was removed or renamed since {built_for} and its mixins "
+                         f"still find their targets, but that is a static check: test it "
+                         f"in game (or with --docker-test) before relying on it.")
+        carried[r.repo_url] = result
+    return carried

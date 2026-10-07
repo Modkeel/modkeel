@@ -104,7 +104,7 @@ class TestCompile:
         """Record what the command asks the pipeline to do; every repo succeeds."""
         seen = {}
 
-        def process(self, urls):
+        def process(self, urls, resolved=None):
             seen["config"], seen["urls"] = self.config, urls
             self.results = [CompilationResult(repo_url=u, success=True) for u in urls]
 
@@ -168,7 +168,7 @@ class TestCompile:
         assert result.exit_code == 1 and "Configuration error" in result.output
 
     def test_all_failed_exits_1(self, repos):
-        def process(self, urls):
+        def process(self, urls, resolved=None):
             self.results = [CompilationResult(repo_url=u, success=False) for u in urls]
         with patch.object(Pipeline, "process_repos", process), \
                 patch.object(Pipeline, "generate_report", return_value=""), \
@@ -178,13 +178,14 @@ class TestCompile:
                             "-lv", "64")
         assert result.exit_code == 1
 
-    def run_with_fallback(self, repos, *args, builds=None):
+    def run_with_fallback(self, repos, *args, builds=None, carry=None):
         """Every repo fails on 1.21.10 and builds on any other version; both repos have a
         Modrinth project with official builds per `builds`."""
-        runs = []
+        runs, resolved_by = [], []
 
-        def process(self, urls):
+        def process(self, urls, resolved=None):
             runs.append(self.config)
+            resolved_by.append(resolved)
             ok = self.config.mc_version != "1.21.10"
             self.results = [CompilationResult(repo_url=u, success=ok) for u in urls]
 
@@ -200,9 +201,11 @@ class TestCompile:
                 patch.object(Pipeline, "generate_report", return_value="REPORT"), \
                 patch.object(ModrinthClient, "find_project_by_repo", by_repo), \
                 patch.object(ModrinthClient, "project_versions", versions), \
-                patch("modkeel.crowdsource.submit_reports"):
+                patch("modkeel.crowdsource.submit_reports"), \
+                patch("modkeel.target.carry_over", carry or (lambda *a: {})):
             result = invoke("compile", str(repos), "-m", "1.21.10", "-l", "neoforge",
                             "-lv", "21.10.64", *args)
+        self.resolved_by = resolved_by
         return result, runs
 
     def test_fallback_auto_rebuilds_the_pack_on_the_proposed_version(self, repos, tmp_path):
@@ -215,6 +218,25 @@ class TestCompile:
         assert (retry.mc_version, retry.loader_version) == ("1.21.1", "0")
         assert retry.output_dir == Path("out/mc-1.21.1") and retry.mods_path is None
         assert "Not installed into" in result.output
+
+    def test_fallback_reuses_what_passes_and_resolves_official_builds_again(self, repos):
+        """d has no official build on 1.21.1: its first-run JAR is offered for reuse; b has
+        one, so it goes through the sources again."""
+        asked = {}
+
+        def carry(previous, config, first_target, resolve_again):
+            asked.update(target=config.mc_version, first=first_target, again=resolve_again)
+            return {"https://github.com/c/d": CompilationResult("https://github.com/c/d",
+                                                                 success=True)}
+
+        builds = {"b-id": ["1.21.1"], "d-id": []}
+        result, runs = self.run_with_fallback(repos, "--fallback", "auto", builds=builds,
+                                              carry=carry)
+        assert result.exit_code == 0, result.output
+        assert asked == {"target": "1.21.1", "first": "1.21.10",
+                         "again": {"https://github.com/a/b"}}
+        assert list(self.resolved_by[1]) == ["https://github.com/c/d"]
+        assert "(1 reused from the MC 1.21.10 run)" in result.output
 
     def test_without_a_terminal_the_proposal_is_only_reported(self, repos):
         result, runs = self.run_with_fallback(repos)

@@ -16,7 +16,8 @@ Checks run cheapest first, in EVIDENCE_ORDER:
                            version it was built for is known, no method or field it calls
                            was removed or renamed since (modkeel/linkage.py)
   mixins         seconds   its mixins still apply: every target method they name still
-                           exists and every @Inject handler still matches its parameters,
+                           exists, every @Inject handler still matches its parameters and
+                           the calls/fields their @At points hook still exist,
                            when the version it was built for is known (modkeel/mixinscan.py)
   docker_server  ~1 min    a headless server boots with it and its dependencies
   client         minutes   a real client boots (the Companion e2e; not wired here yet)
@@ -134,8 +135,8 @@ def check_linkage(subject: Subject, config: ModCompilerConfig) -> Outcome:
     mappings cannot be loaded, only classes are checked. The rejection names the first
     classes and calls, which say what part of the mod breaks and how big a port would be.
     """
-    from modkeel.linkage import check_jar
-    from modkeel.mappings import load_index
+    from modkeel.linkage import SCHEME_INTERMEDIARY, check_jar
+    from modkeel.mappings import FLAVOR_INTERMEDIARY, load_index
 
     target, built_for = subject.mc_version, subject.built_for
     index = load_index(target)
@@ -143,6 +144,13 @@ def check_linkage(subject: Subject, config: ModCompilerConfig) -> Outcome:
         return Outcome("linkage", NOT_RUN, f"cannot verify: no symbol table for MC {target}")
     built_for_index = load_index(built_for) if built_for and built_for != target else None
     report = check_jar(subject.jar, index, built_for_index)
+    if not report.checked and report.scheme == SCHEME_INTERMEDIARY:
+        # A Fabric JAR for an obfuscated version: judge it in its own names
+        index = load_index(target, FLAVOR_INTERMEDIARY)
+        built_for_index = (load_index(built_for, FLAVOR_INTERMEDIARY)
+                           if built_for and built_for != target else None)
+        if index is not None:
+            report = check_jar(subject.jar, index, built_for_index)
     if not report.checked:
         return Outcome("linkage", NOT_RUN, f"cannot verify ({report.skip_reason})", report)
     if report.is_clean:
@@ -166,16 +174,24 @@ def check_mixins(subject: Subject, config: ModCompilerConfig) -> Outcome:
     table, not_run. Injections that may be skipped (require 0) only add a note: the game
     starts, that feature does nothing.
     """
-    from modkeel.mappings import load_index
-    from modkeel.mixinscan import check_mixin_targets
+    from modkeel.mappings import FLAVOR_INTERMEDIARY, FLAVOR_MOJMAP, load_index
+    from modkeel.mixinscan import check_mixin_targets, uses_intermediary
 
     target, built_for = subject.mc_version, subject.built_for
     if not built_for or built_for == target:
         return Outcome("mixins", NOT_RUN, "needs the version the build targets")
-    index, built_for_index = load_index(target), load_index(built_for)
-    if index is None or built_for_index is None:
-        return Outcome("mixins", NOT_RUN, f"no symbol table for MC {target} or {built_for}")
     try:
+        # Fabric JARs for obfuscated versions name the game in intermediary
+        intermediary = uses_intermediary(subject.jar)
+        flavor = FLAVOR_INTERMEDIARY if intermediary else FLAVOR_MOJMAP
+        index, built_for_index = load_index(target, flavor), load_index(built_for, flavor)
+        if index is None or built_for_index is None:
+            return Outcome("mixins", NOT_RUN,
+                           f"no symbol table for MC {target} or {built_for}")
+        if intermediary and index.flavor != built_for_index.flavor:
+            # e.g. built for 1.21.11 (intermediary), target 26.1 (Mojang names only)
+            return Outcome("mixins", NOT_RUN, f"MC {target} and {built_for} name the game "
+                                              "differently (intermediary vs Mojang names)")
         report = check_mixin_targets(subject.jar, index, built_for_index)
     except (OSError, zipfile.BadZipFile) as e:
         return Outcome("mixins", NOT_RUN, f"unreadable JAR ({e})")
