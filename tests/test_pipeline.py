@@ -32,8 +32,10 @@ def branch(name: str, mc: str = "1.21.10", loader: str = "neoforge",
 
 
 @pytest.fixture
-def pipeline(tmp_path):
+def pipeline(tmp_path, monkeypatch):
     """A Pipeline whose collaborators are doubles; nothing leaves the process."""
+    # downloads are cached under MODKEEL_HOME: keep them in this test's tmp dir
+    monkeypatch.setattr("modkeel.sources.MODKEEL_HOME", tmp_path / "home")
     config = ModCompilerConfig(mc_version="1.21.10", loader="neoforge", loader_version="64",
                                output_dir=str(tmp_path / "out"))
     p = Pipeline(config)
@@ -428,6 +430,33 @@ class TestSourceOrder:
         pipeline.clone_and_compile(REPO)
         pipeline.modrinth.find_project_by_repo.assert_not_called()
         pipeline.github.search_compatible_repos.assert_called_once()
+
+    def test_strict_never_relaxes_metadata(self, pipeline, build):
+        pipeline.config.strict_version = True
+        self.exact_branch_fails(pipeline, build)
+        result = pipeline.clone_and_compile(REPO)
+        assert not any("relaxed" in line.lower() for line in result.trail)
+
+    def test_possible_ports_are_named_but_not_built(self, pipeline, build):
+        """A fork with own commits whose branch declares another range: listed, never built."""
+        upstream = [branch("old", mc="1.21.9")]
+        port = branch("port-wip", mc="1.21.1", sha="fork-own")
+        port.is_compatible = False   # what pre-validation leaves on a rejected branch
+        port.validation_error = "MC 1.21.10 not in declared range [1.21.1]"
+        port.version_range = "[1.21.1]"
+        pipeline.github.get_branches.side_effect = [upstream, [port]]
+        pipeline.validator.pre_validate_branches.side_effect = [upstream, []]
+        pipeline.github.search_compatible_repos.return_value = [{
+            "fork": {"owner": "alice", "repo": "mod", "full_name": "alice/mod",
+                     "url": "https://github.com/alice/mod"},
+            "score": 80, "signals": [], "trust_score": 80}]
+        pipeline.modrinth.find_project_by_repo.return_value = None
+
+        result = pipeline.clone_and_compile(REPO)
+
+        assert result.success and result.branch == "old"   # the repo's close branch
+        assert pipeline.fork_possible == ["alice/mod port-wip (declares [1.21.1])"]
+        assert not any("alice/mod" in str(c) for c in build.run.call_args_list)
 
     def test_mavenlocal_pass_never_uses_an_older_build(self, pipeline, build):
         self.exact_branch_fails(pipeline, build)

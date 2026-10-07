@@ -367,9 +367,14 @@ def _validate_json_jar(
         for dep in quilt_loader.get('depends', []):
             if isinstance(dep, dict) and dep.get('id') == 'minecraft':
                 versions = dep.get('versions', '')
-                if versions and isinstance(versions, str):
-                    if not is_version_in_fabric_range(mc_version, versions):
-                        return False, mod_name, mod_version_val, f"JAR declares incompatible MC version: {versions}"
+                # A list means "any of these" in quilt.mod.json too
+                options = [versions] if isinstance(versions, str) else (
+                    [v for v in versions if isinstance(v, str)]
+                    if isinstance(versions, list) else [])
+                options = [v for v in options if v]
+                if options and not any(is_version_in_fabric_range(mc_version, v)
+                                       for v in options):
+                    return False, mod_name, mod_version_val, f"JAR declares incompatible MC version: {versions}"
         return True, mod_name, mod_version_val, "JAR validation passed"
 
     # Fabric schema: id, version, depends.minecraft
@@ -378,9 +383,12 @@ def _validate_json_jar(
 
     depends = data.get('depends', {})
     mc_range = depends.get('minecraft', '')
-    if mc_range and isinstance(mc_range, str):
-        if not is_version_in_fabric_range(mc_version, mc_range):
-            return False, mod_name, mod_version_val, f"JAR declares incompatible MC version: {mc_range}"
+    # A list means "any of these" in fabric.mod.json
+    alternatives = [mc_range] if isinstance(mc_range, str) else (
+        [r for r in mc_range if isinstance(r, str)] if isinstance(mc_range, list) else [])
+    alternatives = [r for r in alternatives if r]
+    if alternatives and not any(is_version_in_fabric_range(mc_version, r) for r in alternatives):
+        return False, mod_name, mod_version_val, f"JAR declares incompatible MC version: {mc_range}"
 
     return True, mod_name, mod_version_val, "JAR validation passed"
 

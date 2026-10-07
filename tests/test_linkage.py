@@ -413,6 +413,88 @@ class TestCheckJar:
         assert "net.minecraft.core.BrandNewThing" in report.missing_classes
 
 
+# The same classes one version later: noCollission renamed, MAX_LEVEL_SIZE dropped,
+# pushPose's signature changed; Level gains a method the mod's old build never saw.
+LATER_MAPPINGS = """\
+net.minecraft.world.level.Level -> dcw:
+    171:171:boolean isClientSide() -> x_
+    9:9:void newThing() -> y
+net.minecraft.world.level.block.state.BlockBehaviour$Properties -> eaq:
+    1:1:net.minecraft.world.level.block.state.BlockBehaviour$Properties noCollision() -> a
+net.minecraft.core.BlockPos -> ji:
+    net.minecraft.core.BlockPos ZERO -> g
+com.mojang.blaze3d.vertex.PoseStack -> gce:
+    5:5:void pushPose(int) -> a
+"""
+EARLIER_MAPPINGS = SAMPLE_MAPPINGS + """\
+net.minecraft.world.level.block.state.BlockBehaviour$Properties -> eap:
+    1:1:net.minecraft.world.level.block.state.BlockBehaviour$Properties noCollission() -> a
+"""
+PROPS = "net.minecraft.world.level.block.state.BlockBehaviour$Properties"
+
+
+class TestVanishedMembers:
+    """Members the owner declared in the build's version and no longer declares."""
+
+    @pytest.fixture
+    def earlier(self):
+        return parse_proguard_mappings(EARLIER_MAPPINGS, "1.21.8")
+
+    @pytest.fixture
+    def later(self):
+        return parse_proguard_mappings(LATER_MAPPINGS, "1.21.9")
+
+    def refs(self, methods=(), fields=()):
+        return ClassRefs(classes={"net.minecraft.world.level.Level", PROPS,
+                                  "net.minecraft.core.BlockPos",
+                                  "com.mojang.blaze3d.vertex.PoseStack"},
+                         methods=set(methods), fields=set(fields), classes_parsed=1)
+
+    def test_renamed_method_like_torchmaster(self, earlier, later):
+        refs = self.refs(methods={(PROPS, "noCollission", f"()L{PROPS.replace('.', '/')};")})
+        report = check_refs(refs, later, earlier)
+        assert report.missing_classes == []
+        assert report.vanished_members == [
+            f"method {PROPS}.noCollission()L{PROPS.replace('.', '/')};"]
+        assert not report.is_clean and report.built_for == "1.21.8"
+        assert report.summary == "1 removed or renamed members"
+        assert report.findings[-1].endswith("declared in 1.21.8, gone in 1.21.9")
+
+    def test_changed_signature_and_removed_field(self, earlier, later):
+        refs = self.refs(methods={("com.mojang.blaze3d.vertex.PoseStack", "pushPose", "()V")},
+                         fields={("net.minecraft.world.level.Level", "MAX_LEVEL_SIZE", "I")})
+        assert check_refs(refs, later, earlier).vanished_members == [
+            "method com.mojang.blaze3d.vertex.PoseStack.pushPose()V",
+            "field net.minecraft.world.level.Level.MAX_LEVEL_SIZE"]
+
+    def test_inherited_and_patched_members_are_not_reported(self, earlier, later):
+        # Never declared on the owner in the build's version: inherited from a supertype,
+        # or added by a loader patch. Unknown, not missing.
+        refs = self.refs(methods={("net.minecraft.world.level.Level", "getBlockState",
+                                   "(Lnet/minecraft/core/BlockPos;)V"),
+                                  ("net.minecraft.core.BlockPos", "above", "()V")},
+                         fields={("net.minecraft.core.BlockPos", "MAX", "I")})
+        assert check_refs(refs, later, earlier).is_clean
+
+    def test_unchanged_members_are_clean(self, earlier, later):
+        refs = self.refs(methods={("net.minecraft.world.level.Level", "isClientSide", "()Z"),
+                                  ("java.lang.Object", "toString", "()Ljava/lang/String;")},
+                         fields={("net.minecraft.core.BlockPos", "ZERO",
+                                  "Lnet/minecraft/core/BlockPos;")})
+        report = check_refs(refs, later, earlier)
+        assert report.is_clean
+        assert "no member it calls changed since 1.21.8" in report.summary
+
+    def test_without_built_for_only_classes_are_checked(self, later):
+        refs = self.refs(methods={(PROPS, "noCollission", "()V")})
+        report = check_refs(refs, later)
+        assert report.is_clean and report.built_for is None
+
+    def test_same_version_checks_nothing_more(self, later):
+        refs = self.refs(methods={(PROPS, "gone", "()V")})
+        assert check_refs(refs, later, later).built_for is None
+
+
 class TestLinkageReport:
     def test_skipped_is_not_clean(self):
         assert not LinkageReport.skipped("reason").is_clean

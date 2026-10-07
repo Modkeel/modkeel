@@ -10,6 +10,10 @@ is tried first; each strategy only knows how to find and deliver its own kind of
                   target: its metadata must allow the target (loaders enforce it) and every
                   Minecraft class its bytecode uses must exist there (modkeel/linkage.py)
   fork            a community fork or port, compiled (or prebuilt)
+  relaxed_official an older official build whose metadata excludes the target but whose
+                  bytecode resolves on it: its Minecraft range is rewritten (modkeel/relax.py)
+                  and it is delivered marked as modified by Modkeel. Last: the author did not
+                  declare this version, so anything built or published for it comes first.
 
 The author's unpublished port beats an old JAR that only passed static checks, which is why
 official_source comes before older_official.
@@ -24,7 +28,7 @@ from typing import Dict, Iterator, List, Optional, Union
 import requests
 
 from modkeel.build import validate_jar
-from modkeel.constants import MODRINTH_USER_AGENT
+from modkeel.constants import MODKEEL_HOME, MODRINTH_USER_AGENT
 from modkeel.loaders import get_profile
 from modkeel.models import ModCompilerConfig
 from modkeel.modrinth import ModrinthClient, pick_version
@@ -39,13 +43,14 @@ from modkeel.resolve import (
 )
 from modkeel.version import compare_versions
 
-SOURCE_ORDER = ["official", "official_source", "older_official", "fork"]
+SOURCE_ORDER = ["official", "official_source", "older_official", "fork", "relaxed_official"]
 
 STRATEGY_LABELS = {
     "official": "Official build",
     "official_source": "Author's branch",
     "older_official": "Older official build",
     "fork": "Community fork",
+    "relaxed_official": "Official build, relaxed",
 }
 
 
@@ -113,6 +118,22 @@ def _download(url: str, dest: Path) -> None:
     resp = requests.get(url, headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=120)
     resp.raise_for_status()
     dest.write_bytes(resp.content)
+
+
+def _cached_download(url: str, filename: str) -> Path:
+    """A Modrinth file in ~/.modkeel/cache/downloads (downloaded once per filename).
+
+    older_official and relaxed_official check the same older builds; the cache keeps the
+    second from downloading them again (Modrinth filenames carry the version).
+    """
+    cache = MODKEEL_HOME / "cache" / "downloads"
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / filename
+    if not (path.exists() and path.stat().st_size > 0):
+        partial = path.with_suffix(path.suffix + ".part")
+        _download(url, partial)
+        partial.replace(path)
+    return path
 
 
 def _install(jar: Path, config: ModCompilerConfig) -> Path:
@@ -240,47 +261,150 @@ class OlderOfficialSource(SourceStrategy):
         if not primary:
             return Rejected("the version has no files")
 
-        with tempfile.TemporaryDirectory(prefix="modkeel_older_") as tmp:
-            jar = Path(tmp) / primary["filename"]
-            print(f"    \U0001f4e5 Checking {primary['filename']} (built for MC {built_for})...")
-            try:
-                _download(primary["url"], jar)
-            except requests.RequestException as e:
-                return Rejected(f"download failed ({e})")
+        print(f"    \U0001f4e5 Checking {primary['filename']} (built for MC {built_for})...")
+        try:
+            jar = _cached_download(primary["url"], primary["filename"])
+        except requests.RequestException as e:
+            return Rejected(f"download failed ({e})")
 
-            # Loaders refuse a mod whose declared Minecraft range excludes the game.
-            ok, _, _, message = validate_jar(jar, target)
-            if not ok:
-                return Rejected(message.replace("JAR declares incompatible MC version",
-                                                "its metadata only allows MC"))
+        # Loaders refuse a mod whose declared Minecraft range excludes the game.
+        ok, _, _, message = validate_jar(jar, target)
+        if not ok:
+            return Rejected(message.replace("JAR declares incompatible MC version",
+                                            "its metadata only allows MC"))
 
-            rejected = _linkage_rejection(jar, target)
-            if rejected:
-                return rejected
+        rejected = _linkage_rejection(jar, target, built_for)
+        if rejected:
+            return rejected
 
-            dest = _install(jar, ctx.config)
+        dest = _install(jar, ctx.config)
 
         deps = ctx.modrinth.download_modrinth_deps({"required_deps": _required_deps(version)})
         return Delivered(
             jar_path=dest, mod_name=mod.title,
             mod_version=version.get("version_number", "unknown"),
             evidence=["metadata", "linkage"], dependencies=deps or [],
-            caveat=(f"Built for MC {built_for}. Its metadata allows {target} and every "
-                    f"Minecraft class it uses exists in {target}, but that is a static "
+            caveat=(f"Built for MC {built_for}. Its metadata allows {target}, every "
+                    f"Minecraft class it uses exists in {target} and no method or field it "
+                    f"calls was removed or renamed since {built_for}, but that is a static "
                     f"check: test it in game (or with --docker-test) before relying on it."),
         )
+
+
+class RelaxedOfficialSource(OlderOfficialSource):
+    """Older official builds refused only by their declared range, range rewritten.
+
+    Same candidates as older_official (nearest older builds of the line, cached download).
+    A build is relaxed only when its metadata is what excludes the target and its bytecode
+    resolves on the target (linkage on classes and members, inconclusive rejects); a build
+    whose metadata already allows the target was older_official's to judge.
+
+    A relaxed build is delivered only after a headless server boots with it: the author
+    closed the range on purpose, and static checks cannot see a mixin whose target method
+    changed body. (Before members were checked, TorchMaster 21.8.2 on 1.21.9 passed linkage
+    and crashed on the renamed BlockBehaviour$Properties.noCollission(); the member check
+    now rejects it before any download of a server.) Without Docker, or for a client-only
+    mod a server cannot load, it is rejected as unverified.
+    """
+
+    name = "relaxed_official"
+    label = "Official build, relaxed"
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        from modkeel.relax import relax_jar
+
+        version, built_for = candidate.data["version"], candidate.data["built_for"]
+        target = ctx.mc_version
+        primary = _primary_file(version)
+        if not primary:
+            return Rejected("the version has no files")
+        try:
+            jar = _cached_download(primary["url"], primary["filename"])
+        except requests.RequestException as e:
+            return Rejected(f"download failed ({e})")
+
+        ok, _, _, _ = validate_jar(jar, target)
+        if ok:
+            return Rejected("its metadata already allows the target (older_official's case)")
+        rejected = _linkage_rejection(jar, target, built_for)
+        if rejected:
+            return rejected
+
+        stem = primary["filename"].removesuffix(".jar")
+        dest = ctx.config.output_dir / f"{stem}+modkeel-relaxed-mc{target}.jar"
+        change = relax_jar(jar, dest, built_for, target)
+        if change is None:
+            return Rejected("no Minecraft range in its metadata to rewrite")
+        ok, _, _, message = validate_jar(dest, target)
+        if not ok:
+            dest.unlink(missing_ok=True)
+            return Rejected(f"still refused after rewriting its range ({message})")
+        print(f"    \u270f\ufe0f  Relaxed {change.metadata_file}: MC {change.old_range} -> "
+              f"{change.new_range}")
+
+        deps = ctx.modrinth.download_modrinth_deps({"required_deps": _required_deps(version)})
+        rejected = _server_boot_rejection(dest, deps or [], mod.title, ctx)
+        if rejected:
+            dest.unlink(missing_ok=True)
+            return rejected
+        _install(dest, ctx.config)
+        return Delivered(
+            jar_path=dest, mod_name=mod.title,
+            mod_version=version.get("version_number", "unknown"),
+            evidence=["linkage", "metadata_relaxed", "docker_server"],
+            dependencies=deps or [],
+            caveat=(f"Built for MC {built_for}; its author declared {change.old_range}. "
+                    f"Modkeel added {target} to that range ({change.new_range}) because every "
+                    f"Minecraft class and member it uses exists in {target} and a headless {target} "
+                    f"server booted with it; client-side features are untested, so try it in "
+                    f"a test world first. The file name and META-INF/modkeel-relaxed.txt mark "
+                    f"it as modified."),
+        )
+
+
+def _server_boot_rejection(jar: Path, deps: List[Path], name: str,
+                           ctx: ResolveContext) -> Optional[Rejected]:
+    """None when a headless server boots with the JAR (and its dependencies), else why not.
+
+    Uses the regular Docker tester (and its cache). Unavailable Docker, a client-only mod
+    and an infrastructure error are rejections too: without a boot there is no evidence.
+    """
+    from modkeel.docker import DockerTester
+    from modkeel.models import CompilationResult
+
+    tester = DockerTester(ctx.config)
+    if not tester.check_docker_available():
+        return Rejected("needs Docker to verify a relaxed build (a server must boot with it)")
+    results = [CompilationResult(repo_url=str(jar), success=True, jar_path=str(jar),
+                                 mod_name=name)]
+    results += [CompilationResult(repo_url=str(d), success=True, jar_path=str(d),
+                                  modrinth_download=True) for d in deps]
+    tester.test_mods_in_docker(results)
+    main = results[0]
+    if main.docker_test_passed:
+        return None
+    if main.docker_test_passed is None:
+        return Rejected(f"server test inconclusive ({main.docker_error or 'no result'})")
+    return Rejected(f"a server did not boot with it ({(main.docker_error or '')[:80]})")
 
 
 def _version_key(game_version: str):
     return tuple(int(p) for p in game_version.split("."))
 
 
-def _linkage_rejection(jar: Path, mc_version: str) -> Optional[Rejected]:
+def _linkage_rejection(jar: Path, mc_version: str,
+                       built_for: Optional[str] = None) -> Optional[Rejected]:
     """None when the JAR's bytecode resolves on mc_version, else why it is rejected.
 
     Unlike the pipeline's prebuilt check, an inconclusive check rejects: an official build
     for the exact target was not found, so a JAR we cannot verify is not offered as if it
     were one.
+
+    With ``built_for`` (the version the build targets), methods and fields are checked as
+    well: one its owner declared in built_for and not in mc_version was removed or renamed,
+    so the build would throw NoSuchMethodError/NoSuchFieldError when that code runs. If the
+    built-for mappings cannot be loaded, the check falls back to classes only.
     """
     from modkeel.linkage import check_jar
     from modkeel.mappings import load_index
@@ -288,23 +412,78 @@ def _linkage_rejection(jar: Path, mc_version: str) -> Optional[Rejected]:
     index = load_index(mc_version)
     if index is None:
         return Rejected(f"cannot verify: no symbol table for MC {mc_version}")
-    report = check_jar(jar, index)
+    built_for_index = load_index(built_for) if built_for and built_for != mc_version else None
+    report = check_jar(jar, index, built_for_index)
     if not report.checked:
         return Rejected(f"cannot verify ({report.skip_reason})")
     if not report.is_clean:
-        return Rejected(f"{len(report.missing_classes)} Minecraft classes it uses "
-                        f"don't exist in {mc_version}")
+        # Which classes and members, not only how many: they say what part of the mod
+        # breaks, and how big the port would be
+        reasons = []
+        if report.missing_classes:
+            reasons.append(f"{len(report.missing_classes)} Minecraft classes it uses don't "
+                           f"exist in {mc_version} ({_first(report.missing_classes, _short_class)})")
+        if report.vanished_members:
+            reasons.append(f"{len(report.vanished_members)} methods/fields it calls were "
+                           f"removed or renamed after {built_for} "
+                           f"({_first(report.vanished_members, _short_member)})")
+        return Rejected("; ".join(reasons))
     print(f"    ✓ Linkage: {report.summary}")
     return None
+
+
+def _first(items: List[str], short, shown: int = 3) -> str:
+    """The first `shown` items in short form, then "..." if there are more."""
+    more = ", ..." if len(items) > shown else ""
+    return ", ".join(short(i) for i in items[:shown]) + more
+
+
+def _short_class(fqcn: str) -> str:
+    """net.minecraft.client.renderer.DimensionSpecialEffects -> DimensionSpecialEffects."""
+    return fqcn.rsplit(".", 1)[-1].rsplit("/", 1)[-1]
+
+
+def _short_member(entry: str) -> str:
+    """"method net.minecraft.x.Owner$Inner.name(I)V" -> "Owner$Inner.name()"; fields alike."""
+    kind, _, ref = entry.partition(" ")
+    if kind == "method":
+        ref = ref.split("(", 1)[0]
+    owner, _, name = ref.rpartition(".")
+    return f"{_short_class(owner)}.{name}" + ("()" if kind == "method" else "")
 
 
 # ---------------------------------------------------------------------------
 # fork
 # ---------------------------------------------------------------------------
 
+def possible_ports(fork_name: str, branches: List) -> List[str]:
+    """Branches pre-validation rejected only because they declare another Minecraft range.
+
+    Free (the branches are already judged). From a fork with commits of its own they may
+    hold real porting work, but their JAR would declare that range and the loader refuse
+    it, so they are listed for the trail ("possible ports, not tried"), never built.
+    """
+    return [
+        f"{fork_name} {b.name} (declares {b.version_range or '?'})"
+        for b in branches
+        if not b.is_compatible and b.validation_error
+        and ("declared range" in b.validation_error or " not in range " in b.validation_error)
+    ]
+
+
+def possible_ports_note(found: List[str], shown: int = 3) -> str:
+    """'; possible ports not tried ...: a, b, c (+2 more)' for a trail note, or ''."""
+    if not found:
+        return ""
+    more = f" (+{len(found) - shown} more)" if len(found) > shown else ""
+    return ("; possible ports not tried (commits of their own, but they declare another "
+            f"Minecraft range): {', '.join(found[:shown])}{more}")
+
+
 def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10,
                     upstream: Optional[tuple] = None,
-                    copies: Optional[List[str]] = None) -> List[Dict]:
+                    copies: Optional[List[str]] = None,
+                    possible: Optional[List[str]] = None) -> List[Dict]:
     """Forks (of the first `limit`) with at least one pre-validated branch.
 
     Each kept fork gets its best-scoring branch under "_best_branch". Only the GitHub API is
@@ -331,6 +510,8 @@ def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10,
         compatible = validator.pre_validate_branches(
             fork_info["owner"], fork_info["repo"], branches
         )
+        if possible is not None:
+            possible += possible_ports(fork_info["full_name"], branches)
         if compatible:
             if len(compatible) > 1:  # dates rank branches; one candidate needs none
                 github.fill_commit_dates(fork_info["owner"], fork_info["repo"], compatible)
@@ -385,14 +566,16 @@ class ForkSource(SourceStrategy):
         # Forks of the mod's own repo can be compared with it: unchanged copies are skipped
         upstream = (owner, repo, github.get_branches(owner, repo)) if mod.source_repo else None
         copies: List[str] = []
+        possible: List[str] = []
         validated = prefilter_forks(github, BranchValidator(github, config), forks,
-                                    upstream=upstream, copies=copies)
+                                    upstream=upstream, copies=copies, possible=possible)
         if not validated:
             n = len(copies)
             copied = (f"; {n} {'was an unchanged copy' if n == 1 else 'were unchanged copies'}"
                       f" of {owner}/{repo}" if copies else "")
             return Found(note=f"No compatible forks found for MC {ctx.mc_version} + "
-                              f"{ctx.loader} ({len(forks)} checked{copied})")
+                              f"{ctx.loader} ({len(forks)} checked{copied})"
+                              f"{possible_ports_note(possible)}")
         return Found(
             [
                 Candidate(
@@ -431,7 +614,8 @@ class ForkSource(SourceStrategy):
         )
 
 
-STRATEGIES = {cls.name: cls for cls in (OfficialSource, OlderOfficialSource, ForkSource)}
+STRATEGIES = {cls.name: cls for cls in (OfficialSource, OlderOfficialSource, ForkSource,
+                                         RelaxedOfficialSource)}
 
 
 def default_strategies() -> List[SourceStrategy]:
