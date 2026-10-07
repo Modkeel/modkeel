@@ -4,7 +4,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.0.0-orange)
+[![PyPI](https://img.shields.io/pypi/v/modkeel)](https://pypi.org/project/modkeel/)
 [![CI](https://github.com/Modkeel/modkeel/actions/workflows/cli.yml/badge.svg)](https://github.com/Modkeel/modkeel/actions/workflows/cli.yml)
 
 ---
@@ -17,23 +17,22 @@ mod backs up your worlds when your mods change and fixes crashes in one click.
 ## Quick Start
 
 ```bash
-git clone https://github.com/Modkeel/modkeel.git
-cd modkeel && pip install -e .
+pipx install modkeel        # or: pip install modkeel
 modkeel compile repos.txt -m 1.21.10 -l neoforge -lv 64 -t "$(cat github_token.txt)"
 ```
 
 ## Quick Demo
 
 ### Search for a mod
-![modkeel search](demo/search.gif)
+![modkeel search](https://raw.githubusercontent.com/Modkeel/modkeel/main/demo/search.gif)
 
 ### Compile mods from a list
-![modkeel compile](demo/compile.gif)
+![modkeel compile](https://raw.githubusercontent.com/Modkeel/modkeel/main/demo/compile.gif)
 
 ### Check status
-![modkeel status](demo/status.gif)
+![modkeel status](https://raw.githubusercontent.com/Modkeel/modkeel/main/demo/status.gif)
 
-> GIFs generated with [VHS](https://github.com/charmbracelet/vhs). See [`demo/README.md`](demo/README.md) to regenerate.
+> GIFs generated with [VHS](https://github.com/charmbracelet/vhs). See [`demo/README.md`](https://github.com/Modkeel/modkeel/blob/main/demo/README.md) to regenerate.
 
 ## How It Works
 
@@ -64,12 +63,19 @@ java -version     # 17 or 21
 ## Installation
 
 ```bash
-git clone https://github.com/Modkeel/modkeel.git
-cd modkeel
-pip install -e .
+pipx install modkeel        # isolated install of the `modkeel` command (recommended)
+pip install modkeel         # or into the current environment
 ```
 
-This installs the `modkeel` CLI command and all dependencies.
+From source, to work on Modkeel itself:
+
+```bash
+git clone https://github.com/Modkeel/modkeel.git
+cd modkeel
+pip install -e ".[dev]"
+```
+
+Releases and their notes: [GitHub Releases](https://github.com/Modkeel/modkeel/releases).
 
 ## Usage
 
@@ -229,8 +235,8 @@ Without a token you're limited to 60 API requests/hour. With a token: 5,000/hour
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and PR guidelines.
+See [CONTRIBUTING.md](https://github.com/Modkeel/modkeel/blob/main/CONTRIBUTING.md) for development setup, testing, and PR guidelines.
 
 ## License
 
-MIT License -- see [LICENSE](LICENSE) for details.
+MIT License -- see [LICENSE](https://github.com/Modkeel/modkeel/blob/main/LICENSE) for details.
