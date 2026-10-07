@@ -273,11 +273,13 @@ class OlderOfficialSource(SourceStrategy):
 
         # Loaders refuse a mod whose declared Minecraft range excludes the game; then its
         # bytecode must resolve there. Both are required: an unverifiable JAR is not offered.
+        # Mixins are judged too; a mixin check that cannot run does not reject (linkage
+        # already needs the same symbol tables), one that finds a broken injection does.
         evidence = gather(Subject(jar, target, built_for, mod.title), ctx.config,
-                          ["metadata", "linkage"])
+                          ["metadata", "linkage", "mixins"], required=["metadata", "linkage"])
         if not evidence.ok:
             return Rejected(evidence.reason)
-        _print_linkage(evidence)
+        _print_static(evidence)
 
         dest = _install(jar, ctx.config)
 
@@ -287,8 +289,9 @@ class OlderOfficialSource(SourceStrategy):
             mod_version=version.get("version_number", "unknown"),
             evidence=evidence.passed, dependencies=deps or [],
             caveat=(f"Built for MC {built_for}. Its metadata allows {target}, every "
-                    f"Minecraft class it uses exists in {target} and no method or field it "
-                    f"calls was removed or renamed since {built_for}, but that is a static "
+                    f"Minecraft class it uses exists in {target}, no method or field it "
+                    f"calls was removed or renamed since {built_for} and its mixins still "
+                    f"find their targets, but that is a static "
                     f"check: test it in game (or with --docker-test) before relying on it."),
         )
 
@@ -332,10 +335,11 @@ class RelaxedOfficialSource(OlderOfficialSource):
         if RANGE_REFUSAL not in message:
             # Only a declared range is rewritten; anything else stays a refusal
             return Rejected(f"refused for something other than its range ({message})")
-        static = gather(Subject(jar, target, built_for, mod.title), ctx.config, ["linkage"])
+        static = gather(Subject(jar, target, built_for, mod.title), ctx.config,
+                        ["linkage", "mixins"], required=["linkage"])
         if not static.ok:
             return Rejected(static.reason)
-        _print_linkage(static)
+        _print_static(static)
 
         stem = primary["filename"].removesuffix(".jar")
         dest = ctx.config.output_dir / f"{stem}+modkeel-relaxed-mc{target}.jar"
@@ -375,11 +379,12 @@ def _version_key(game_version: str):
     return tuple(int(p) for p in game_version.split("."))
 
 
-def _print_linkage(evidence) -> None:
-    """Show the linkage summary of evidence that passed it (what was checked, how much)."""
-    linkage = next((o for o in evidence.outcomes if o.check == "linkage" and o.passed), None)
-    if linkage:
-        print(f"    ✓ Linkage: {linkage.detail}")
+def _print_static(evidence) -> None:
+    """Show what the static checks that passed covered (how much was checked)."""
+    labels = {"linkage": "Linkage", "mixins": "Mixins"}
+    for outcome in evidence.outcomes:
+        if outcome.passed and outcome.check in labels:
+            print(f"    ✓ {labels[outcome.check]}: {outcome.detail}")
 
 
 def possible_ports(fork_name: str, branches: List) -> List[str]:

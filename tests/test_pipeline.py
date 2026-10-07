@@ -20,6 +20,7 @@ from modkeel.pipeline import Pipeline
 REPO = "https://github.com/owner/mod"
 
 LINKAGE_OK = Outcome("linkage", PASSED, "ok")
+MIXINS_OK = Outcome("mixins", PASSED, "ok")
 
 
 def branch(name: str, mc: str = "1.21.10", loader: str = "neoforge",
@@ -407,6 +408,7 @@ class TestSourceOrder:
             patch("modkeel.sources.validate_jar", return_value=(True, "mod", "6.0.9", "ok")),
             patch("modkeel.evidence.validate_jar", return_value=(True, "mod", "6.0.9", "ok")),
             patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK),
+            patch("modkeel.evidence.check_mixins", return_value=MIXINS_OK),
         ]
 
     def test_author_branch_failure_tries_older_official_before_forks(self, pipeline, build):

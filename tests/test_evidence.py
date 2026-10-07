@@ -18,6 +18,7 @@ from modkeel.evidence import (
     Subject,
     check_linkage,
     check_metadata,
+    check_mixins,
     check_server_boot,
     evidence_line,
     gather,
@@ -111,6 +112,43 @@ class TestLinkage:
         assert (out.status, out.detail) == (PASSED, "ok")
 
 
+class TestMixins:
+    def run(self, config, report=None, built_for="1.21.10", indexes=None, error=None):
+        from modkeel.mixinscan import MixinReport
+        load = indexes.get if indexes is not None else (lambda v: object())
+        scan = patch("modkeel.mixinscan.check_mixin_targets",
+                     side_effect=error, return_value=report or MixinReport(checked=3))
+        with patch("modkeel.mappings.load_index", side_effect=load), scan:
+            return check_mixins(subject("1.21.11", built_for), config)
+
+    def test_needs_the_build_version(self, config):
+        out = self.run(config, built_for=None)
+        assert (out.status, out.detail) == (NOT_RUN, "needs the version the build targets")
+
+    def test_no_symbol_table(self, config):
+        assert self.run(config, indexes={"1.21.11": object()}).status == NOT_RUN
+
+    def test_unreadable_jar(self, config):
+        import zipfile
+        out = self.run(config, error=zipfile.BadZipFile("not a zip"))
+        assert out.status == NOT_RUN and "unreadable JAR" in out.detail
+
+    def test_fatal_injections_fail_and_are_named(self, config):
+        from modkeel.mixinscan import MixinReport
+        report = MixinReport(checked=6, fatal=["BedBlockMixin -> BedBlock.a: x",
+                                               "B -> C.d: y", "E -> F.g: z"])
+        out = self.run(config, report)
+        assert out.status == FAILED
+        assert out.detail == ("3 mixin injections would fail to apply on 1.21.11: "
+                              "BedBlockMixin -> BedBlock.a: x; B -> C.d: y (+1 more)")
+
+    def test_optional_injections_only_add_a_note(self, config):
+        from modkeel.mixinscan import MixinReport
+        out = self.run(config, MixinReport(checked=4, warnings=["A -> B.c: gone"]))
+        assert (out.status, out.detail) == (
+            PASSED, "4 mixin injections still apply; 1 optional ones lost their target")
+
+
 class TestServerBoot:
     def run(self, config, available=True, passed=True, error=None):
         seen = {}
@@ -199,7 +237,7 @@ class TestGather:
         assert evidence.outcomes == [Outcome("client", NOT_RUN, "no client check available")]
 
     def test_order_is_by_cost(self):
-        assert EVIDENCE_ORDER == ["metadata", "linkage", "docker_server", "client"]
+        assert EVIDENCE_ORDER == ["metadata", "linkage", "mixins", "docker_server", "client"]
 
 
 class TestEvidenceLine:

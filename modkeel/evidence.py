@@ -15,6 +15,9 @@ Checks run cheapest first, in EVIDENCE_ORDER:
   linkage        seconds   every Minecraft class it uses exists on the target and, when the
                            version it was built for is known, no method or field it calls
                            was removed or renamed since (modkeel/linkage.py)
+  mixins         seconds   its mixins still apply: every target method they name still
+                           exists and every @Inject handler still matches its parameters,
+                           when the version it was built for is known (modkeel/mixinscan.py)
   docker_server  ~1 min    a headless server boots with it and its dependencies
   client         minutes   a real client boots (the Companion e2e; not wired here yet)
 
@@ -28,6 +31,7 @@ Pack-level tests (all of a compile run's JARs in one server, then each alone) st
 DockerTester.test_mods_in_docker: they test a set, not one JAR.
 """
 
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -35,7 +39,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from modkeel.build import validate_jar
 from modkeel.models import ModCompilerConfig
 
-EVIDENCE_ORDER = ["metadata", "linkage", "docker_server", "client"]
+EVIDENCE_ORDER = ["metadata", "linkage", "mixins", "docker_server", "client"]
 
 PASSED, FAILED, NOT_RUN = "passed", "failed", "not_run"
 
@@ -48,6 +52,7 @@ EVIDENCE_LABELS = {
     "metadata": "metadata",
     "metadata_relaxed": "range widened by Modkeel",
     "linkage": "linkage",
+    "mixins": "mixins",
     "docker_server": "server boot",
     "client": "client",
 }
@@ -153,6 +158,38 @@ def check_linkage(subject: Subject, config: ModCompilerConfig) -> Outcome:
     return Outcome("linkage", FAILED, "; ".join(reasons), report)
 
 
+def check_mixins(subject: Subject, config: ModCompilerConfig) -> Outcome:
+    """Do its mixins still apply on the target (mixinscan.check_mixin_targets)?
+
+    Needs the version the build targets: a mixin is judged by comparing what its targets
+    were there with what they are on the target. Without it, or without either symbol
+    table, not_run. Injections that may be skipped (require 0) only add a note: the game
+    starts, that feature does nothing.
+    """
+    from modkeel.mappings import load_index
+    from modkeel.mixinscan import check_mixin_targets
+
+    target, built_for = subject.mc_version, subject.built_for
+    if not built_for or built_for == target:
+        return Outcome("mixins", NOT_RUN, "needs the version the build targets")
+    index, built_for_index = load_index(target), load_index(built_for)
+    if index is None or built_for_index is None:
+        return Outcome("mixins", NOT_RUN, f"no symbol table for MC {target} or {built_for}")
+    try:
+        report = check_mixin_targets(subject.jar, index, built_for_index)
+    except (OSError, zipfile.BadZipFile) as e:
+        return Outcome("mixins", NOT_RUN, f"unreadable JAR ({e})")
+    if report.fatal:
+        more = f" (+{len(report.fatal) - 2} more)" if len(report.fatal) > 2 else ""
+        return Outcome("mixins", FAILED,
+                       f"{len(report.fatal)} mixin injections would fail to apply on "
+                       f"{target}: {'; '.join(report.fatal[:2])}{more}", report)
+    note = (f"; {len(report.warnings)} optional ones lost their target"
+            if report.warnings else "")
+    return Outcome("mixins", PASSED,
+                   f"{report.checked} mixin injections still apply{note}", report)
+
+
 def check_server_boot(subject: Subject, config: ModCompilerConfig) -> Outcome:
     """Does a headless server boot with it and its dependencies (DockerTester and its cache).
 
@@ -184,6 +221,7 @@ def check_server_boot(subject: Subject, config: ModCompilerConfig) -> Outcome:
 CHECKS: Dict[str, Callable[[Subject, ModCompilerConfig], Outcome]] = {
     "metadata": lambda s, c: check_metadata(s, c),
     "linkage": lambda s, c: check_linkage(s, c),
+    "mixins": lambda s, c: check_mixins(s, c),
     "docker_server": lambda s, c: check_server_boot(s, c),
 }
 

@@ -258,14 +258,16 @@ class TestOlderOfficial:
         found = OlderOfficialSource().find(MOD, ctx)
         assert found.note == "no older NeoForge builds in the 1.21 line"
 
-    def _deliver(self, ctx, valid=(True, "m", "1", "ok"), linkage=None):
+    def _deliver(self, ctx, valid=(True, "m", "1", "ok"), linkage=None, mixins=None):
         linkage = linkage or Outcome("linkage", PASSED, "ok")
+        mixins = mixins or Outcome("mixins", PASSED, "ok")
         cand = Candidate("1 for MC 1.21.9",
                          {"version": version("1", ["1.21.9"]), "built_for": "1.21.9"})
         ctx.modrinth.download_modrinth_deps.return_value = []
         with patch("modkeel.sources._download",
                    lambda url, dest: dest.write_bytes(b"PK")), \
                 patch("modkeel.evidence.validate_jar", return_value=valid), \
+                patch("modkeel.evidence.check_mixins", return_value=mixins), \
                 patch("modkeel.evidence.check_linkage", return_value=linkage) as check:
             out = OlderOfficialSource().deliver(cand, MOD, ctx)
         if valid[0]:
@@ -281,6 +283,18 @@ class TestOlderOfficial:
         assert out.reason == "its metadata only allows MC: [1.21.9]"
         assert not list(ctx.config.output_dir.iterdir())
 
+    def test_broken_mixin_rejects(self, ctx):
+        """Monsters in the Closet 1.0.3 on 1.21.11: metadata and linkage clean, its
+        BedBlock @Inject handler no longer matches the target's parameters."""
+        out = self._deliver(ctx, mixins=Outcome(
+            "mixins", FAILED, "1 mixin injections would fail to apply on 1.21.10: BedBlockMixin"))
+        assert isinstance(out, Rejected) and "would fail to apply" in out.reason
+        assert not list(ctx.config.output_dir.iterdir())
+
+    def test_mixin_check_that_cannot_run_does_not_reject(self, ctx):
+        out = self._deliver(ctx, mixins=Outcome("mixins", NOT_RUN, "no symbol table"))
+        assert isinstance(out, Delivered) and out.evidence == ["metadata", "linkage"]
+
     def test_linkage_must_pass(self, ctx):
         out = self._deliver(ctx, linkage=Outcome("linkage", FAILED,
                                                  "3 Minecraft classes it uses don't exist"))
@@ -290,7 +304,7 @@ class TestOlderOfficial:
     def test_delivered_with_evidence_and_caveat(self, ctx):
         out = self._deliver(ctx)
         assert isinstance(out, Delivered)
-        assert out.evidence == ["metadata", "linkage"]
+        assert out.evidence == ["metadata", "linkage", "mixins"]
         assert "Built for MC 1.21.9" in out.caveat
         assert "no method or field it calls was removed or renamed" in out.caveat
         assert (ctx.config.output_dir / "m.jar").exists()
@@ -424,9 +438,10 @@ class TestRelaxedOfficial:
     CAND = Candidate("1 for MC 1.21.9", {"version": version("1", ["1.21.9"], "mod.jar"),
                                           "built_for": "1.21.9"})
 
-    def deliver(self, ctx, valid, linkage=None, relaxed=True, boot=None):
+    def deliver(self, ctx, valid, linkage=None, relaxed=True, boot=None, mixins=None):
         from modkeel.relax import Relaxed
         linkage = linkage or Outcome("linkage", PASSED, "ok")
+        mixins = mixins or Outcome("mixins", PASSED, "ok")
         boot = boot or Outcome("docker_server", PASSED, "booted")
         # the source's own range check, then the evidence layer's on the rewritten JAR
         valid = iter(valid)
@@ -447,6 +462,7 @@ class TestRelaxedOfficial:
                 patch("modkeel.sources.validate_jar", side_effect=lambda *a, **k: next(valid)), \
                 patch("modkeel.evidence.validate_jar", side_effect=lambda *a, **k: next(valid)), \
                 patch("modkeel.evidence.check_linkage", return_value=linkage), \
+                patch("modkeel.evidence.check_mixins", return_value=mixins), \
                 patch("modkeel.relax.relax_jar", fake_relax), \
                 patch("modkeel.evidence.check_server_boot", return_value=boot):
             out = RelaxedOfficialSource().deliver(self.CAND, MOD, ctx)
@@ -456,7 +472,8 @@ class TestRelaxedOfficial:
         out, _ = self.deliver(ctx, valid=[self.RANGE, (True, "m", "1", "ok")])
         assert isinstance(out, Delivered)
         assert out.jar_path.name == "mod+modkeel-relaxed-mc1.21.10.jar"
-        assert out.evidence == ["linkage", "metadata_relaxed", "metadata", "docker_server"]
+        assert out.evidence == ["linkage", "mixins", "metadata_relaxed", "metadata",
+                                "docker_server"]
         assert "declared [1.21.9]" in out.caveat and "server booted" in out.caveat
 
     def test_not_delivered_unless_a_server_boots(self, ctx):
