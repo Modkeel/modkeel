@@ -142,12 +142,22 @@ class SourceStrategy:
     label: str = ""
     # Most candidates deliver() is tried on (None: all). find() may list more, for display.
     max_attempts: Optional[int] = None
+    # find() and check() need nothing slow: no GitHub search, no build, nothing installed
+    # (a Modrinth call and a cached download at most). Resolver.would_resolve asks only
+    # these, so the target layer can size up other Minecraft versions cheaply.
+    cheap: bool = False
 
     def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
         raise NotImplementedError
 
     def deliver(self, candidate: Candidate, mod: ModRef,
                 ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        raise NotImplementedError
+
+    def check(self, candidate: Candidate, mod: ModRef,
+              ctx: ResolveContext) -> Optional[Rejected]:
+        """Would deliver() accept this candidate? None if so. Judged on the same evidence,
+        installing nothing. Only cheap strategies implement it."""
         raise NotImplementedError
 
 
@@ -189,6 +199,22 @@ class Resolver:
         Find-only runs stop at the first strategy with candidates and leave them pending.
         """
         return self._run(mod, ctx, Resolution(), start=0, deliver=deliver)
+
+    def would_resolve(self, mod: ModRef, ctx: ResolveContext,
+                      attempts: int = 1) -> Optional[str]:
+        """The cheap strategy that would deliver the mod on ctx's target, or None.
+
+        The same order and checks as resolve(), limited to cheap strategies and to the
+        first `attempts` candidates of each (the nearest older build: if it fails there,
+        older ones rarely pass). Nothing is installed or printed to the trail.
+        """
+        for strategy in self.strategies:
+            if not strategy.cheap:
+                continue
+            for candidate in strategy.find(mod, ctx).candidates[:attempts]:
+                if strategy.check(candidate, mod, ctx) is None:
+                    return strategy.name
+        return None
 
     def deliver_pending(self, resolution: Resolution, mod: ModRef,
                         ctx: ResolveContext) -> Resolution:

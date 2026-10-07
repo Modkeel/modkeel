@@ -135,7 +135,8 @@ starts it now, `n` stops it); without a terminal it only prints the command to r
 `--fallback auto|never` decides without asking. A result for another version goes to
 `out/mc-<version>/` and is never installed into `--instance`. `compile` does the same for
 the whole list (never with `--strict`): it proposes a version where more of the mods have
-an official build than were built on yours. JARs from the first run that also pass the
+an official build than were built on yours. On the few versions nearest yours, a mod also
+counts when its older build passes the static checks there. JARs from the first run that also pass the
 static checks on the new version are copied instead of built again; mods with an official
 build there are downloaded fresh.
 

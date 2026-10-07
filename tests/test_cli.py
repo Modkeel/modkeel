@@ -593,6 +593,29 @@ class TestGet:
         assert 'modkeel get "Create" -m 1.21.1 -l neoforge' in result.output
         assert not Path("out/mc-1.21.1").exists()
 
+    def test_a_nearer_version_where_an_older_build_passes_wins(self):
+        """Create's 1.21.1 build fails on 1.21.10 but passes on 1.21.9: nearer than 1.21.1."""
+        old = mr_version("6.0.6", ["1.21.1"], filename="create.jar", deps=())
+
+        def probe(loader, client):
+            return lambda title, pid, version: version == "1.21.9"
+
+        with patched(*modrinth(project=CREATE)[:2], self.by_version({"1.21.1": [old]}),
+                     patch("modkeel.sources._download", fake_download),
+                     patch("modkeel.evidence.validate_jar",
+                           return_value=(False, "create", "6.0.6",
+                                         "JAR declares incompatible MC version: [1.21.1]")),
+                     patch("modkeel.relax.relax_jar", return_value=None),
+                     patch("modkeel.target.older_build_probe", probe),
+                     patch("modkeel.mappings.release_versions",
+                           return_value=("1.21.1", "1.21.8", "1.21.9", "1.21.10"))):
+            result = invoke("get", "Create", "-m", "1.21.10")
+        assert result.exit_code == 1
+        assert "MC 1.21.9: an older build of Create passes the static checks there" \
+            in result.output
+        assert 'modkeel get "Create" -m 1.21.9 -l neoforge' in result.output
+
+
 class TestToken:
     def test_lifecycle(self):
         assert "No GitHub token saved." in invoke("token").output

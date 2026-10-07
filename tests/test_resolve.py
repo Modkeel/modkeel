@@ -563,3 +563,50 @@ class TestPossiblePorts:
         assert possible_ports_note(found).startswith("; possible ports not tried")
         assert possible_ports_note([]) == ""
         assert possible_ports_note(["a", "b", "c", "d", "e"]).endswith("a, b, c (+2 more)")
+
+
+class TestWouldResolve:
+    """The target layer's dry run: cheap strategies only, first candidate, nothing installed."""
+
+    def strategy(self, name, cheap, candidates, verdicts, calls):
+        from modkeel.resolve import Candidate, Found, Rejected, SourceStrategy
+
+        class S(SourceStrategy):
+            def find(self, mod, ctx):
+                calls.append(("find", name))
+                return Found([Candidate(c, {}) for c in candidates])
+
+            def check(self, candidate, mod, ctx):
+                calls.append(("check", candidate.label))
+                return None if verdicts[candidate.label] else Rejected("no")
+
+            def deliver(self, candidate, mod, ctx):
+                raise AssertionError("would_resolve must not deliver")
+
+        s = S()
+        s.name, s.cheap = name, cheap
+        return s
+
+    def test_first_cheap_strategy_whose_check_passes(self):
+        from modkeel.resolve import Resolver
+        calls = []
+        resolver = Resolver([
+            self.strategy("official", True, [], {}, calls),
+            self.strategy("older_official", True, ["a", "b"], {"a": True, "b": True}, calls),
+            self.strategy("fork", False, ["f"], {"f": True}, calls)])
+        assert resolver.would_resolve(MagicMock(), MagicMock()) == "older_official"
+        assert calls == [("find", "official"), ("find", "older_official"), ("check", "a")]
+
+    def test_slow_strategies_and_later_candidates_are_never_asked(self):
+        from modkeel.resolve import Resolver
+        calls = []
+        resolver = Resolver([
+            self.strategy("older_official", True, ["a", "b"], {"a": False, "b": True}, calls),
+            self.strategy("fork", False, ["f"], {"f": True}, calls)])
+        assert resolver.would_resolve(MagicMock(), MagicMock()) is None
+        assert calls == [("find", "older_official"), ("check", "a")]
+
+    def test_which_strategies_are_cheap(self):
+        from modkeel.sources import default_strategies
+        assert [s.name for s in default_strategies() if s.cheap] == ["official",
+                                                                      "older_official"]

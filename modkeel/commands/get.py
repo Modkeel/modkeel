@@ -193,12 +193,17 @@ def _fallback(mod, modrinth, resolve_on, make_config, github_token, mc_version: 
 
     True when a JAR for another version was delivered (exit 0: the user let it run).
     """
-    from modkeel.target import fallback_output, propose_targets
+    from modkeel.mappings import release_versions
+    from modkeel.target import fallback_output, older_build_probe, propose_targets
 
     if not mod.project:
         return False
+    console.print(f"\n[dim]Looking for the nearest Minecraft version where "
+                  f"{escape(mod.title)} runs...[/dim]")
     options = propose_targets([(mod.title, mod.project.get("project_id"))], loader.lower(),
-                              mc_version, modrinth, resolved=0, limit=1)
+                              mc_version, modrinth, resolved=0, limit=1,
+                              probe=older_build_probe(loader.lower(), modrinth),
+                              releases=release_versions())
     if not options:
         return False
     option = options[0]
