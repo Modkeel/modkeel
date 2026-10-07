@@ -129,6 +129,14 @@ modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
 
 It never downloads a different mod with a similar name: addons are listed separately.
 
+When nothing runs on your version, Modkeel looks for the nearest Minecraft version with an
+official build and says so: in a terminal a 15-second countdown starts the search (Enter
+starts it now, `n` stops it); without a terminal it only prints the command to run.
+`--fallback auto|never` decides without asking. A result for another version goes to
+`out/mc-<version>/` and is never installed into `--instance`. `compile` does the same for
+the whole list (never with `--strict`): it proposes a version where more of the mods have
+an official build than were built on yours.
+
 The last lines say what the JAR passed (`Evidence: metadata ✓ · linkage ✓ · ...`). With
 `--docker-test`, a headless server boots with each result before it is accepted: a JAR that
 crashes it (for example a mixin whose target changed) is removed and the next candidate is
