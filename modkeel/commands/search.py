@@ -15,6 +15,7 @@ from rich.table import Table
 
 from modkeel.commands._shared import (
     console,
+    print_evidence,
     print_related,
     print_trail,
     resolve_github_token,
@@ -149,6 +150,7 @@ def search_command(
         d = resolution.delivered
         if d.caveat:
             console.print(f"\n[yellow]Note:[/yellow] {escape(d.caveat)}")
+        print_evidence(d)
         console.print(f"\n[green]{d.verb.capitalize()} {escape(d.mod_name)} "
                       f"v{escape(d.mod_version)} to {output_dir}/[/green]")
     else:

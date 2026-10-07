@@ -1,5 +1,5 @@
 """Pieces every `modkeel` subcommand uses: console, banner, token and loader handling, and
-how the resolver's outcome is shown (trail, near misses, Docker test of the delivered JAR)."""
+how the resolver's outcome is shown (trail, near misses, evidence line)."""
 
 from typing import Optional
 
@@ -9,7 +9,6 @@ from rich.markup import escape
 
 from modkeel.config import ModkeelConfig
 from modkeel.loaders import ALL_LOADERS
-from modkeel.models import ModCompilerConfig
 # Moved to modkeel/sources.py (the fork strategy uses them); re-exported for callers.
 from modkeel.sources import prefilter_forks, strategy_label, temp_pipeline  # noqa: F401
 from modkeel.utils import setup_windows_console
@@ -95,22 +94,10 @@ def print_related(mod, limit: int = 5) -> None:
     console.print(f"\n[dim]{heading}: {names}[/dim]")
 
 
-def docker_test_delivered(delivered, config: ModCompilerConfig) -> None:
-    """Boot a headless server with the delivered JAR and its dependencies, and say how it went.
+def print_evidence(delivered, docker_requested: bool = False) -> None:
+    """The evidence line for a delivered JAR: what it passed, and what was not run."""
+    from modkeel.evidence import evidence_line
 
-    The evidence layer in its current form (see modkeel/resolve.py): every strategy's JAR can
-    be tested, not only compiled ones.
-    """
-    from modkeel.docker import DockerTester
-    from modkeel.models import CompilationResult
-
-    results = [CompilationResult(repo_url=str(delivered.jar_path), success=True,
-                                 jar_path=str(delivered.jar_path),
-                                 mod_name=delivered.mod_name)]
-    results += [CompilationResult(repo_url=str(dep), success=True, jar_path=str(dep),
-                                  modrinth_download=True)
-                for dep in delivered.dependencies]
-    DockerTester(config).test_mods_in_docker(results)
-    main = results[0]
-    if main.docker_test_passed:
-        delivered.evidence.append("docker_server")
+    if delivered.evidence:
+        console.print(f"[dim]Evidence: "
+                      f"{escape(evidence_line(delivered.evidence, docker_requested))}[/dim]")

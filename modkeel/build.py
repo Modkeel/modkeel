@@ -394,11 +394,15 @@ def _validate_json_jar(
 
 
 def validate_jar(
-    jar_path: Path, mc_version: str
+    jar_path: Path, mc_version: str, min_size: int = 10 * 1024
 ) -> Tuple[bool, Optional[str], Optional[str], str]:
     """
     Validate the compiled JAR file.
     Returns (is_valid, mod_name, mod_version, message)
+
+    min_size guards against picking a stub among a build's outputs (slim/API jars). A
+    published release has no such ambiguity, so its callers pass 0: real mods can be tiny
+    (Monsters in the Closet 1.0.3 is 10,238 bytes).
     """
     try:
         with zipfile.ZipFile(jar_path, 'r') as jar:
@@ -419,7 +423,7 @@ def validate_jar(
                             )
                         if not valid:
                             return valid, name, ver, msg
-                        if jar_path.stat().st_size < 10 * 1024:
+                        if jar_path.stat().st_size < min_size:
                             return False, name, ver, "JAR file suspiciously small (<10KB)"
                         return True, name, ver, msg
 

@@ -4,13 +4,19 @@ Resolution has three layers, of which this module is the middle one:
 
   target layer    which Minecraft version + loader the pack aims at   (not built yet)
   source layer    strategies that produce a JAR for one mod on that target   (this module)
-  evidence layer  checks that say how sure we are it runs   (linkage/Docker, used ad hoc now)
+  evidence layer  checks that say how sure we are it runs   (modkeel/evidence.py)
 
 A strategy has two steps. `find` is cheap (API lookups) and lists candidates, or says why
 there are none. `deliver` is costly (download, verify, compile) and either puts a JAR in the
 output directory or rejects the candidate with a reason. The Resolver walks SOURCE_ORDER
 (modkeel/sources.py), tries each strategy's candidates in turn, stops at the first JAR, and
 records every step so the CLI can show the path it took.
+
+Strategies require the evidence their kind of JAR needs (older_official: metadata and
+linkage; relaxed_official: a server boot too). On top of that, a caller can ask for a server
+boot of whatever is delivered (ResolveContext.verify_runtime, `get --docker-test`): a JAR
+that crashes the server is then rejected like any other candidate and the walk goes on to
+the next one, instead of being handed over with a failed test attached.
 
 Adding a way to find JARs means one SourceStrategy subclass and one entry in SOURCE_ORDER.
 """
@@ -51,6 +57,9 @@ class ResolveContext:
     # Same target as `config`, with the given GitHub token (GitHub clients read it from
     # the config they are built with). Defaults to `config` itself.
     make_config: Optional[Callable[[Optional[str]], ModCompilerConfig]] = None
+    # Boot a headless server with every delivered JAR that has not booted one yet; a crash
+    # rejects it (see module docstring). Off for compile, which tests the whole set later.
+    verify_runtime: bool = False
 
     def config_with_token(self, token: Optional[str]) -> ModCompilerConfig:
         return self.make_config(token) if self.make_config else self.config
@@ -106,6 +115,7 @@ class Delivered:
     caveat: Optional[str] = None
     dependencies: List[Path] = field(default_factory=list)  # required JARs fetched with it
     payload: Any = None                   # strategy-specific result (see Found.payload)
+    unverified: Optional[str] = None      # why a requested check could not run (no Docker)
 
 
 @dataclass
@@ -216,6 +226,8 @@ class Resolver:
             outcome = strategy.deliver(candidate, mod, ctx)
             if outcome.payload is not None:
                 resolution.payloads.append(outcome.payload)
+            if isinstance(outcome, Delivered) and ctx.verify_runtime:
+                outcome = _verify_runtime(outcome, ctx)
             if isinstance(outcome, Delivered):
                 resolution.delivered = outcome
                 resolution.trail.append(Step(strategy.name, True, candidate.label))
@@ -225,3 +237,31 @@ class Resolver:
             )
         return False
 
+
+
+def _verify_runtime(delivered: Delivered, ctx: ResolveContext) -> Union[Delivered, Rejected]:
+    """Boot a server with a delivered JAR (unless its strategy already did).
+
+    A crash rejects it, and the JAR is removed from the output directory and the instance,
+    so a broken file is never left where the player loads mods from. A boot that cannot run
+    (no Docker, client-only mod, infrastructure error) keeps the delivery and says why.
+    """
+    from modkeel.evidence import Subject, gather
+
+    if "docker_server" in delivered.evidence or not delivered.jar_path.is_file():
+        return delivered
+    subject = Subject(delivered.jar_path, ctx.mc_version, name=delivered.mod_name,
+                      dependencies=list(delivered.dependencies))
+    evidence = gather(subject, ctx.config, ["docker_server"], required=[])
+    if evidence.passed:
+        delivered.evidence.append("docker_server")
+        return delivered
+    if evidence.ok:
+        delivered.unverified = evidence.outcomes[0].detail
+        return delivered
+    for copy in (delivered.jar_path,
+                 ctx.config.mods_path / delivered.jar_path.name if ctx.config.mods_path
+                 else None):
+        if copy is not None:
+            copy.unlink(missing_ok=True)
+    return Rejected(evidence.reason, payload=delivered.payload)

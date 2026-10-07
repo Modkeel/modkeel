@@ -37,8 +37,12 @@ DOCKER_FAIL_PATTERNS = [
     re.compile(r"Missing or unsupported mandatory dependencies"),
     re.compile(r"Incompatible mod set!"),
     re.compile(r"Crash report saved to"),
-    re.compile(r"\[FATAL\]"),
+    # "[FATAL]" (old layout) and "[main/FATAL]" (thread/level, current Forge/NeoForge/Fabric):
+    # e.g. a mixin whose target method changed signature fails to apply at startup
+    re.compile(r"[/\[]FATAL\]"),
 ]
+# "[01:07:06] [main/FATAL] [mixin/]: " in front of a log message: dropped from error texts
+LOG_PREFIX = re.compile(r"^(?:\[[\d:.]+\]\s*)?(?:\[[^\]]*/[A-Z]+\]\s*)?(?:\[[^\]]*\]:?\s*)?")
 DOCKER_DEP_PATTERN = re.compile(
     r"Mod '([^']+)' .* requires .* '([^']+)'"
 )
@@ -645,7 +649,7 @@ class DockerTester:
                         process.terminate()
                         return {
                             "passed": False,
-                            "error": line.strip(),
+                            "error": LOG_PREFIX.sub("", line.strip()) or line.strip(),
                             "log_snippet": recent_lines[-5:],
                         }
 

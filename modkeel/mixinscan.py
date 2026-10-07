@@ -10,13 +10,19 @@ annotations), this gives a map of which game systems a mod touches and how hard:
 Two mods whose injectors land on the same target method are the usual shape of a mixin
 conflict: two overwrites of one method cannot both apply, and a redirect of a call another
 mod also redirects fails to apply.
+
+``check_mixin_targets`` uses the same reading to ask whether a build's mixins still apply on
+another Minecraft version (see its docstring): a mixin that fails to apply stops the game at
+startup, and neither the metadata nor the class/member linkage check can see it.
 """
 
 import io
+import json
 import re
 import struct
 import zipfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from modkeel.linkage import ClassFileError, _class_internal_name, _parse_pool, _utf8
@@ -28,12 +34,16 @@ INJECTOR_PACKAGES = ("Lorg/spongepowered/asm/mixin/injection/",
 NESTED_JAR = re.compile(r"META-INF/(jars|jarjar)/.+\.jar$")
 # injectors that replace behaviour rather than add to it
 REPLACING = {"Overwrite", "Redirect", "WrapOperation", "WrapWithCondition", "ModifyConstant"}
+CALLBACK_INFO = ("Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;",
+                 "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;")
 
 
 @dataclass
 class Injection:
     kind: str           # simple annotation name: Inject, Redirect, Overwrite, ...
     methods: List[str]  # target method selectors as written ("render", "tick()V", ...)
+    handler: str = ""   # the mixin method carrying the annotation: name + descriptor
+    require: Optional[int] = None  # the annotation's require = N, when written
 
 
 @dataclass
@@ -56,6 +66,10 @@ def _annotations(attr: bytes, pool) -> List[Tuple[str, Dict[str, List[str]]]]:
         if tag in "BCDFIJSZs":
             if sink is not None and tag == "s":
                 sink.append(_utf8(pool, u2(at)) or "")
+            elif sink is not None and tag == "I":  # int constants, e.g. require = 1
+                entry = pool[u2(at)]
+                if entry and entry[0] == 3:
+                    sink.append(str(struct.unpack(">i", entry[1])[0]))
             return at + 2
         if tag == "e":
             return at + 4
@@ -135,12 +149,15 @@ def parse_mixin(data: bytes) -> Optional[MixinClass]:
     n, offset = u2(offset), offset + 2
     for _ in range(n):
         method_name = _utf8(pool, u2(offset + 2)) or ""
+        handler = method_name + (_utf8(pool, u2(offset + 4)) or "")
         anns, offset = annotated(offset + 8, u2(offset + 6))
         for kind, values in anns:
+            require = values.get("require")
+            require = int(require[0]) if require and require[0].lstrip("-").isdigit() else None
             if kind == OVERWRITE:
-                injections.append(Injection("Overwrite", [method_name]))
+                injections.append(Injection("Overwrite", [handler], handler, require))
             elif kind.startswith(INJECTOR_PACKAGES) and "method" in values:
-                injections.append(Injection(_simple(kind), values["method"]))
+                injections.append(Injection(_simple(kind), values["method"], handler, require))
     targets: List[str] = []
     class_anns, _ = annotated(offset + 2, u2(offset))
     for kind, values in class_anns:
@@ -208,3 +225,155 @@ def aggregate(mixins: Dict[str, Dict]) -> Dict[str, Dict]:
 
 def jar_profile(jar: "zipfile.ZipFile | bytes") -> Dict[str, Dict]:
     return aggregate(jar_mixins(jar))
+
+
+# ---------------------------------------------------------------------------
+# Do this build's mixins still apply on another Minecraft version?
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MixinReport:
+    """What check_mixin_targets found.
+
+    fatal: injections Mixin refuses at startup (the game does not start). warnings: targets
+    that vanished under an injector that may be skipped (require 0): the game starts, that
+    feature silently does nothing. checked: injections that could be judged at all.
+    """
+
+    checked: int = 0
+    fatal: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+def _params(desc: str) -> List[str]:
+    """Parameter descriptors of a method descriptor: "(ILa/B;[J)V" -> ["I", "La/B;", "[J"]."""
+    body, out, i = desc[1:desc.index(")")], [], 0
+    while i < len(body):
+        start = i
+        while body[i] == "[":
+            i += 1
+        i = body.index(";", i) + 1 if body[i] == "L" else i + 1
+        out.append(body[start:i])
+    return out
+
+
+def _split_selector(selector: str) -> Tuple[str, Optional[str]]:
+    """'render' -> ('render', None); 'Lnet/X;tick(J)V' -> ('tick', '(J)V')."""
+    s = selector.strip()
+    if ";" in s.split("(", 1)[0]:
+        s = s.split(";", 1)[1]
+    name, paren, rest = s.partition("(")
+    return name.split(":", 1)[0].strip(), (paren + rest) if paren else None
+
+
+def _descriptors(index, owner: str, name: str) -> List[str]:
+    """Descriptors of every method `name` the class declares in that symbol table."""
+    prefix = name + "("
+    return [d[len(name):] for d in index.descriptors.get(owner, ()) if d.startswith(prefix)]
+
+
+def _default_requires(archive: zipfile.ZipFile) -> Dict[str, int]:
+    """{mixin package path: injectors.defaultRequire} from the jar's mixin configs."""
+    out: Dict[str, int] = {}
+    for info in archive.infolist():
+        # Configs are small JSON files, usually at the root; the content says which are
+        if not info.filename.endswith(".json") or info.file_size > 256 * 1024:
+            continue
+        try:
+            config = json.loads(archive.read(info))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(config, dict) and isinstance(config.get("package"), str) and any(
+                isinstance(config.get(k), list) for k in ("mixins", "client", "server")):
+            injectors = config.get("injectors") or {}
+            require = injectors.get("defaultRequire", 0) if isinstance(injectors, dict) else 0
+            out[config["package"].replace(".", "/") + "/"] = int(require or 0)
+    return out
+
+
+def check_mixin_targets(jar_path: Path, index, built_for_index) -> MixinReport:
+    """Which of the JAR's mixins would fail to apply on `index`'s version.
+
+    Built for `built_for_index`'s version, a mixin names target methods by name (and
+    sometimes descriptor). Judged only where the built-for symbol table shows the injection
+    resolved there, so mappings the JAR is not in (intermediary, SRG) and targets the game
+    does not declare (loader patches, other mods) are skipped, never reported:
+
+    - a target method the class declared in built_for and no longer declares: the
+      injection finds nothing. Fatal when the injector requires a match (its require, or
+      its config's injectors.defaultRequire, >= 1), a warning otherwise. An @Overwrite of
+      a vanished method is fatal.
+    - an @Inject whose handler takes the target's parameters (before CallbackInfo): Mixin
+      validates them against the target found. If built_for's method of that name had
+      those parameters and every method of that name in the target has others, Mixin
+      rejects the handler ("Invalid descriptor") and the game stops. Monsters in the Closet
+      1.0.3 (built for 1.21.10) on 1.21.11: lambda$useWithoutItem$2 went from
+      (Player, Player$BedSleepingProblem) to (Player, Component).
+
+    Mixins of nested jars (bundled libraries) are left out: their own mods carry them.
+    """
+    report = MixinReport()
+    with zipfile.ZipFile(jar_path) as archive:
+        requires = _default_requires(archive)
+        for info in archive.infolist():
+            if not info.filename.endswith(".class") or \
+                    info.filename.startswith("META-INF/versions/"):
+                continue
+            data = archive.read(info)
+            try:
+                mixin = parse_mixin(data)
+            except (ClassFileError, struct.error):
+                continue
+            if mixin is None:
+                continue
+            default = next((r for pkg, r in requires.items()
+                            if mixin.name.startswith(pkg)), 0)
+            for target in mixin.targets:
+                owner = target.replace("/", ".")
+                if owner not in built_for_index.classes or owner not in index.classes:
+                    continue  # unreadable names, or a class linkage already reports
+                for injection in mixin.injections:
+                    _judge(report, mixin.name, owner, injection, default, index,
+                           built_for_index)
+    return report
+
+
+def _judge(report: MixinReport, mixin: str, owner: str, injection: Injection,
+           default_require: int, index, built_for_index) -> None:
+    short = f"{mixin.rsplit('/', 1)[-1]} -> {owner.rsplit('.', 1)[-1]}"
+    found_any, vanished = False, []
+    for selector in injection.methods:
+        name, desc = _split_selector(selector)
+        if not name or "*" in name or name.startswith("/"):
+            continue  # wildcard or /regex/ selector: cannot be judged by name ($ is legal:
+            # lambda$useWithoutItem$2)
+        before = _descriptors(built_for_index, owner, name)
+        after = _descriptors(index, owner, name)
+        if desc:
+            before = [d for d in before if d == desc]
+            after = [d for d in after if d == desc]
+        if after and not before:
+            found_any = True  # a selector written for this version (multi-version mods)
+            continue
+        if not before:
+            continue  # it did not resolve against the game there either
+        report.checked += 1
+        if not after:
+            vanished.append(name)
+            continue
+        found_any = True
+        if injection.kind == "Inject" and injection.handler:
+            handler_params = _params(injection.handler[injection.handler.index("("):])
+            cut = next((i for i, p in enumerate(handler_params) if p in CALLBACK_INFO), None)
+            wanted = handler_params[:cut] if cut else []
+            if wanted and any(_params(d) == wanted for d in before) and \
+                    not any(_params(d) == wanted for d in after):
+                report.fatal.append(
+                    f"{short}.{name}: parameters changed, @Inject handler no longer matches")
+    if vanished and not found_any:
+        require = injection.require if injection.require is not None else default_require
+        line = f"{short}.{', '.join(vanished)}: target method gone ({injection.kind})"
+        if injection.kind == "Overwrite" or require >= 1:
+            report.fatal.append(line)
+        else:
+            report.warnings.append(line)

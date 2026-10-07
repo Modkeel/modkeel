@@ -125,6 +125,13 @@ class TestLogPatterns(unittest.TestCase):
         )
         self.assertTrue(matched)
 
+    def test_fail_pattern_fatal_level(self):
+        """[main/FATAL] (thread/level layout) should match: Monsters in the Closet 1.21.9
+        on 1.21.11, real log, a mixin whose target changed signature."""
+        line = ("[01:07:06] [main/FATAL] [mixin/]: Mixin apply for mod monsters_in_the_closet "
+                "failed monsters_in_the_closet.mixins.json:BedBlockMixin")
+        self.assertTrue(any(p.search(line) for p in ModAutoCompiler.DOCKER_FAIL_PATTERNS))
+
     def test_normal_log_no_match(self):
         """Normal server lines should not match any fail pattern."""
         normal_lines = [
@@ -507,6 +514,18 @@ class TestAnalyzeServerLogs(unittest.TestCase):
         result = compiler._analyze_server_logs(proc)
         self.assertFalse(result["passed"])
         self.assertTrue(result.get("is_client_only"))
+
+    def test_fatal_error_text_drops_the_log_prefix(self):
+        compiler = make_compiler()
+        proc = self._mock_process([
+            "[01:07:06] [main/INFO] [mixin/]: Loading mixins",
+            "[01:07:06] [main/FATAL] [mixin/]: Mixin apply for mod monsters_in_the_closet "
+            "failed monsters_in_the_closet.mixins.json:BedBlockMixin",
+        ])
+        result = compiler._analyze_server_logs(proc)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["error"], "Mixin apply for mod monsters_in_the_closet failed "
+                                          "monsters_in_the_closet.mixins.json:BedBlockMixin")
 
     def test_client_only_pattern_variants(self):
         from modkeel.docker import DOCKER_CLIENT_ONLY_PATTERN as pat
