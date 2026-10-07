@@ -392,7 +392,7 @@ JDK_CLASSES = MODKEEL_HOME / "jdk-classes"
 
 def add_jdk(db: ClassDB) -> bool:
     """Add java.base so enums, records and JDK supertypes resolve instead of stopping the
-    walk as unknown. Built once with ``jimage extract`` (see research/member_check.py)."""
+    walk as unknown. Built once with ``jimage extract`` into JDK_CLASSES (lab tooling)."""
     jars = sorted(JDK_CLASSES.glob("java.base-*.jar"))
     if jars:
         db.add_jar(jars[-1], track_packages=False)

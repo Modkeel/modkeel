@@ -117,8 +117,9 @@ modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
 
 1. The mod's official build for that Minecraft version.
 2. An official build for an older version of the same line that still runs on it: its
-   metadata must allow your version and every Minecraft class it uses must exist there.
-   A static check, so test it in game (or with `--docker-test`).
+   metadata must allow your version, every Minecraft class it uses must exist there, and
+   no method or field it calls may have been removed or renamed since the version it was
+   built for. A static check, so test it in game (or with `--docker-test`).
 3. A community fork compiled for that version (needs a token and `-lv`).
 4. Last resort: an older official build refused only by its declared Minecraft range. Modkeel
    adds your version to that range, but keeps the result only if its bytecode resolves and a

@@ -19,8 +19,19 @@ own version produced 97 phantom "missing methods", almost all inherited
 (``Screen.mouseClicked`` from ``GuiEventListener``, ``EditBox.isFocused`` from
 ``AbstractWidget``) and a handful added by NeoForge's patches to vanilla classes. Class
 existence has no such problem: the same JAR reports zero missing classes against 1.21.1 and
-thirteen genuine ones against 1.20.1. Methods and fields are still extracted -- SRG
-detection needs their names -- but never checked.
+thirteen genuine ones against 1.20.1.
+
+**Members, when the build's own version is known** (``built_for_index``). A member checked
+against one version alone is ambiguous, but against two it is not: a method or field the
+JAR calls that its owner class *declared* in the version the JAR was built for, and no
+longer declares in the target, was removed, renamed or changed signature. Inherited members
+and members added by loader patches are never declared on the owner in the built-for
+mappings, so they are skipped instead of reported. This is what catches a build that passes
+the class check and still dies with NoSuchMethodError: TorchMaster 21.8.2 on 1.21.9 calls
+``BlockBehaviour$Properties.noCollission()``, which Mojang renamed. Remaining blind spot: a
+member moved up to a superclass in the target still resolves at runtime but is reported
+(not seen in the controls: ten JARs that run on their target, zero findings).
+Constructors are not in the symbol table and are not checked.
 
 **Naming scheme.** Production JARs are not always in Mojang names: Fabric mods ship
 remapped to intermediary, Forge and pre-1.20.2 NeoForge to SRG. ``detect_naming_scheme``
@@ -292,6 +303,10 @@ class LinkageReport:
     scheme: Optional[str] = None
 
     missing_classes: List[str] = field(default_factory=list)
+    # "method owner.name(desc)" / "field owner.name": declared on the owner in built_for,
+    # gone from it in mc_version (only checked when the built-for version is known)
+    vanished_members: List[str] = field(default_factory=list)
+    built_for: Optional[str] = None
 
     classes_parsed: int = 0
     refs_checked: int = 0
@@ -306,18 +321,27 @@ class LinkageReport:
 
     @property
     def findings(self) -> List[str]:
-        return [f"class not in {self.mc_version}: {c}" for c in self.missing_classes]
+        return ([f"class not in {self.mc_version}: {c}" for c in self.missing_classes]
+                + [f"{m} declared in {self.built_for}, gone in {self.mc_version}"
+                   for m in self.vanished_members])
 
     @property
     def summary(self) -> str:
         if not self.checked:
             return f"linkage check skipped ({self.skip_reason})"
         if self.is_clean:
+            members = (f"; no member it calls changed since {self.built_for}"
+                       if self.built_for else "")
             return (
                 f"{self.refs_checked} Minecraft references in {self.classes_parsed} "
-                f"classes resolve against {self.mc_version}"
+                f"classes resolve against {self.mc_version}{members}"
             )
-        return f"{len(self.missing_classes)} missing classes"
+        parts = []
+        if self.missing_classes:
+            parts.append(f"{len(self.missing_classes)} missing classes")
+        if self.vanished_members:
+            parts.append(f"{len(self.vanished_members)} removed or renamed members")
+        return ", ".join(parts)
 
 
 def read_jar_refs(jar_path: Path, max_classes: int = 6000) -> ClassRefs:
@@ -344,8 +368,37 @@ def read_jar_refs(jar_path: Path, max_classes: int = 6000) -> ClassRefs:
     return merged
 
 
-def check_refs(refs: ClassRefs, index: SymbolIndex) -> LinkageReport:
-    """Resolve extracted references against a symbol table."""
+def find_vanished_members(refs: ClassRefs, built_for_index: SymbolIndex,
+                          index: SymbolIndex) -> List[str]:
+    """Members the JAR uses that their owner declared in built_for and not in the target.
+
+    Only owners that still exist in the target are looked at (a missing owner is already a
+    missing class). Methods compare the full descriptor, so a changed signature counts:
+    the JVM resolves by name and descriptor. Fields compare names (the symbol table keeps
+    no field types).
+    """
+    vanished = []
+    for owner, name, desc in sorted(refs.methods):
+        if name.startswith("<") or not is_candidate(owner) or not index.has_class(owner):
+            continue
+        if (built_for_index.has_descriptor(owner, name, desc)
+                and not index.has_descriptor(owner, name, desc)):
+            vanished.append(f"method {owner}.{name}{desc}")
+    for owner, name, _desc in sorted(refs.fields):
+        if not is_candidate(owner) or not index.has_class(owner):
+            continue
+        if built_for_index.has_field(owner, name) and not index.has_field(owner, name):
+            vanished.append(f"field {owner}.{name}")
+    return vanished
+
+
+def check_refs(refs: ClassRefs, index: SymbolIndex,
+               built_for_index: Optional[SymbolIndex] = None) -> LinkageReport:
+    """Resolve extracted references against a symbol table.
+
+    With ``built_for_index`` (the symbol table of the version the JAR was built for),
+    members are checked too: see find_vanished_members.
+    """
     scheme = detect_naming_scheme(refs)
     if scheme != SCHEME_MOJANG:
         return LinkageReport.skipped(
@@ -380,10 +433,14 @@ def check_refs(refs: ClassRefs, index: SymbolIndex) -> LinkageReport:
         )
 
     report.missing_classes = missing_classes
+    if built_for_index is not None and built_for_index.mc_version != index.mc_version:
+        report.built_for = built_for_index.mc_version
+        report.vanished_members = find_vanished_members(refs, built_for_index, index)
     return report
 
 
-def check_jar(jar_path: Path, index: SymbolIndex) -> LinkageReport:
+def check_jar(jar_path: Path, index: SymbolIndex,
+              built_for_index: Optional[SymbolIndex] = None) -> LinkageReport:
     """Read a JAR and resolve its Minecraft references. Never raises."""
     try:
         refs = read_jar_refs(Path(jar_path))
@@ -393,4 +450,4 @@ def check_jar(jar_path: Path, index: SymbolIndex) -> LinkageReport:
     if refs.classes_parsed == 0:
         return LinkageReport.skipped("JAR contains no class files")
 
-    return check_refs(refs, index)
+    return check_refs(refs, index, built_for_index)

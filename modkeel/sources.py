@@ -273,7 +273,7 @@ class OlderOfficialSource(SourceStrategy):
             return Rejected(message.replace("JAR declares incompatible MC version",
                                             "its metadata only allows MC"))
 
-        rejected = _linkage_rejection(jar, target)
+        rejected = _linkage_rejection(jar, target, built_for)
         if rejected:
             return rejected
 
@@ -284,8 +284,9 @@ class OlderOfficialSource(SourceStrategy):
             jar_path=dest, mod_name=mod.title,
             mod_version=version.get("version_number", "unknown"),
             evidence=["metadata", "linkage"], dependencies=deps or [],
-            caveat=(f"Built for MC {built_for}. Its metadata allows {target} and every "
-                    f"Minecraft class it uses exists in {target}, but that is a static "
+            caveat=(f"Built for MC {built_for}. Its metadata allows {target}, every "
+                    f"Minecraft class it uses exists in {target} and no method or field it "
+                    f"calls was removed or renamed since {built_for}, but that is a static "
                     f"check: test it in game (or with --docker-test) before relying on it."),
         )
 
@@ -295,13 +296,15 @@ class RelaxedOfficialSource(OlderOfficialSource):
 
     Same candidates as older_official (nearest older builds of the line, cached download).
     A build is relaxed only when its metadata is what excludes the target and its bytecode
-    resolves on the target (linkage, inconclusive rejects); a build whose metadata already
-    allows the target was older_official's to judge.
+    resolves on the target (linkage on classes and members, inconclusive rejects); a build
+    whose metadata already allows the target was older_official's to judge.
 
-    A relaxed build is delivered only after a headless server boots with it: in testing,
-    one of two relaxed builds that passed the class-level linkage check crashed on a renamed
-    method (TorchMaster 21.8.2 on 1.21.9, BlockBehaviour$Properties.noCollission()). Without
-    Docker, or for a client-only mod a server cannot load, it is rejected as unverified.
+    A relaxed build is delivered only after a headless server boots with it: the author
+    closed the range on purpose, and static checks cannot see a mixin whose target method
+    changed body. (Before members were checked, TorchMaster 21.8.2 on 1.21.9 passed linkage
+    and crashed on the renamed BlockBehaviour$Properties.noCollission(); the member check
+    now rejects it before any download of a server.) Without Docker, or for a client-only
+    mod a server cannot load, it is rejected as unverified.
     """
 
     name = "relaxed_official"
@@ -324,7 +327,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
         ok, _, _, _ = validate_jar(jar, target)
         if ok:
             return Rejected("its metadata already allows the target (older_official's case)")
-        rejected = _linkage_rejection(jar, target)
+        rejected = _linkage_rejection(jar, target, built_for)
         if rejected:
             return rejected
 
@@ -353,7 +356,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
             dependencies=deps or [],
             caveat=(f"Built for MC {built_for}; its author declared {change.old_range}. "
                     f"Modkeel added {target} to that range ({change.new_range}) because every "
-                    f"Minecraft class it uses exists in {target} and a headless {target} "
+                    f"Minecraft class and member it uses exists in {target} and a headless {target} "
                     f"server booted with it; client-side features are untested, so try it in "
                     f"a test world first. The file name and META-INF/modkeel-relaxed.txt mark "
                     f"it as modified."),
@@ -390,12 +393,18 @@ def _version_key(game_version: str):
     return tuple(int(p) for p in game_version.split("."))
 
 
-def _linkage_rejection(jar: Path, mc_version: str) -> Optional[Rejected]:
+def _linkage_rejection(jar: Path, mc_version: str,
+                       built_for: Optional[str] = None) -> Optional[Rejected]:
     """None when the JAR's bytecode resolves on mc_version, else why it is rejected.
 
     Unlike the pipeline's prebuilt check, an inconclusive check rejects: an official build
     for the exact target was not found, so a JAR we cannot verify is not offered as if it
     were one.
+
+    With ``built_for`` (the version the build targets), methods and fields are checked as
+    well: one its owner declared in built_for and not in mc_version was removed or renamed,
+    so the build would throw NoSuchMethodError/NoSuchFieldError when that code runs. If the
+    built-for mappings cannot be loaded, the check falls back to classes only.
     """
     from modkeel.linkage import check_jar
     from modkeel.mappings import load_index
@@ -403,18 +412,44 @@ def _linkage_rejection(jar: Path, mc_version: str) -> Optional[Rejected]:
     index = load_index(mc_version)
     if index is None:
         return Rejected(f"cannot verify: no symbol table for MC {mc_version}")
-    report = check_jar(jar, index)
+    built_for_index = load_index(built_for) if built_for and built_for != mc_version else None
+    report = check_jar(jar, index, built_for_index)
     if not report.checked:
         return Rejected(f"cannot verify ({report.skip_reason})")
     if not report.is_clean:
-        # Which classes, not only how many: they say what part of the mod breaks
-        missing = report.missing_classes
-        named = ", ".join(c.rsplit(".", 1)[-1].rsplit("/", 1)[-1] for c in missing[:3])
-        more = ", ..." if len(missing) > 3 else ""
-        return Rejected(f"{len(missing)} Minecraft classes it uses don't exist in "
-                        f"{mc_version} ({named}{more})")
+        # Which classes and members, not only how many: they say what part of the mod
+        # breaks, and how big the port would be
+        reasons = []
+        if report.missing_classes:
+            reasons.append(f"{len(report.missing_classes)} Minecraft classes it uses don't "
+                           f"exist in {mc_version} ({_first(report.missing_classes, _short_class)})")
+        if report.vanished_members:
+            reasons.append(f"{len(report.vanished_members)} methods/fields it calls were "
+                           f"removed or renamed after {built_for} "
+                           f"({_first(report.vanished_members, _short_member)})")
+        return Rejected("; ".join(reasons))
     print(f"    ✓ Linkage: {report.summary}")
     return None
+
+
+def _first(items: List[str], short, shown: int = 3) -> str:
+    """The first `shown` items in short form, then "..." if there are more."""
+    more = ", ..." if len(items) > shown else ""
+    return ", ".join(short(i) for i in items[:shown]) + more
+
+
+def _short_class(fqcn: str) -> str:
+    """net.minecraft.client.renderer.DimensionSpecialEffects -> DimensionSpecialEffects."""
+    return fqcn.rsplit(".", 1)[-1].rsplit("/", 1)[-1]
+
+
+def _short_member(entry: str) -> str:
+    """"method net.minecraft.x.Owner$Inner.name(I)V" -> "Owner$Inner.name()"; fields alike."""
+    kind, _, ref = entry.partition(" ")
+    if kind == "method":
+        ref = ref.split("(", 1)[0]
+    owner, _, name = ref.rpartition(".")
+    return f"{_short_class(owner)}.{name}" + ("()" if kind == "method" else "")
 
 
 # ---------------------------------------------------------------------------

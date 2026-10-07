@@ -209,8 +209,12 @@ class TestOlderOfficial:
         with patch("modkeel.sources._download",
                    lambda url, dest: dest.write_bytes(b"PK")), \
                 patch("modkeel.sources.validate_jar", return_value=valid), \
-                patch("modkeel.sources._linkage_rejection", return_value=linkage):
-            return OlderOfficialSource().deliver(cand, MOD, ctx)
+                patch("modkeel.sources._linkage_rejection", return_value=linkage) as check:
+            out = OlderOfficialSource().deliver(cand, MOD, ctx)
+        if valid[0]:
+            # members are checked against the version the build targets
+            assert check.call_args.args[1:] == (ctx.mc_version, "1.21.9")
+        return out
 
     def test_metadata_must_allow_the_target(self, ctx):
         out = self._deliver(ctx, valid=(False, "m", "1",
@@ -229,6 +233,7 @@ class TestOlderOfficial:
         assert isinstance(out, Delivered)
         assert out.evidence == ["metadata", "linkage"]
         assert "Built for MC 1.21.9" in out.caveat
+        assert "no method or field it calls was removed or renamed" in out.caveat
         assert (ctx.config.output_dir / "m.jar").exists()
 
 
@@ -248,12 +253,43 @@ class TestLinkageRejection:
     def test_missing_classes(self):
         report = MagicMock(checked=True, is_clean=False, missing_classes=[
             "net.minecraft.client.renderer.FogRenderer", "net/minecraft/world/level/Old",
-            "net.minecraft.A", "net.minecraft.B"])
+            "net.minecraft.A", "net.minecraft.B"], vanished_members=[])
         with patch("modkeel.mappings.load_index", return_value=object()), \
                 patch("modkeel.linkage.check_jar", return_value=report):
             out = _linkage_rejection(Path("x.jar"), "1.21.10")
         assert out.reason == ("4 Minecraft classes it uses don't exist in 1.21.10 "
                               "(FogRenderer, Old, A, ...)")
+
+    def test_vanished_members_name_the_calls(self):
+        props = "net.minecraft.world.level.block.state.BlockBehaviour$Properties"
+        report = MagicMock(checked=True, is_clean=False, missing_classes=[], vanished_members=[
+            f"method {props}.noCollission()L{props.replace('.', '/')};",
+            "field net.minecraft.world.entity.Entity.level"])
+        indexes = {"1.21.9": "target", "1.21.8": "built"}
+        with patch("modkeel.mappings.load_index", side_effect=indexes.get), \
+                patch("modkeel.linkage.check_jar", return_value=report) as check:
+            out = _linkage_rejection(Path("x.jar"), "1.21.9", "1.21.8")
+        assert check.call_args.args[1:] == ("target", "built")
+        assert out.reason == ("2 methods/fields it calls were removed or renamed after 1.21.8 "
+                              "(BlockBehaviour$Properties.noCollission(), Entity.level)")
+
+    def test_both_kinds_are_listed(self):
+        report = MagicMock(checked=True, is_clean=False, missing_classes=["net.minecraft.X"],
+                           vanished_members=["method net.minecraft.Y.z(I)V"])
+        with patch("modkeel.mappings.load_index", return_value=object()), \
+                patch("modkeel.linkage.check_jar", return_value=report):
+            out = _linkage_rejection(Path("x.jar"), "1.21.9", "1.21.8")
+        assert out.reason == ("1 Minecraft classes it uses don't exist in 1.21.9 (X); "
+                              "1 methods/fields it calls were removed or renamed after "
+                              "1.21.8 (Y.z())")
+
+    def test_built_for_mappings_missing_falls_back_to_classes(self):
+        report = MagicMock(checked=True, is_clean=True, summary="ok")
+        with patch("modkeel.mappings.load_index",
+                   side_effect=lambda v: "target" if v == "1.21.9" else None), \
+                patch("modkeel.linkage.check_jar", return_value=report) as check:
+            assert _linkage_rejection(Path("x.jar"), "1.21.9", "1.21.8") is None
+        assert check.call_args.args[1:] == ("target", None)
 
     def test_clean(self):
         report = MagicMock(checked=True, is_clean=True, summary="ok")
