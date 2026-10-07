@@ -11,9 +11,10 @@ requested target (by any source), nearest version first. Two stages, cheapest fi
 
   official  the versions Modrinth lists a loader build for: one call per mod, no download
   older     (with a probe, `older_build_probe`) on the few versions nearest the target and
-            the best official one, a mod without a build there still counts when its
-            nearest older official build passes older_official's checks there (metadata,
-            linkage, mixins): one cached download per mod and seconds of mappings. A mod
+            the best official one, a mod without a build there still counts when the
+            source layer's cheap strategies would deliver it there
+            (Resolver.would_resolve: in practice its nearest older official build passing
+            metadata, linkage and mixins): one cached download per mod, seconds of mappings. A mod
             whose newest build fails on the target can still run on a version between the
             two: 1.21.9 -> 1.21.10 breaks far less than 1.21.9 -> 1.21.11.
 
@@ -149,16 +150,17 @@ def propose_targets(mods: Sequence[Tuple[str, Optional[str]]], loader: str, curr
 
 
 def older_build_probe(loader: str, modrinth) -> Probe:
-    """probe(title, project id, version) for propose_targets: does the mod's nearest older
-    official build pass older_official's checks on that version? The same code that would
-    deliver it there (OlderOfficialSource.find + check), nothing installed; downloads go
-    to the shared cache, so a fallback run that follows does not download them again.
+    """probe(title, project id, version) for propose_targets: would the source layer's
+    cheap strategies (official, older_official) deliver the mod on that version?
+
+    It is Resolver.would_resolve: the same order and the same checks a run on that version
+    makes, minus the slow sources (forks, builds, relaxed); nothing is installed, and
+    downloads go to the shared cache, so a fallback run that follows does not repeat them.
     """
     from modkeel.constants import MODKEEL_HOME
-    from modkeel.resolve import ModRef, Rejected, ResolveContext
-    from modkeel.sources import OlderOfficialSource
+    from modkeel.resolve import ModRef, ResolveContext, Resolver
 
-    source = OlderOfficialSource()
+    resolver = Resolver()
     scratch = MODKEEL_HOME / "cache" / "probe"
 
     def probe(title: str, project_id: str, version: str) -> bool:
@@ -166,12 +168,9 @@ def older_build_probe(loader: str, modrinth) -> Probe:
         ctx = ResolveContext(config=config, modrinth=modrinth)
         mod = ModRef(query=title, project={"project_id": project_id, "title": title})
         try:
-            found = source.find(mod, ctx)
-            # The nearest older build only: if it fails there, older ones rarely pass
-            return bool(found.candidates) and not isinstance(
-                source.check(found.candidates[0], mod, ctx), Rejected)
+            return resolver.would_resolve(mod, ctx) is not None
         except Exception as e:  # a proposal never fails a run: an unknown counts as no
-            logger.debug("older build probe failed for %s on %s: %s", title, version, e)
+            logger.debug("probe failed for %s on %s: %s", title, version, e)
             return False
 
     return probe

@@ -87,34 +87,27 @@ class TestOlderStage:
 
 
 class TestOlderBuildProbe:
-    def test_judged_by_older_officials_find_and_check(self):
-        from modkeel.resolve import Candidate, Found, Rejected
+    def test_asks_the_resolver_on_that_version(self):
         from modkeel.target import older_build_probe
 
         seen = {}
 
-        def find(self, mod, ctx):
-            seen["find"] = (mod.project["project_id"], ctx.mc_version, ctx.loader)
-            return Found([Candidate("v1 for MC 1.21.8", {"version": {}, "built_for": "1.21.8"}),
-                          Candidate("older", {})])
+        def would_resolve(self, mod, ctx, attempts=1):
+            seen.update(project=mod.project["project_id"], mc=ctx.mc_version,
+                        loader=ctx.loader)
+            return answer
 
-        def check(self, candidate, mod, ctx):
-            seen["checked"] = candidate.label
-            return verdict
-
-        with patch("modkeel.sources.OlderOfficialSource.find", find), \
-                patch("modkeel.sources.OlderOfficialSource.check", check):
+        with patch("modkeel.resolve.Resolver.would_resolve", would_resolve):
             probe = older_build_probe("fabric", MagicMock())
-            verdict = (Path("x.jar"), MagicMock())
+            answer = "older_official"
             assert probe("X", "x", "1.21.10") is True
-            verdict = Rejected("linkage")
+            answer = None
             assert probe("X", "x", "1.21.10") is False
-        assert seen == {"find": ("x", "1.21.10", "fabric"), "checked": "v1 for MC 1.21.8"}
+        assert seen == {"project": "x", "mc": "1.21.10", "loader": "fabric"}
 
-    def test_no_older_build(self):
-        from modkeel.resolve import Found
+    def test_an_error_counts_as_no(self):
         from modkeel.target import older_build_probe
-        with patch("modkeel.sources.OlderOfficialSource.find", return_value=Found(note="none")):
+        with patch("modkeel.resolve.Resolver.would_resolve", side_effect=RuntimeError("x")):
             assert older_build_probe("fabric", MagicMock())("X", "x", "1.21.10") is False
 
 

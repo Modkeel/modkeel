@@ -175,6 +175,13 @@ def _family(game_version: str) -> str:
 class OfficialSource(SourceStrategy):
     name = "official"
     label = "Official build"
+    cheap = True
+
+    def check(self, candidate: Candidate, mod: ModRef,
+              ctx: ResolveContext) -> Optional[Rejected]:
+        """The author's build listed for the exact target is its own evidence."""
+        return None if _primary_file(candidate.data["version"]) else Rejected(
+            "the version has no files")
 
     def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
         if not mod.project:
@@ -224,6 +231,7 @@ class OfficialSource(SourceStrategy):
 class OlderOfficialSource(SourceStrategy):
     name = "older_official"
     label = "Older official build"
+    cheap = True
 
     def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
         if not mod.project:
@@ -259,11 +267,17 @@ class OlderOfficialSource(SourceStrategy):
         ])
 
     def check(self, candidate: Candidate, mod: ModRef,
-              ctx: ResolveContext) -> Union[Tuple[Path, Evidence], Rejected]:
+              ctx: ResolveContext) -> Optional[Rejected]:
+        judged = self._judge(candidate, mod, ctx)
+        return judged if isinstance(judged, Rejected) else None
+
+    def _judge(self, candidate: Candidate, mod: ModRef,
+               ctx: ResolveContext) -> Union[Tuple[Path, Evidence], Rejected]:
         """Download the candidate (cached) and judge it on the target, installing nothing.
 
-        deliver() and the target layer's proposal (target.older_build_probe) share it, so a
-        version is proposed on exactly the evidence that would deliver the JAR there.
+        deliver() and check() share it, so the target layer's proposal (which asks
+        check() through Resolver.would_resolve) uses exactly the evidence that would
+        deliver the JAR there.
         """
         version, built_for = candidate.data["version"], candidate.data["built_for"]
         primary = _primary_file(version)
@@ -290,10 +304,10 @@ class OlderOfficialSource(SourceStrategy):
                 ctx: ResolveContext) -> Union[Delivered, Rejected]:
         version, built_for = candidate.data["version"], candidate.data["built_for"]
         target = ctx.mc_version
-        checked = self.check(candidate, mod, ctx)
-        if isinstance(checked, Rejected):
-            return checked
-        jar, evidence = checked
+        judged = self._judge(candidate, mod, ctx)
+        if isinstance(judged, Rejected):
+            return judged
+        jar, evidence = judged
         _print_static(evidence)
 
         dest = _install(jar, ctx.config)
@@ -326,6 +340,9 @@ class RelaxedOfficialSource(OlderOfficialSource):
     now rejects it before any download of a server.) Without Docker, or for a client-only
     mod a server cannot load, it is rejected as unverified.
     """
+
+    cheap = False  # a relaxed JAR needs a server boot: never sized up on other versions
+
 
     name = "relaxed_official"
     label = "Official build, relaxed"
