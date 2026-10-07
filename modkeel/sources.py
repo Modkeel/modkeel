@@ -24,13 +24,13 @@ import tempfile
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import requests
 
 from modkeel.build import validate_jar
 from modkeel.constants import MODKEEL_HOME, MODRINTH_USER_AGENT
-from modkeel.evidence import Subject, gather
+from modkeel.evidence import Evidence, Subject, gather
 from modkeel.loaders import get_profile
 from modkeel.models import ModCompilerConfig
 from modkeel.modrinth import ModrinthClient, pick_version
@@ -258,10 +258,14 @@ class OlderOfficialSource(SourceStrategy):
             for mc in nearest
         ])
 
-    def deliver(self, candidate: Candidate, mod: ModRef,
-                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+    def check(self, candidate: Candidate, mod: ModRef,
+              ctx: ResolveContext) -> Union[Tuple[Path, Evidence], Rejected]:
+        """Download the candidate (cached) and judge it on the target, installing nothing.
+
+        deliver() and the target layer's proposal (target.older_build_probe) share it, so a
+        version is proposed on exactly the evidence that would deliver the JAR there.
+        """
         version, built_for = candidate.data["version"], candidate.data["built_for"]
-        target = ctx.mc_version
         primary = _primary_file(version)
         if not primary:
             return Rejected("the version has no files")
@@ -276,10 +280,20 @@ class OlderOfficialSource(SourceStrategy):
         # bytecode must resolve there. Both are required: an unverifiable JAR is not offered.
         # Mixins are judged too; a mixin check that cannot run does not reject (linkage
         # already needs the same symbol tables), one that finds a broken injection does.
-        evidence = gather(Subject(jar, target, built_for, mod.title), ctx.config,
+        evidence = gather(Subject(jar, ctx.mc_version, built_for, mod.title), ctx.config,
                           ["metadata", "linkage", "mixins"], required=["metadata", "linkage"])
         if not evidence.ok:
             return Rejected(evidence.reason)
+        return jar, evidence
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        version, built_for = candidate.data["version"], candidate.data["built_for"]
+        target = ctx.mc_version
+        checked = self.check(candidate, mod, ctx)
+        if isinstance(checked, Rejected):
+            return checked
+        jar, evidence = checked
         _print_static(evidence)
 
         dest = _install(jar, ctx.config)

@@ -29,6 +29,95 @@ def modrinth_with(builds):
     return client
 
 
+class TestOlderStage:
+    """With a probe, a mod without a build for a version still counts there when its older
+    build passes the static checks (older_build_probe)."""
+
+    RELEASES = ["1.21.7", "1.21.8", "1.21.9", "1.21.10", "1.21.11"]
+
+    def test_a_nearer_version_where_the_older_build_runs(self):
+        """X's newest build is for 1.21.8 and fails on 1.21.11; it passes on 1.21.10."""
+        client = modrinth_with({"x": ["1.21.8"]})
+        asked = []
+
+        def probe(title, pid, version):
+            asked.append(version)
+            return version in ("1.21.9", "1.21.10")
+
+        options = propose_targets([("X", "x")], "fabric", "1.21.11", client, resolved=0,
+                                  probe=probe, releases=self.RELEASES)
+        assert [o.mc_version for o in options] == ["1.21.10", "1.21.9", "1.21.8"]
+        assert options[0].older == ["X"]
+        assert options[0].summary == ("MC 1.21.10: an older build of X passes the static "
+                                      "checks there")
+        assert options[2].summary == "MC 1.21.8 has an official build of X"
+        # the 3 nearest versions; 1.21.8 (the best official one) has its own build
+        assert sorted(asked) == ["1.21.10", "1.21.9"]
+
+    def test_only_mods_without_a_build_there_are_probed(self):
+        client = modrinth_with({"a": ["1.21.10"], "b": ["1.21.8"], "c": []})
+        asked = []
+
+        def probe(title, pid, version):
+            asked.append((title, version))
+            return title == "B"
+
+        mods = [("A", "a"), ("B", "b"), ("C", "c")]
+        best = propose_targets(mods, "neoforge", "1.21.11", client, resolved=0, probe=probe,
+                               releases=self.RELEASES)[0]
+        assert (best.mc_version, best.covered, best.older) == ("1.21.10", ["A", "B"], ["B"])
+        assert best.summary == ("MC 1.21.10 runs 2 of the 3 mods: 1 official builds, 1 older "
+                                "builds that pass the static checks (B) (not C)")
+        assert ("A", "1.21.10") not in asked
+
+    def test_far_versions_are_not_probed(self):
+        client = modrinth_with({"x": ["1.21.7"]})
+        asked = []
+        propose_targets([("X", "x")], "fabric", "1.21.11", client, resolved=0,
+                        probe=lambda t, p, v: asked.append(v) or False,
+                        releases=self.RELEASES)
+        assert set(asked) == {"1.21.10", "1.21.9", "1.21.8"}
+
+    def test_without_releases_the_ladder_is_the_official_versions(self):
+        client = modrinth_with({"x": ["1.21.1", "1.21.8"]})
+        asked = []
+        propose_targets([("X", "x")], "fabric", "1.21.11", client, resolved=0,
+                        probe=lambda t, p, v: asked.append(v) or False)
+        assert asked == []      # both versions have X's own build
+
+
+class TestOlderBuildProbe:
+    def test_judged_by_older_officials_find_and_check(self):
+        from modkeel.resolve import Candidate, Found, Rejected
+        from modkeel.target import older_build_probe
+
+        seen = {}
+
+        def find(self, mod, ctx):
+            seen["find"] = (mod.project["project_id"], ctx.mc_version, ctx.loader)
+            return Found([Candidate("v1 for MC 1.21.8", {"version": {}, "built_for": "1.21.8"}),
+                          Candidate("older", {})])
+
+        def check(self, candidate, mod, ctx):
+            seen["checked"] = candidate.label
+            return verdict
+
+        with patch("modkeel.sources.OlderOfficialSource.find", find), \
+                patch("modkeel.sources.OlderOfficialSource.check", check):
+            probe = older_build_probe("fabric", MagicMock())
+            verdict = (Path("x.jar"), MagicMock())
+            assert probe("X", "x", "1.21.10") is True
+            verdict = Rejected("linkage")
+            assert probe("X", "x", "1.21.10") is False
+        assert seen == {"find": ("x", "1.21.10", "fabric"), "checked": "v1 for MC 1.21.8"}
+
+    def test_no_older_build(self):
+        from modkeel.resolve import Found
+        from modkeel.target import older_build_probe
+        with patch("modkeel.sources.OlderOfficialSource.find", return_value=Found(note="none")):
+            assert older_build_probe("fabric", MagicMock())("X", "x", "1.21.10") is False
+
+
 class TestOfficialVersions:
     def test_release_versions_only(self):
         client = modrinth_with({"p": ["1.21.1", "25w14a", "1.21.11-rc1", "1.21.10"]})

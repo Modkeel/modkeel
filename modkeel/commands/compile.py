@@ -229,7 +229,14 @@ def _pack_fallback(repo_urls, pipeline: Pipeline, config: ModCompilerConfig,
     from modkeel.github import parse_repo_url
     from modkeel.modrinth import ModrinthClient
     from modkeel.sources import identify_repo
-    from modkeel.target import carry_over, default_mode, fallback_output, propose_targets
+    from modkeel.mappings import release_versions
+    from modkeel.target import (
+        carry_over,
+        default_mode,
+        fallback_output,
+        older_build_probe,
+        propose_targets,
+    )
 
     modrinth = ModrinthClient(config)
     mods = []          # (title, Modrinth project id), parallel to repo_urls
@@ -242,8 +249,11 @@ def _pack_fallback(repo_urls, pipeline: Pipeline, config: ModCompilerConfig,
         ref = identify_repo(owner, repo, modrinth)
         mods.append((repo, ref.project.get("project_id") if ref.project else None))
     resolved = sum(1 for r in pipeline.results if r.success)
+    console.print("\n[dim]Looking for the nearest Minecraft version where more of these "
+                  "mods run...[/dim]")
     options = propose_targets(mods, config.loader, config.mc_version, modrinth, resolved,
-                              limit=1)
+                              limit=1, probe=older_build_probe(config.loader, modrinth),
+                              releases=release_versions())
     if not options:
         return False
     option = options[0]

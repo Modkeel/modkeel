@@ -6,10 +6,16 @@ names a target; when some mods of the pack cannot be resolved there, this module
 another Minecraft version *for the whole pack*: changing version moves every mod, so it is
 never decided per mod.
 
-A version is proposed when more of the pack's mods have an official build there than were
-resolved on the requested target (by any source), nearest version first. Official builds
-are what Modrinth lists for the loader, so the proposal costs one Modrinth call per mod and
-no download.
+A version is proposed when more of the pack's mods run there than were resolved on the
+requested target (by any source), nearest version first. Two stages, cheapest first:
+
+  official  the versions Modrinth lists a loader build for: one call per mod, no download
+  older     (with a probe, `older_build_probe`) on the few versions nearest the target and
+            the best official one, a mod without a build there still counts when its
+            nearest older official build passes older_official's checks there (metadata,
+            linkage, mixins): one cached download per mod and seconds of mappings. A mod
+            whose newest build fails on the target can still run on a version between the
+            two: 1.21.9 -> 1.21.10 breaks far less than 1.21.9 -> 1.21.11.
 
 Changing target changes what the player gets, so it is announced, not silent. The caller
 decides with `fallback_decision`:
@@ -29,12 +35,15 @@ new version are always resolved again: the author's build for that version beats
 built for another one.
 """
 
+import logging
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Collection, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from modkeel.models import CompilationResult, ModCompilerConfig
+
+logger = logging.getLogger("modkeel")
 
 FALLBACK_MODES = ("ask", "auto", "never")
 COUNTDOWN_SECONDS = 15
@@ -47,15 +56,24 @@ class TargetOption:
     mc_version: str
     covered: List[str] = field(default_factory=list)
     missing: List[str] = field(default_factory=list)
+    # covered mods that have no build for this version but whose older build passes there
+    older: List[str] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
         total = len(self.covered) + len(self.missing)
         if total == 1:
+            if self.older:
+                return (f"MC {self.mc_version}: an older build of {self.covered[0]} passes "
+                        f"the static checks there")
             return f"MC {self.mc_version} has an official build of {self.covered[0]}"
         missing = f" (not {', '.join(self.missing)})" if self.missing else ""
-        return (f"MC {self.mc_version} has official builds of {len(self.covered)} of the "
-                f"{total} mods{missing}")
+        if not self.older:
+            return (f"MC {self.mc_version} has official builds of {len(self.covered)} of the "
+                    f"{total} mods{missing}")
+        return (f"MC {self.mc_version} runs {len(self.covered)} of the {total} mods: "
+                f"{len(self.covered) - len(self.older)} official builds, {len(self.older)} "
+                f"older builds that pass the static checks ({', '.join(self.older)}){missing}")
 
 
 def _release_like(game_version: str) -> bool:
@@ -74,34 +92,89 @@ def official_versions(project_id: str, loader: str, modrinth) -> Optional[Set[st
     return {gv for v in versions for gv in v.get("game_versions", []) if _release_like(gv)}
 
 
+# How many versions nearest the target the older stage looks at (plus the best official
+# one): each costs one cached download per uncovered mod and loading its mappings.
+PROBE_VERSIONS = 3
+
+Probe = Callable[[str, str, str], bool]
+
+
 def propose_targets(mods: Sequence[Tuple[str, Optional[str]]], loader: str, current: str,
-                    modrinth, resolved: int, limit: int = 3) -> List[TargetOption]:
-    """Other versions where more of `mods` have an official build than `resolved`.
+                    modrinth, resolved: int, limit: int = 3, probe: Optional[Probe] = None,
+                    releases: Sequence[str] = ()) -> List[TargetOption]:
+    """Other versions where more of `mods` run than `resolved`.
 
     mods: (title, Modrinth project id or None) for every mod of the pack, resolved or not.
-    Best first: most mods covered, then nearest to `current` (counted in versions any of
-    the mods was released for), then the older of two equally near versions (the older a
-    version, the more mods it has had time to get).
+    probe(title, project id, version): whether the mod's older build runs on that version
+    (older_build_probe); without it only official builds count. releases: every Minecraft
+    release oldest first (mappings.release_versions), so the older stage can look at
+    versions no mod has a build for; without it, at versions some mod has one for.
+    Best first: most mods covered, then nearest to `current`, then the older of two
+    equally near versions (the older a version, the more mods it has had time to get).
     """
+    if not _release_like(current):
+        return []
     by_mod: Dict[str, Set[str]] = {}
     for title, project_id in mods:
         found = official_versions(project_id, loader, modrinth) if project_id else None
         by_mod[title] = found or set()
-    candidates = set().union(*by_mod.values()) - {current} if by_mod else set()
-    if not candidates or not _release_like(current):
-        return []
-    ladder = sorted(candidates | {current}, key=_key)
+    official = set().union(*by_mod.values()) - {current} if by_mod else set()
+
+    ladder = sorted({v for v in releases if _release_like(v)} | official | {current}, key=_key)
     here = ladder.index(current)
 
-    options = []
-    for version in candidates:
-        covered = [t for t, _ in mods if version in by_mod[t]]
-        if len(covered) > resolved:
-            options.append(TargetOption(version, covered,
-                                        [t for t, _ in mods if t not in covered]))
-    options.sort(key=lambda o: (-len(o.covered), abs(ladder.index(o.mc_version) - here),
-                                _key(o.mc_version)))
-    return options[:limit]
+    def distance(version: str) -> int:
+        return abs(ladder.index(version) - here)
+
+    def option(version: str, older: Sequence[str] = ()) -> TargetOption:
+        covered = [t for t, _ in mods if version in by_mod[t] or t in older]
+        return TargetOption(version, covered, [t for t, _ in mods if t not in covered],
+                            [t for t, _ in mods if t in older])
+
+    def rank(o: TargetOption) -> Tuple:
+        return (-len(o.covered), distance(o.mc_version), _key(o.mc_version))
+
+    options = {v: option(v) for v in official}
+    if probe is not None:
+        nearest = sorted((v for v in ladder if v != current),
+                         key=lambda v: (distance(v), _key(v)))[:PROBE_VERSIONS]
+        best = sorted(options.values(), key=rank)[:1]
+        for version in dict.fromkeys(nearest + [o.mc_version for o in best]):
+            older = [t for t, pid in mods
+                     if pid and version not in by_mod[t] and probe(t, pid, version)]
+            options[version] = option(version, older)
+
+    kept = [o for o in options.values() if len(o.covered) > resolved]
+    return sorted(kept, key=rank)[:limit]
+
+
+def older_build_probe(loader: str, modrinth) -> Probe:
+    """probe(title, project id, version) for propose_targets: does the mod's nearest older
+    official build pass older_official's checks on that version? The same code that would
+    deliver it there (OlderOfficialSource.find + check), nothing installed; downloads go
+    to the shared cache, so a fallback run that follows does not download them again.
+    """
+    from modkeel.constants import MODKEEL_HOME
+    from modkeel.resolve import ModRef, Rejected, ResolveContext
+    from modkeel.sources import OlderOfficialSource
+
+    source = OlderOfficialSource()
+    scratch = MODKEEL_HOME / "cache" / "probe"
+
+    def probe(title: str, project_id: str, version: str) -> bool:
+        config = ModCompilerConfig(version, loader, "0", output_dir=str(scratch))
+        ctx = ResolveContext(config=config, modrinth=modrinth)
+        mod = ModRef(query=title, project={"project_id": project_id, "title": title})
+        try:
+            found = source.find(mod, ctx)
+            # The nearest older build only: if it fails there, older ones rarely pass
+            return bool(found.candidates) and not isinstance(
+                source.check(found.candidates[0], mod, ctx), Rejected)
+        except Exception as e:  # a proposal never fails a run: an unknown counts as no
+            logger.debug("older build probe failed for %s on %s: %s", title, version, e)
+            return False
+
+    return probe
 
 
 def default_mode(interactive: bool) -> str:

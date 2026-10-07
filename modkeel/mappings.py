@@ -19,7 +19,7 @@ import logging
 import re
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -142,6 +142,18 @@ def _version_details(mc_version: str, timeout: int = 15) -> Optional[Dict]:
     except (requests.RequestException, ValueError, KeyError, TypeError) as e:
         logger.debug("version detail fetch failed for %s: %s", mc_version, e)
         return None
+
+
+@functools.lru_cache(maxsize=1)
+def release_versions(timeout: int = 15) -> Tuple[str, ...]:
+    """Every Minecraft release, oldest first; empty when the manifest cannot be fetched."""
+    try:
+        manifest = requests.get(VERSION_MANIFEST_URL, timeout=timeout).json()
+        return tuple(reversed([v["id"] for v in manifest.get("versions", [])
+                               if v.get("type") == "release"]))
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+        logger.debug("version manifest fetch failed: %s", e)
+        return ()
 
 
 @functools.lru_cache(maxsize=32)
