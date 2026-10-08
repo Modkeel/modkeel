@@ -213,6 +213,27 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 
 No arguments. Shows version, config, cached loaders, and known NeoForge versions.
 
+### `modkeel serve --stdio`
+
+Runs the engine for another program (the upcoming Modkeel app, a script, an editor plugin)
+over JSON lines on stdin/stdout: you send a request, Modkeel streams back its progress as
+events, asks the questions only you can answer (move to another Minecraft version? a GitHub
+token?) and ends with a result. Nothing but protocol lines is written to stdout.
+
+```bash
+$ modkeel serve --stdio
+{"type":"hello","protocol":1,"modkeel":"0.1.2","methods":["get"]}
+{"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
+{"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
+...
+{"type":"result","id":"1","result":{"mod":"Sodium","target":"1.21.10","delivered":{...},...}}
+```
+
+A question (`{"type":"question","qid":"1.1",...}`) waits for `{"type":"answer","qid":"1.1",
+"value":...}`; an answer of the wrong type, or closing stdin, takes the safe choice (keep the
+version, no token). `{"type":"cancel","id":"1"}` stops a request. The full message list is in
+`modkeel/core/wire.py`.
+
 ## GitHub API Token
 
 Without a token you're limited to 60 API requests/hour. With a token: 5,000/hour.
