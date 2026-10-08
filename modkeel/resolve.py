@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+from modkeel.core.events import Emitter, SourceTried
+from modkeel.core.text import print_event
 from modkeel.models import ModCompilerConfig
 
 
@@ -60,6 +62,9 @@ class ResolveContext:
     # Boot a headless server with every delivered JAR that has not booted one yet; a crash
     # rejects it (see module docstring). Off for compile, which tests the whole set later.
     verify_runtime: bool = False
+    # Where strategies report progress (modkeel/core/events.py); the default prints the
+    # terminal lines, a front end passes its own.
+    events: Emitter = print_event
 
     def config_with_token(self, token: Optional[str]) -> ModCompilerConfig:
         return self.make_config(token) if self.make_config else self.config
@@ -235,7 +240,7 @@ class Resolver:
             if found.payload is not None:
                 resolution.payloads.append(found.payload)
             if not found.candidates:
-                resolution.trail.append(Step(strategy.name, False, found.note))
+                _record(resolution, Step(strategy.name, False, found.note), mod, ctx)
                 continue
             if not deliver:
                 resolution.pending = (index, found.candidates, strategy.name)
@@ -256,13 +261,17 @@ class Resolver:
                 outcome = _verify_runtime(outcome, ctx)
             if isinstance(outcome, Delivered):
                 resolution.delivered = outcome
-                resolution.trail.append(Step(strategy.name, True, candidate.label))
+                _record(resolution, Step(strategy.name, True, candidate.label), mod, ctx)
                 return True
-            resolution.trail.append(
-                Step(strategy.name, False, f"{candidate.label}: {outcome.reason}")
-            )
+            _record(resolution,
+                    Step(strategy.name, False, f"{candidate.label}: {outcome.reason}"), mod, ctx)
         return False
 
+
+def _record(resolution: Resolution, step: Step, mod: ModRef, ctx: ResolveContext) -> None:
+    """Add a step to the trail and report it as it happens (SourceTried)."""
+    resolution.trail.append(step)
+    ctx.events(SourceTried(mod.title, step.strategy, step.ok, step.detail))
 
 
 def _verify_runtime(delivered: Delivered, ctx: ResolveContext) -> Union[Delivered, Rejected]:
