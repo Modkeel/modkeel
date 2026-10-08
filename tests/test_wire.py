@@ -231,6 +231,48 @@ class TestProtocolRules:
         assert s.next()["result"] == {}
 
 
+class _GoneAfterHello(_Lines):
+    """An output whose reader disappears after the hello (the client process died)."""
+
+    def write(self, text):
+        if self.q.qsize() >= 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        super().write(text)
+
+
+class TestClientGone:
+    def test_a_closed_output_cancels_the_run_without_crashing(self):
+        crashes, finished = [], threading.Event()
+        old_hook = threading.excepthook
+        threading.excepthook = lambda args: crashes.append(args.exc_value)
+
+        def chatty(params, events, decide, cancelled):
+            from modkeel.core.events import Message
+
+            for _ in range(100):
+                events(Message("working"))
+                if cancelled():
+                    finished.set()
+                    raise Cancelled()
+            return {}
+
+        read_fd, write_fd = os.pipe()
+        server_in = os.fdopen(read_fd, "r", encoding="utf-8")
+        client = os.fdopen(write_fd, "w", encoding="utf-8")
+        server = Server(server_in, _GoneAfterHello(), {"chatty": chatty})
+        thread = threading.Thread(target=server.serve, daemon=True)
+        try:
+            thread.start()
+            client.write(json.dumps({"type": "request", "id": "1", "method": "chatty"}) + "\n")
+            client.flush()
+            assert finished.wait(10), "the run must see the cancel"
+            client.close()
+            thread.join(10)
+        finally:
+            threading.excepthook = old_hook
+        assert not thread.is_alive() and server.gone and crashes == []
+
+
 class TestServeCommand:
     def test_requires_a_transport(self):
         from tests.test_cli import invoke

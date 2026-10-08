@@ -20,6 +20,7 @@ Rules that keep a front end from hanging or guessing:
 - A question waits for its answer. An answer of the wrong type, or the client closing its
   input, answers it with the engine's safe default (decisions.safe_default).
 - Closing the input also cancels the running request; the server exits when it is done.
+  A client that stops reading (its end of the output closed) cancels the request too.
 - Lines that are not JSON objects, unknown message types and unknown methods get an error
   (with the request id when there is one) and never stop the server.
 - Error codes: bad_message, unknown_method, bad_params, busy, cancelled, internal.
@@ -122,11 +123,22 @@ class Server:
         self._lock = threading.Lock()
         self._run: Optional[_Run] = None
         self._worker: Optional[threading.Thread] = None
+        self.gone = False                 # the client stopped reading our output
 
     def send(self, message: Dict[str, Any]) -> None:
+        """Write one line. If the client stopped reading (closed pipe), the run is cancelled
+        and later lines are dropped: nobody is left to show them to."""
         with self._lock:
-            self.writer.write(encode(message) + "\n")
-            self.writer.flush()
+            if self.gone:
+                return
+            try:
+                self.writer.write(encode(message) + "\n")
+                self.writer.flush()
+            except (OSError, ValueError):   # BrokenPipeError, or a closed file
+                self.gone = True
+        if self.gone and self._run is not None:
+            self._run.cancelled.set()
+            self._release(self._run)
 
     def serve(self) -> None:
         """Until the input closes: read messages, run requests, route answers and cancels."""
