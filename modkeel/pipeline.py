@@ -375,12 +375,12 @@ class Pipeline:
             filename = hit["filename"]
             dest = self.config.output_dir / filename
             dest.write_bytes(dl_resp.content)
-            self._say(f"    \U0001f4be Saved: {dest}")
+            self.events(Saved(dest))
 
             if self.config.mods_path:
                 instance_dest = self.config.mods_path / filename
                 instance_dest.write_bytes(dl_resp.content)
-                self._say(f"    \U0001f4be Installed: {instance_dest}")
+                self.events(Saved(instance_dest, installed=True))
 
             self.modrinth.download_modrinth_deps(hit)
 

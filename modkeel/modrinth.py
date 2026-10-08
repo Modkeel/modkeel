@@ -12,7 +12,7 @@ from modkeel.constants import MODRINTH_USER_AGENT
 from modkeel.loaders import get_bridge_mods, get_cross_loader_chain
 from modkeel.models import ModCompilerConfig
 from modkeel.utils import fuzzy_score
-from modkeel.core.events import Emitter, Message
+from modkeel.core.events import Emitter, Message, Saved
 from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
@@ -355,7 +355,7 @@ class ModrinthClient:
                 dest = self.config.output_dir / fname
                 dest.write_bytes(dl.content)
                 saved.append(dest)
-                self._say(f"    \U0001f4be Saved: {dest}")
+                self.events(Saved(dest))
 
                 if self.config.mods_path:
                     (self.config.mods_path / fname).write_bytes(
@@ -423,12 +423,12 @@ class ModrinthClient:
 
                 dest = self.config.output_dir / filename
                 dest.write_bytes(dl_resp.content)
-                self._say(f"    \U0001f4be Saved: {dest}")
+                self.events(Saved(dest))
 
                 if self.config.mods_path:
                     instance_dest = self.config.mods_path / filename
                     instance_dest.write_bytes(dl_resp.content)
-                    self._say(f"    \U0001f4be Installed: {instance_dest}")
+                    self.events(Saved(instance_dest, installed=True))
 
                 return dest
 
