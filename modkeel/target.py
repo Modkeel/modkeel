@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Collection, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from modkeel.core.events import CarriedOver, Emitter
+from modkeel.core.text import print_event
 from modkeel.models import CompilationResult, ModCompilerConfig
 
 logger = logging.getLogger("modkeel")
@@ -203,7 +205,8 @@ NOT_CARRIED = ("relaxed_official",)
 
 
 def carry_over(previous: Iterable[CompilationResult], config: ModCompilerConfig, first_target: str,
-               resolve_again: Collection[str]) -> Dict[str, CompilationResult]:
+               resolve_again: Collection[str],
+               events: Emitter = print_event) -> Dict[str, CompilationResult]:
     """First-run results whose JAR also passes on config.mc_version, by repo URL.
 
     previous: the first run's CompilationResults. resolve_again: repo URLs that must go
@@ -211,6 +214,7 @@ def carry_over(previous: Iterable[CompilationResult], config: ModCompilerConfig,
     judged as older_official judges one: metadata and linkage required, mixins when they
     can be checked, built for the version it was compiled or published for. A carried JAR
     is copied to config.output_dir and comes back as a new result whose trail says so.
+    Each judged JAR is reported as a CarriedOver event.
     """
     from modkeel.evidence import Subject, evidence_line, gather
 
@@ -226,14 +230,14 @@ def carry_over(previous: Iterable[CompilationResult], config: ModCompilerConfig,
         evidence = gather(Subject(Path(r.jar_path), target, built_for, name), config,
                           ["metadata", "linkage", "mixins"], required=["metadata", "linkage"])
         if not evidence.ok:
-            print(f"  ↻ {name}: not reused for MC {target} ({evidence.reason})")
+            events(CarriedOver(name, target, first_target, False, evidence.reason))
             continue
         out = Path(config.output_dir)
         out.mkdir(parents=True, exist_ok=True)
         dest = out / Path(r.jar_path).name
         shutil.copy2(r.jar_path, dest)
         line = evidence_line(evidence.passed, config.docker_test)
-        print(f"  ↻ {name}: the MC {first_target} JAR also passes on {target} ({line})")
+        events(CarriedOver(name, target, first_target, True, line))
         result = CompilationResult(
             repo_url=r.repo_url, success=True, branch=r.branch, jar_path=str(dest),
             mod_name=r.mod_name, mod_version=r.mod_version, compiled_mc_version=built_for,

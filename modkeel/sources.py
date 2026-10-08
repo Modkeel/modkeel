@@ -30,6 +30,15 @@ import requests
 
 from modkeel.build import validate_jar
 from modkeel.constants import MODKEEL_HOME, MODRINTH_USER_AGENT
+from modkeel.core.events import (
+    CheckRan,
+    Downloading,
+    Emitter,
+    ForkChosen,
+    RangeRelaxed,
+    Saved,
+)
+from modkeel.core.text import print_event
 from modkeel.evidence import Evidence, Subject, gather
 from modkeel.loaders import get_profile
 from modkeel.models import ModCompilerConfig
@@ -141,15 +150,15 @@ def _cached_download(url: str, filename: str) -> Path:
     return path
 
 
-def _install(jar: Path, config: ModCompilerConfig) -> Path:
+def _install(jar: Path, config: ModCompilerConfig, events: Emitter = print_event) -> Path:
     """Put a JAR in the output directory (and the instance's mods/ when one was given)."""
     dest = config.output_dir / jar.name
     if jar.resolve() != dest.resolve():
         shutil.copy2(jar, dest)
-    print(f"    \U0001f4be Saved: {dest}")
+    events(Saved(dest))
     if config.mods_path:
         shutil.copy2(jar, config.mods_path / jar.name)
-        print(f"    \U0001f4be Installed: {config.mods_path / jar.name}")
+        events(Saved(config.mods_path / jar.name, installed=True))
     return dest
 
 
@@ -210,12 +219,12 @@ class OfficialSource(SourceStrategy):
         if not primary:
             return Rejected("the version has no files")
         dest = ctx.config.output_dir / primary["filename"]
-        print(f"    \U0001f4e5 Downloading {primary['filename']}...")
+        ctx.events(Downloading(primary["filename"]))
         try:
             _download(primary["url"], dest)
         except requests.RequestException as e:
             return Rejected(f"download failed ({e})")
-        _install(dest, ctx.config)
+        _install(dest, ctx.config, ctx.events)
         deps = ctx.modrinth.download_modrinth_deps({"required_deps": _required_deps(version)})
         return Delivered(
             jar_path=dest, mod_name=mod.title,
@@ -284,7 +293,7 @@ class OlderOfficialSource(SourceStrategy):
         if not primary:
             return Rejected("the version has no files")
 
-        print(f"    \U0001f4e5 Checking {primary['filename']} (built for MC {built_for})...")
+        ctx.events(Downloading(primary["filename"], purpose="check", built_for=built_for))
         try:
             jar = _cached_download(primary["url"], primary["filename"])
         except requests.RequestException as e:
@@ -308,9 +317,9 @@ class OlderOfficialSource(SourceStrategy):
         if isinstance(judged, Rejected):
             return judged
         jar, evidence = judged
-        _print_static(evidence)
+        _print_static(evidence, ctx.events)
 
-        dest = _install(jar, ctx.config)
+        dest = _install(jar, ctx.config, ctx.events)
 
         deps = ctx.modrinth.download_modrinth_deps({"required_deps": _required_deps(version)})
         return Delivered(
@@ -371,7 +380,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
                         ["linkage", "mixins"], required=["linkage"])
         if not static.ok:
             return Rejected(static.reason)
-        _print_static(static)
+        _print_static(static, ctx.events)
 
         stem = primary["filename"].removesuffix(".jar")
         dest = ctx.config.output_dir / f"{stem}+modkeel-relaxed-mc{target}.jar"
@@ -382,8 +391,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
             return Rejected(f"its metadata could not be rewritten ({e})")
         if change is None:
             return Rejected("no Minecraft range in its metadata to rewrite")
-        print(f"    \u270f\ufe0f  Relaxed {change.metadata_file}: MC {change.old_range} -> "
-              f"{change.new_range}")
+        ctx.events(RangeRelaxed(change.metadata_file, change.old_range, change.new_range))
 
         # The rewritten JAR must now pass metadata, and a server must boot with it: no
         # Docker or an inconclusive boot is a rejection here, not a skipped check.
@@ -396,7 +404,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
             if failure.check == "metadata":
                 return Rejected(f"still refused after rewriting its range ({failure.detail})")
             return Rejected(failure.detail)
-        _install(dest, ctx.config)
+        _install(dest, ctx.config, ctx.events)
         return Delivered(
             jar_path=dest, mod_name=mod.title,
             mod_version=version.get("version_number", "unknown"),
@@ -415,12 +423,11 @@ def _version_key(game_version: str):
     return tuple(int(p) for p in game_version.split("."))
 
 
-def _print_static(evidence) -> None:
-    """Show what the static checks that passed covered (how much was checked)."""
-    labels = {"linkage": "Linkage", "mixins": "Mixins"}
+def _print_static(evidence, events: Emitter = print_event) -> None:
+    """Report what the static checks that passed covered (how much was checked)."""
     for outcome in evidence.outcomes:
-        if outcome.passed and outcome.check in labels:
-            print(f"    ✓ {labels[outcome.check]}: {outcome.detail}")
+        if outcome.passed and outcome.check in ("linkage", "mixins"):
+            events(CheckRan(outcome.check, outcome.status, outcome.detail))
 
 
 def possible_ports(fork_name: str, branches: List) -> List[str]:
@@ -488,7 +495,8 @@ def prefilter_forks(github, validator, forks: List[Dict], limit: int = 10,
 
 
 @contextmanager
-def temp_pipeline(config: ModCompilerConfig) -> Iterator["object"]:
+def temp_pipeline(config: ModCompilerConfig,
+                  events: Emitter = print_event) -> Iterator["object"]:
     """A Pipeline with its own temporary work dir, removed on exit (success or not).
 
     For one-off builds (search, get); `compile` uses Pipeline.process_repos, which manages
@@ -496,7 +504,7 @@ def temp_pipeline(config: ModCompilerConfig) -> Iterator["object"]:
     """
     from modkeel.pipeline import Pipeline
 
-    pipeline = Pipeline(config)
+    pipeline = Pipeline(config, events)
     pipeline.temp_dir = tempfile.mkdtemp(prefix="mod_compiler_")
     try:
         yield pipeline
@@ -557,13 +565,13 @@ class ForkSource(SourceStrategy):
 
     def deliver(self, candidate: Candidate, mod: ModRef,
                 ctx: ResolveContext) -> Union[Delivered, Rejected]:
-        print(f"\n  Best fork: {candidate.label}")
+        ctx.events(ForkChosen(candidate.label))
         if not ctx.loader_version:
             return Rejected("-lv LOADER_VERSION is required to compile")
 
         fork = candidate.data["fork"]
         config = ctx.config_with_token(candidate.data["token"])
-        with temp_pipeline(config) as pipeline:
+        with temp_pipeline(config, ctx.events) as pipeline:
             result = pipeline.clone_and_compile(
                 f"https://github.com/{fork['fork']['full_name']}",
                 specific_branch=fork["_best_branch"].name,
