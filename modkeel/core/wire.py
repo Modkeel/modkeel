@@ -50,8 +50,13 @@ Handler = Callable[[Dict[str, Any], Callable, Callable, Callable[[], bool]], Dic
 
 
 def encode(message: Dict[str, Any]) -> str:
-    """One protocol line (no newline)."""
-    return json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+    """One protocol line (no newline), pure ASCII: anything else is a JSON \\u escape.
+
+    The stream's encoding then never matters. On Windows a pipe defaults to the ANSI code
+    page (cp1252), which cannot encode the emoji in progress lines; with raw UTF-8 text the
+    write failed and the run stopped.
+    """
+    return json.dumps(message, ensure_ascii=True, separators=(",", ":"))
 
 
 def question_dict(question: Question) -> Dict[str, Any]:
@@ -134,7 +139,11 @@ class Server:
             try:
                 self.writer.write(encode(message) + "\n")
                 self.writer.flush()
-            except (OSError, ValueError):   # BrokenPipeError, or a closed file
+            except (BrokenPipeError, ConnectionError, OSError):   # the reader went away
+                self.gone = True
+            except ValueError as e:   # a closed file; anything else is a bug, not a client
+                if "closed file" not in str(e):
+                    raise
                 self.gone = True
         if self.gone and self._run is not None:
             self._run.cancelled.set()

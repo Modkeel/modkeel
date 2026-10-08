@@ -25,6 +25,13 @@ def serve_command(
     if not stdio:
         console.print("[red]Error:[/red] choose a transport: --stdio")
         raise typer.Exit(2)
+    # Protocol lines are ASCII (wire.encode); the input is read as UTF-8 whatever the
+    # platform's default (cp1252 on Windows would garble a mod name with accents), and the
+    # log never fails on a character the console cannot show.
+    for stream, options in ((sys.stdin, {"encoding": "utf-8"}),
+                            (sys.stderr, {"errors": "backslashreplace"})):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(**options)
     protocol_out = sys.stdout
     sys.stdout = sys.stderr
     try:
