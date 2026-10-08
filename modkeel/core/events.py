@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Dict, Optional
+from typing import Any, Callable, ClassVar, Dict, Optional, Tuple
 
 # Version of the event vocabulary, sent first by the wire format (IDEA-028 step 3).
 PROTOCOL = 1
@@ -29,9 +29,18 @@ class Event:
     kind: ClassVar[str] = "event"
 
     def to_dict(self) -> Dict[str, Any]:
-        """JSON-ready form: the kind plus the fields, paths as strings."""
-        data = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(self).items()}
-        return {"kind": self.kind, **data}
+        """JSON-ready form: the kind plus the fields, paths as strings at any depth."""
+        return {"kind": self.kind, **_plain(asdict(self))}
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -128,6 +137,59 @@ class CarriedOver(Event):
     from_target: str
     reused: bool
     detail: str                           # the evidence line, or why it was not reused
+
+
+@dataclass(frozen=True)
+class ModIdentified(Event):
+    """The mod a request names, as identified on Modrinth (identified=False: it was not;
+    related: near misses as (title, slug), never offered as the mod)."""
+
+    kind: ClassVar[str] = "mod_identified"
+    query: str
+    title: str
+    identified: bool
+    slug: Optional[str] = None
+    source_repo: Optional[str] = None
+    related: Tuple[Tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """What was delivered for a mod (from resolve.Delivered, without strategy internals)."""
+
+    jar_path: Path
+    mod_name: str
+    mod_version: str
+    verb: str
+    evidence: Tuple[str, ...] = ()
+    caveat: Optional[str] = None
+    unverified: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ModResolved(Event):
+    """The source layer finished one mod on one target: its trail, and the delivery if any.
+
+    retarget: this target is a proposed version, not the one asked for. verify_runtime:
+    a server boot was asked for (the evidence line says when it did not run).
+    """
+
+    kind: ClassVar[str] = "mod_resolved"
+    mod: str
+    target: str
+    trail: Tuple[Tuple[str, bool, str], ...]
+    delivered: Optional[Delivery] = None
+    retarget: bool = False
+    verify_runtime: bool = False
+
+
+@dataclass(frozen=True)
+class TargetSearch(Event):
+    """The target layer looks for a nearer version where more runs (scope: mod | pack)."""
+
+    kind: ClassVar[str] = "target_search"
+    scope: str
+    subject: str = ""                     # the mod's title for scope "mod"
 
 
 Emitter = Callable[[Event], None]

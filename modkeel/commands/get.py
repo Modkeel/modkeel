@@ -9,6 +9,9 @@ When nothing runs on the requested version, the target layer (modkeel/target.py)
 the nearest Minecraft version with an official build: announced with a countdown in a
 terminal, decided by --fallback otherwise, written to <output>/mc-<version>/ and never
 installed into --instance.
+
+The flow itself is modkeel.core.engine.get_mod; this command parses the arguments, renders
+its events (_GetView) and answers its questions (cli_decide).
 """
 
 from typing import Optional
@@ -20,17 +23,17 @@ from rich.panel import Panel
 from modkeel.commands._shared import (
     BANNER,
     TAGLINE,
+    cli_decide,
     console,
-    offer_target,
     print_evidence,
-    print_related,
+    print_near_misses,
+    print_target_search,
     print_trail,
     require_valid_loader,
     resolve_github_token,
 )
 from modkeel.config import ModkeelConfig
 from modkeel.constants import MODKEEL_VERSION
-from modkeel.models import ModCompilerConfig
 from modkeel.utils import setup_logging
 
 
@@ -85,10 +88,6 @@ def get_command(
     ),
 ):
     """Find and download/compile a mod in one step."""
-    from modkeel.modrinth import ModrinthClient
-    from modkeel.resolve import ResolveContext, Resolver
-    from modkeel.sources import identify_mod
-
     from modkeel.target import FALLBACK_MODES, default_mode
 
     setup_logging()
@@ -112,65 +111,75 @@ def get_command(
         )
     )
 
-    # "0" marks "no loader version given": lookups don't need one, compiling does.
-    def make_config(token: Optional[str], mc: str = mc_version, out: str = output_dir,
-                    lv: str = loader_version or "0",
-                    inst: Optional[str] = instance) -> ModCompilerConfig:
-        return ModCompilerConfig(
-            mc_version=mc,
-            loader=loader.lower(),
-            loader_version=lv,
-            github_token=token,
-            output_dir=out,
-            instance_path=inst,
-        )
+    from modkeel.core.engine import GetRequest, get_mod
 
-    def token_on_demand() -> Optional[str]:
-        """The fork strategy calls this; a token is asked for only when forks are needed."""
-        nonlocal github_token
-        if not github_token:
-            github_token = resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
-        return github_token
+    request = GetRequest(query, mc_version, loader, loader_version, output_dir, instance,
+                         verify_runtime=docker_test, github_token=github_token)
 
-    config = make_config(github_token)
-    modrinth = ModrinthClient(config)
-    mod = identify_mod(query, modrinth)
-    if mod.project:
-        repo = f" - github.com/{mod.source_repo}" if mod.source_repo else ""
-        console.print(f"\n  Mod: [bold]{escape(mod.title)}[/bold] "
-                      f"({mod.project['slug']}){repo}")
+    def hint(option) -> str:
+        return f'modkeel get "{query}" -m {option.mc_version} -l {loader.lower()}'
 
-    def resolve_on(cfg: ModCompilerConfig):
-        """Run the resolver for `cfg`'s target; print the trail and what was delivered."""
-        ctx = ResolveContext(config=cfg, modrinth=modrinth, github_token=token_on_demand,
-                             make_config=lambda t: make_config(
-                                 t, cfg.mc_version, str(cfg.output_dir), cfg.loader_version,
-                                 str(cfg.instance_path) if cfg.instance_path else None),
-                             verify_runtime=docker_test)
-        resolution = Resolver().resolve(mod, ctx)
-        print_trail(resolution.trail)
-        delivered = resolution.delivered
+    decide = cli_decide((fallback or default_mode(console.is_terminal)).lower(), hint,
+                        modkeel_cfg)
+    result = get_mod(request, events=_GetView(mc_version, loader), decide=decide)
+
+    delivered = result.delivered
+    if not result.retargeted:
         if delivered:
-            _report_delivery(delivered, cfg.mc_version, docker_test)
-        return delivered
-
-    delivered = resolve_on(config)
-    if delivered:
-        console.print(
-            f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
-            f"{delivered.verb} to {output_dir}/[/green]"
-        )
-        return
-
-    print_related(mod)
+            console.print(
+                f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
+                f"{delivered.verb} to {output_dir}/[/green]"
+            )
+            return
+        raise typer.Exit(1)
+    if not delivered:
+        console.print(f"\n[red]Nothing usable for MC {result.target} either.[/red]")
+        raise typer.Exit(1)
     console.print(
-        f"\n[red]No build of {escape(mod.title)} for MC {mc_version} + "
-        f"{loader.capitalize()} found.[/red]"
+        f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
+        f"for MC {result.target} {delivered.verb} to {result.output_dir}/[/green]"
     )
-    if _fallback(mod, modrinth, resolve_on, make_config, github_token, mc_version, loader,
-                 output_dir, instance, fallback or default_mode(console.is_terminal)):
-        return
-    raise typer.Exit(1)
+    if instance:
+        console.print(f"[yellow]Not installed into {escape(instance)}: it is for MC "
+                      f"{result.target}, not {mc_version}.[/yellow]")
+
+
+class _GetView:
+    """Renders get_mod's events as the get command's output (Rich); the rest as plain lines.
+
+    After the first target's trail: what was delivered, or the near misses and "no build"
+    line that precede a version proposal.
+    """
+
+    def __init__(self, mc_version: str, loader: str):
+        self.mc_version, self.loader = mc_version, loader
+        self.identified = None            # the ModIdentified event
+
+    def __call__(self, event) -> None:
+        from modkeel.core.events import ModIdentified, ModResolved, TargetSearch
+        from modkeel.core.text import print_event
+
+        if isinstance(event, ModIdentified):
+            self.identified = event
+            if event.identified:
+                repo = f" - github.com/{event.source_repo}" if event.source_repo else ""
+                console.print(f"\n  Mod: [bold]{escape(event.title)}[/bold] "
+                              f"({event.slug}){repo}")
+        elif isinstance(event, ModResolved):
+            print_trail(event.trail)
+            if event.delivered:
+                _report_delivery(event.delivered, event.target, event.verify_runtime)
+            elif not event.retarget:
+                mod = self.identified
+                print_near_misses(mod.title, mod.identified, mod.related)
+                console.print(
+                    f"\n[red]No build of {escape(mod.title)} for MC {self.mc_version} + "
+                    f"{self.loader.capitalize()} found.[/red]"
+                )
+        elif isinstance(event, TargetSearch):
+            print_target_search(event)
+        else:
+            print_event(event)
 
 
 def _report_delivery(delivered, mc_version: str, docker_test: bool) -> None:
@@ -185,43 +194,3 @@ def _report_delivery(delivered, mc_version: str, docker_test: bool) -> None:
     elif delivered.caveat:
         console.print(f"\n[yellow]Note:[/yellow] {escape(delivered.caveat)}")
     print_evidence(delivered, docker_requested=docker_test)
-
-
-def _fallback(mod, modrinth, resolve_on, make_config, github_token, mc_version: str,
-              loader: str, output_dir: str, instance: Optional[str], mode: str) -> bool:
-    """The target layer for a pack of one: propose, decide, resolve on the new version.
-
-    True when a JAR for another version was delivered (exit 0: the user let it run).
-    """
-    from modkeel.mappings import release_versions
-    from modkeel.target import fallback_output, older_build_probe, propose_targets
-
-    if not mod.project:
-        return False
-    console.print(f"\n[dim]Looking for the nearest Minecraft version where "
-                  f"{escape(mod.title)} runs...[/dim]")
-    options = propose_targets([(mod.title, mod.project.get("project_id"))], loader.lower(),
-                              mc_version, modrinth, resolved=0, limit=1,
-                              probe=older_build_probe(loader.lower(), modrinth),
-                              releases=release_versions())
-    if not options:
-        return False
-    option = options[0]
-    hint = f'modkeel get "{mod.query}" -m {option.mc_version} -l {loader.lower()}'
-    if not offer_target(option, mode, console.is_terminal, hint):
-        return False
-    out = fallback_output(output_dir, option.mc_version)
-    # A different Minecraft version: never into the instance, and no -lv (it was for the
-    # requested version; Docker picks the loader for this one).
-    delivered = resolve_on(make_config(github_token, option.mc_version, str(out), "0", None))
-    if not delivered:
-        console.print(f"\n[red]Nothing usable for MC {option.mc_version} either.[/red]")
-        return False
-    console.print(
-        f"\n[green]Done! {escape(delivered.mod_name)} v{escape(delivered.mod_version)} "
-        f"for MC {option.mc_version} {delivered.verb} to {out}/[/green]"
-    )
-    if instance:
-        console.print(f"[yellow]Not installed into {escape(instance)}: it is for MC "
-                      f"{option.mc_version}, not {mc_version}.[/yellow]")
-    return True
