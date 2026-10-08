@@ -44,8 +44,14 @@ modkeel = "modkeel.cli:app"
 path = "modkeel/constants.py"
 pattern = 'MODKEEL_VERSION = "(?P<version>[^"]+)"'
 
+# Core metadata 2.4: hatchling >= 1.32 writes 2.5 by default, which the twine/packaging that
+# PyPI uploads go through do not all accept yet ("'2.5' is not a valid metadata version").
 [tool.hatch.build.targets.wheel]
 packages = ["modkeel"]
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
