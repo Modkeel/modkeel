@@ -287,7 +287,7 @@ def _verify_runtime(delivered: Delivered, ctx: ResolveContext) -> Union[Delivere
         return delivered
     subject = Subject(delivered.jar_path, ctx.mc_version, name=delivered.mod_name,
                       dependencies=list(delivered.dependencies))
-    evidence = gather(subject, ctx.config, ["docker_server"], required=[])
+    evidence = gather(subject, ctx.config, ["docker_server"], required=[], events=ctx.events)
     if evidence.passed:
         delivered.evidence.append("docker_server")
         return delivered

@@ -16,6 +16,7 @@ from modkeel.core.events import (
     Event,
     ForkChosen,
     Message,
+    Progress,
     RangeRelaxed,
     Saved,
     SourceTried,
@@ -33,6 +34,9 @@ def render_text(event: Event) -> Optional[str]:
         if event.purpose == "check":
             return f"    \U0001f4e5 Checking {event.filename} (built for MC {event.built_for})..."
         return f"    \U0001f4e5 Downloading {event.filename}..."
+    if isinstance(event, Progress):
+        return (f"\r     {event.done // 1024}KB / {event.total // 1024}KB "
+                f"({event.done * 100 // event.total}%)")
     if isinstance(event, Saved):
         return f"    \U0001f4be {'Installed' if event.installed else 'Saved'}: {event.path}"
     if isinstance(event, CheckRan):
@@ -57,5 +61,10 @@ def render_text(event: Event) -> Optional[str]:
 def print_event(event: Event) -> None:
     """Default Emitter: print the event's terminal line, if it has one."""
     line = render_text(event)
-    if line is not None:
+    if line is None:
+        return
+    if isinstance(event, Progress):
+        # redrawn in place: no newline until the download ends
+        print(line, end="", flush=True)
+    else:
         print(line)

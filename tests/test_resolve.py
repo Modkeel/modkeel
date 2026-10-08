@@ -133,7 +133,7 @@ class TestResolver:
                                  evidence=["metadata", "linkage"])
 
         outcomes = iter(outcomes)
-        with patch("modkeel.evidence.check_server_boot", lambda s, c: next(outcomes)):
+        with patch("modkeel.evidence.check_server_boot", lambda s, c, events=None: next(outcomes)):
             return Resolver([FileSource("older_official", ["old1", "old2"])]).resolve(MOD, ctx)
 
     def test_runtime_crash_rejects_and_tries_the_next(self, ctx, tmp_path):

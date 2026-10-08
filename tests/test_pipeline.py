@@ -309,7 +309,7 @@ class TestBuildLoop:
         assert result.clone_dir == Path(pipeline.temp_dir) / "mod"
         assert build.run.call_args.args[0][:6] == ["git", "clone", "-b", "main", "--depth", "1"]
         build.compile_mod.assert_called_once_with(
-            Path(pipeline.temp_dir) / "mod", None, "1.21.10")
+            Path(pipeline.temp_dir) / "mod", None, "1.21.10", events=pipeline.events)
 
     def test_extra_gradle_args_reach_compile_mod(self, pipeline, build):
         self.setup_branches(pipeline, "main")
@@ -615,7 +615,7 @@ class TestProcessRepos:
                 patch("modkeel.pipeline.time.sleep"), \
                 patch("modkeel.pipeline.publish_to_maven_local") as publish:
             pipeline.process_repos(["r"])
-        publish.assert_called_once_with(clone)
+        publish.assert_called_once_with(clone, events=pipeline.events)
 
     def test_crash_in_one_repo_does_not_stop_the_rest(self, pipeline):
         ok = CompilationResult(repo_url="b", success=True)

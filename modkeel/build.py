@@ -15,6 +15,8 @@ from modkeel.loaders import LOADER_PROFILES
 from modkeel.models import FailureType
 from modkeel.version import is_version_in_fabric_range, is_version_in_maven_range
 from modkeel.constants import MODKEEL_HOME
+from modkeel.core.events import Emitter, Message
+from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
 
@@ -220,12 +222,13 @@ def compile_mod(
     extra_gradle_args: Optional[List[str]] = None,
     mc_version: Optional[str] = None,
     loader: Optional[str] = None,
+    events: Emitter = print_event,
 ) -> Tuple[bool, Optional[Path], str, FailureType, List[str]]:
     """
     Compile the mod using Gradle.
     Returns (success, jar_path, message, failure_type, missing_deps)
     """
-    print("    \U0001f528 Compiling...")
+    events(Message("    \U0001f528 Compiling..."))
 
     root, gradlew = resolve_gradle(repo_path, loader)
     if not gradlew:
@@ -235,7 +238,7 @@ def compile_mod(
 
     # Quick dependency resolution check
     try:
-        print("    \U0001f50d Checking dependencies...")
+        events(Message("    \U0001f50d Checking dependencies..."))
         dep_cmd = [
             str(gradlew), "dependencies", "--configuration",
             "compileClasspath", "--no-daemon"
@@ -255,15 +258,15 @@ def compile_mod(
                 dep_result.stderr, dep_result.stdout
             )
             if fail_type == FailureType.DEPENDENCY_RESOLUTION:
-                print(f"    \u274c Dependency check failed: {', '.join(missing[:3])}")
+                events(Message(f"    \u274c Dependency check failed: {', '.join(missing[:3])}"))
                 return (False, None,
                         f"Dependency check failed: {missing}",
                         fail_type, missing)
-            print("    \u26a0\ufe0f  Dep check returned error but not dep-related, continuing build...")
+            events(Message("    \u26a0\ufe0f  Dep check returned error but not dep-related, continuing build..."))
     except subprocess.TimeoutExpired:
-        print("    \u26a0\ufe0f  Dep check timed out, continuing with full build...")
+        events(Message("    \u26a0\ufe0f  Dep check timed out, continuing with full build..."))
     except Exception as e:
-        print(f"    \u26a0\ufe0f  Dep check error ({e}), continuing with full build...")
+        events(Message(f"    \u26a0\ufe0f  Dep check error ({e}), continuing with full build..."))
 
     try:
         cmd = [str(gradlew), *build_tasks(repo_path, mc_version, loader), "--no-daemon"]
@@ -451,7 +454,8 @@ def create_maven_local_init_script(temp_dir: str) -> Path:
 
 def publish_to_maven_local(
     repo_path: Path,
-    extra_gradle_args: Optional[List[str]] = None
+    extra_gradle_args: Optional[List[str]] = None,
+    events: Emitter = print_event,
 ) -> bool:
     """Run publishToMavenLocal on a successfully compiled repo."""
     root, gradlew = resolve_gradle(repo_path)
@@ -483,7 +487,7 @@ def publish_to_maven_local(
             timeout=600
         )
         if result.returncode == 0:
-            print("    \U0001f4e4 Published to Maven Local (~/.m2/repository/)")
+            events(Message("    \U0001f4e4 Published to Maven Local (~/.m2/repository/)"))
             return True
         else:
             logger.debug(

@@ -18,6 +18,8 @@ from modkeel.version import (
     is_version_in_fabric_range,
     is_version_in_maven_range,
 )
+from modkeel.core.events import Emitter, Message
+from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
 
@@ -42,9 +44,14 @@ def is_bounded_range(version_range: str) -> bool:
 class BranchValidator:
     """Validates and scores branches for compatibility."""
 
-    def __init__(self, github_client, config: ModCompilerConfig):
+    def __init__(self, github_client, config: ModCompilerConfig, events: Emitter = print_event):
+        self.events = events  # progress (modkeel/core/events.py)
         self.github = github_client
         self.config = config
+
+    def _say(self, text: str) -> None:
+        """A progress line as a Message event (same text it always printed)."""
+        self.events(Message(text))
 
     def filter_branches_by_version_proximity(
         self, branches: List[BranchCandidate]
@@ -72,7 +79,7 @@ class BranchValidator:
 
         if len(filtered) < len(branches):
             removed = len(branches) - len(filtered)
-            print(f"  \u2139\ufe0f  Filtered {removed} branches from other MC versions (keeping {target_major_minor}.x only)")
+            self._say(f"  \u2139\ufe0f  Filtered {removed} branches from other MC versions (keeping {target_major_minor}.x only)")
 
         return filtered
 
@@ -370,7 +377,7 @@ class BranchValidator:
     ) -> List[BranchCandidate]:
         """Pre-validate multiple branches using GitHub API."""
         loader_label = override_loader or self.config.loader
-        print(f"  \U0001f50d Pre-validating {len(branches)} branches via GitHub API"
+        self._say(f"  \U0001f50d Pre-validating {len(branches)} branches via GitHub API"
               f" (loader={loader_label})...")
 
         compatible_branches = []
@@ -392,17 +399,17 @@ class BranchValidator:
 
                     if is_compatible_result:
                         if branch.validation_method == 'metadata_range':
-                            print(f"    \u2705 {branch.name}: Range {branch.version_range} \u2192 covers MC {self.config.mc_version}")
+                            self._say(f"    \u2705 {branch.name}: Range {branch.version_range} \u2192 covers MC {self.config.mc_version}")
                         else:
                             version_indicator = "\u2713" if branch.minecraft_version == self.config.mc_version else "~"
-                            print(f"    \u2705 {branch.name}: MC {branch.minecraft_version} {version_indicator} + {branch.loader}")
+                            self._say(f"    \u2705 {branch.name}: MC {branch.minecraft_version} {version_indicator} + {branch.loader}")
 
                         compatible_branches.append(branch)
                     else:
-                        print(f"    \u274c {branch.name}: {branch.validation_error}")
+                        self._say(f"    \u274c {branch.name}: {branch.validation_error}")
 
                 except Exception as e:
-                    print(f"    \u274c {branch.name}: Validation error - {e}")
+                    self._say(f"    \u274c {branch.name}: Validation error - {e}")
 
         return compatible_branches
 
