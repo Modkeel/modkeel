@@ -15,8 +15,9 @@ from rich.panel import Panel
 from modkeel.commands._shared import (
     BANNER,
     TAGLINE,
+    cli_decide,
     console,
-    offer_target,
+    print_target_search,
     require_valid_loader,
     resolve_github_token,
 )
@@ -211,7 +212,8 @@ def compile_command(
 
     fallback_built = False
     if not strict and any(not r.success for r in pipeline.results):
-        fallback_built = _pack_fallback(repo_urls, pipeline, config, repos_file, fallback)
+        fallback_built = _pack_fallback(repo_urls, pipeline, config, repos_file, fallback,
+                                        modkeel_cfg)
 
     # Exit code 1 only when every repository failed (scripts can tell "nothing built").
     if pipeline.results and not any(r.success for r in pipeline.results) \
@@ -220,71 +222,37 @@ def compile_command(
 
 
 def _pack_fallback(repo_urls, pipeline: Pipeline, config: ModCompilerConfig,
-                   repos_file: Path, fallback: Optional[str]) -> bool:
-    """The target layer for compile: propose a version for the whole list, decide, re-run.
+                   repos_file: Path, fallback: Optional[str], modkeel_cfg) -> bool:
+    """The target layer for compile (modkeel.core.engine.retarget_pack), shown the CLI's way.
 
-    The pack's mods are the repos' Modrinth projects (repos without one count as missing
-    everywhere). True when the fallback run built at least one mod.
+    True when the run on the proposed version built at least one mod.
     """
-    from modkeel.github import parse_repo_url
-    from modkeel.modrinth import ModrinthClient
-    from modkeel.sources import identify_repo
-    from modkeel.mappings import release_versions
-    from modkeel.target import (
-        carry_over,
-        default_mode,
-        fallback_output,
-        older_build_probe,
-        propose_targets,
-    )
+    from modkeel.core.engine import retarget_pack
+    from modkeel.core.events import TargetSearch
+    from modkeel.core.text import print_event
+    from modkeel.target import default_mode
 
-    modrinth = ModrinthClient(config)
-    mods = []          # (title, Modrinth project id), parallel to repo_urls
-    for url in repo_urls:
-        try:
-            owner, repo, _ = parse_repo_url(url)
-        except ValueError:
-            mods.append((url, None))
-            continue
-        ref = identify_repo(owner, repo, modrinth)
-        mods.append((repo, ref.project.get("project_id") if ref.project else None))
-    resolved = sum(1 for r in pipeline.results if r.success)
-    console.print("\n[dim]Looking for the nearest Minecraft version where more of these "
-                  "mods run...[/dim]")
-    options = propose_targets(mods, config.loader, config.mc_version, modrinth, resolved,
-                              limit=1, probe=older_build_probe(config.loader, modrinth),
-                              releases=release_versions())
-    if not options:
-        return False
-    option = options[0]
-    hint = f"modkeel compile {repos_file} -m {option.mc_version} -l {config.loader}"
+    def view(event) -> None:
+        if isinstance(event, TargetSearch):
+            print_target_search(event)
+        else:
+            print_event(event)
+
+    def hint(option) -> str:
+        return f"modkeel compile {repos_file} -m {option.mc_version} -l {config.loader}"
+
     mode = (fallback or default_mode(console.is_terminal)).lower()
-    if not offer_target(option, mode, console.is_terminal, hint):
+    run = retarget_pack(repo_urls, pipeline.results, config, events=view,
+                        decide=cli_decide(mode, hint, modkeel_cfg))
+    if run is None:
         return False
-
-    # Same run on the new version: own output folder, never the instance, no -lv (it named
-    # a loader build for the requested version).
-    out = fallback_output(config.output_dir, option.mc_version)
-    retry = ModCompilerConfig(
-        mc_version=option.mc_version, loader=config.loader, loader_version="0",
-        instance_path=None, github_token=config.github_token, strict_version=False,
-        output_dir=str(out), cross_loader=config.cross_loader, docker_test=config.docker_test,
-        docker_timeout=config.docker_timeout, prebuild_gate=config.prebuild_gate,
-        use_prebuilt=config.use_prebuilt, symbol_check=config.symbol_check)
-    # What the first run resolved is reused when it also passes there, except for mods
-    # with an official build on the new version (that build wins): no repo is built twice
-    # for nothing.
-    official_there = {url for url, (title, _) in zip(repo_urls, mods)
-                      if title in option.covered}
-    carried = carry_over(pipeline.results, retry, config.mc_version, official_there)
-    second = Pipeline(retry)
-    second.process_repos(repo_urls, resolved=carried)
-    print(second.generate_report())
-    built = sum(1 for r in second.results if r.success)
-    reused = f" ({len(carried)} reused from the MC {config.mc_version} run)" if carried else ""
-    console.print(f"\n[green]MC {option.mc_version}: {built} of {len(repo_urls)} built "
-                  f"to {out}/{reused}[/green]")
+    print(run.report)
+    out = run.config.output_dir
+    reused = f" ({len(run.carried)} reused from the MC {config.mc_version} run)" \
+        if run.carried else ""
+    console.print(f"\n[green]MC {run.option.mc_version}: {run.built} of {len(repo_urls)} "
+                  f"built to {out}/{reused}[/green]")
     if config.instance_path:
         console.print(f"[yellow]Not installed into {config.instance_path}: these are for MC "
-                      f"{option.mc_version}, not {config.mc_version}.[/yellow]")
-    return built > 0
+                      f"{run.option.mc_version}, not {config.mc_version}.[/yellow]")
+    return run.built > 0

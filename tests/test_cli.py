@@ -202,7 +202,7 @@ class TestCompile:
                 patch.object(ModrinthClient, "find_project_by_repo", by_repo), \
                 patch.object(ModrinthClient, "project_versions", versions), \
                 patch("modkeel.crowdsource.submit_reports"), \
-                patch("modkeel.target.carry_over", carry or (lambda *a: {})):
+                patch("modkeel.target.carry_over", carry or (lambda *a, **k: {})):
             result = invoke("compile", str(repos), "-m", "1.21.10", "-l", "neoforge",
                             "-lv", "21.10.64", *args)
         self.resolved_by = resolved_by
@@ -224,7 +224,7 @@ class TestCompile:
         one, so it goes through the sources again."""
         asked = {}
 
-        def carry(previous, config, first_target, resolve_again):
+        def carry(previous, config, first_target, resolve_again, events=None):
             asked.update(target=config.mc_version, first=first_target, again=resolve_again)
             return {"https://github.com/c/d": CompilationResult("https://github.com/c/d",
                                                                  success=True)}

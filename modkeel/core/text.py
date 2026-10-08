@@ -16,10 +16,13 @@ from modkeel.core.events import (
     Event,
     ForkChosen,
     Message,
+    ModIdentified,
+    ModResolved,
     Progress,
     RangeRelaxed,
     Saved,
     SourceTried,
+    TargetSearch,
 )
 
 CHECK_LABELS = {"metadata": "Metadata", "linkage": "Linkage", "mixins": "Mixins",
@@ -55,6 +58,21 @@ def render_text(event: Event) -> Optional[str]:
         return f"  ↻ {event.mod}: not reused for MC {event.target} ({event.detail})"
     if isinstance(event, SourceTried):
         return None
+    if isinstance(event, ModIdentified):
+        if not event.identified:
+            return None
+        repo = f" - github.com/{event.source_repo}" if event.source_repo else ""
+        return f"\n  Mod: {event.title} ({event.slug}){repo}"
+    if isinstance(event, ModResolved):
+        if not event.trail:
+            return None
+        lines = ["\nTried:"] + [f"  {'✓' if ok else '✗'} {strategy}: {detail}"
+                                 for strategy, ok, detail in event.trail]
+        return "\n".join(lines)
+    if isinstance(event, TargetSearch):
+        what = (f"{event.subject} runs" if event.scope == "mod"
+                else "more of these mods run")
+        return f"\nLooking for the nearest Minecraft version where {what}..."
     return None
 
 

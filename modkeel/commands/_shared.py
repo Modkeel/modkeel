@@ -76,23 +76,34 @@ def require_valid_loader(loader: str) -> None:
 
 
 def print_trail(trail) -> None:
-    """The path the resolver took: one line per strategy or candidate, ✓ for the one used."""
+    """The path the resolver took: one line per strategy or candidate, ✓ for the one used.
+
+    Steps are resolve.Step objects or (strategy, ok, detail) tuples (ModResolved.trail).
+    """
     if not trail:
         return
     console.print("\n[bold]Tried:[/bold]")
     for step in trail:
-        mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
-        console.print(f"  {mark} {strategy_label(step.strategy):<22} {escape(step.detail)}")
+        strategy, ok, detail = ((step.strategy, step.ok, step.detail)
+                                if hasattr(step, "strategy") else step)
+        mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        console.print(f"  {mark} {strategy_label(strategy):<22} {escape(detail)}")
 
 
 def print_related(mod, limit: int = 5) -> None:
     """Near misses on Modrinth (addons, ports, similar names), never offered as the mod."""
-    others = [h for h in mod.related if h.get("title")][:limit]
+    print_near_misses(mod.title, mod.project is not None,
+                      [(h["title"], h.get("slug", "?")) for h in mod.related if h.get("title")],
+                      limit)
+
+
+def print_near_misses(title: str, identified: bool, related, limit: int = 5) -> None:
+    """print_related from (title, slug) pairs (what the ModIdentified event carries)."""
+    others = list(related)[:limit]
     if not others:
         return
-    heading = (f"Related on Modrinth (not {escape(mod.title)})" if mod.project
-               else "Did you mean")
-    names = ", ".join(f"{escape(h['title'])} ({h.get('slug', '?')})" for h in others)
+    heading = f"Related on Modrinth (not {escape(title)})" if identified else "Did you mean"
+    names = ", ".join(f"{escape(t)} ({slug})" for t, slug in others)
     console.print(f"\n[dim]{heading}: {names}[/dim]")
 
 
@@ -156,3 +167,30 @@ def offer_target(option, mode: str, interactive: bool, retry_hint: str) -> bool:
     if not take:
         console.print(f"[dim]Not searched. To try it: {escape(retry_hint)}[/dim]")
     return take
+
+
+def cli_decide(mode: str, retry_hint, modkeel_cfg: ModkeelConfig):
+    """How the CLI answers the engine's questions (modkeel/core/decisions.py).
+
+    ChangeTarget: announced, then the countdown / --fallback (offer_target), with
+    retry_hint(option) as the command to run it by hand. NeedToken: the saved token or a
+    hidden prompt in a terminal. Anything else: the engine's safe default.
+    """
+    from modkeel.core.decisions import ChangeTarget, NeedToken, safe_default
+
+    def decide(question):
+        if isinstance(question, ChangeTarget):
+            return offer_target(question.option, mode, console.is_terminal,
+                                retry_hint(question.option))
+        if isinstance(question, NeedToken):
+            return resolve_github_token(None, modkeel_cfg, prompt_if_missing=True)
+        return safe_default(question)
+
+    return decide
+
+
+def print_target_search(event) -> None:
+    """The TargetSearch event as the CLI shows it."""
+    what = (f"{escape(event.subject)} runs" if event.scope == "mod"
+            else "more of these mods run")
+    console.print(f"\n[dim]Looking for the nearest Minecraft version where {what}...[/dim]")
