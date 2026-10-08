@@ -184,6 +184,16 @@ class ModResolved(Event):
 
 
 @dataclass(frozen=True)
+class PackScanned(Event):
+    """A mods folder read and identified (core/port.py): one row per JAR,
+    (file, name, Modrinth slug or None, identified_by: "hash" | "name" | None)."""
+
+    kind: ClassVar[str] = "pack_scanned"
+    folder: str
+    mods: Tuple[Tuple[str, str, Optional[str], Optional[str]], ...]
+
+
+@dataclass(frozen=True)
 class TargetSearch(Event):
     """The target layer looks for a nearer version where more runs (scope: mod | pack)."""
 

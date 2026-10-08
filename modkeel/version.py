@@ -112,10 +112,15 @@ def is_version_in_fabric_range(version: str, range_str: str) -> bool:
     if ' ' in range_str:
         return all(is_version_in_fabric_range(version, part) for part in range_str.split())
 
+    # A trailing "-" on a bound (">=1.21.9-") only widens it to that version's pre-releases
+    # (Fabric's semver): for release versions the bound is the version itself.
+    bound = range_str.lstrip('<>=~^').rstrip('-')
+    op = range_str[:len(range_str) - len(range_str.lstrip('<>=~^'))]
+    range_str = op + bound
     try:
         if range_str.startswith('~'):
             # ~1.21.0 means 1.21.x; a trailing "-" (~26.2-) also admits pre-releases
-            base = range_str[1:].strip().rstrip('-')
+            base = range_str[1:].strip()
             base_parts = base.split('.')[:2]  # Get major.minor
             version_parts = version.split('.')[:2]
             return base_parts == version_parts
@@ -135,6 +140,12 @@ def is_version_in_fabric_range(version: str, range_str: str) -> bool:
         elif range_str.startswith('<'):
             max_ver = range_str[1:].strip()
             return compare_versions(version, max_ver) < 0
+
+        elif any(part in ('x', 'X', '*') for part in range_str.split('.')):
+            # 1.21.x: every version with the parts before the wildcard
+            fixed = range_str.split('.')
+            fixed = fixed[:next(i for i, p in enumerate(fixed) if p in ('x', 'X', '*'))]
+            return version.split('.')[:len(fixed)] == fixed
 
         else:
             # Exact version
