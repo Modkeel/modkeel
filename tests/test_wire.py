@@ -273,6 +273,32 @@ class TestClientGone:
         assert not thread.is_alive() and server.gone and crashes == []
 
 
+class TestEncoding:
+    def test_lines_are_ascii_whatever_the_text(self):
+        from modkeel.core.wire import encode
+
+        line = encode({"type": "event", "event": {"kind": "message",
+                                                   "text": "    \U0001f4e6 Dependency: o\u03c9o"}})
+        assert line.isascii()
+        assert json.loads(line)["event"]["text"] == "    \U0001f4e6 Dependency: o\u03c9o"
+
+    def test_a_cp1252_output_carries_emoji_and_the_run_finishes(self):
+        """Windows pipes default to cp1252: an emoji event used to fail the write and stop
+        the run silently (the error looked like a closed client)."""
+        import io
+
+        from modkeel.core.events import Message
+
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="cp1252", write_through=True)
+        server = Server(io.StringIO(""), out, {})
+        server.send({"type": "event", "id": "1",
+                     "event": Message("    \U0001f4e6 Dependency: Fabric API").to_dict()})
+        assert not server.gone
+        line = raw.getvalue().decode("ascii").strip()
+        assert json.loads(line)["event"]["text"].startswith("    \U0001f4e6")
+
+
 class TestServeCommand:
     def test_requires_a_transport(self):
         from tests.test_cli import invoke
