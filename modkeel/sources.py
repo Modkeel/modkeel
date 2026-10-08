@@ -304,7 +304,8 @@ class OlderOfficialSource(SourceStrategy):
         # Mixins are judged too; a mixin check that cannot run does not reject (linkage
         # already needs the same symbol tables), one that finds a broken injection does.
         evidence = gather(Subject(jar, ctx.mc_version, built_for, mod.title), ctx.config,
-                          ["metadata", "linkage", "mixins"], required=["metadata", "linkage"])
+                          ["metadata", "linkage", "mixins"], required=["metadata", "linkage"],
+                          events=ctx.events)
         if not evidence.ok:
             return Rejected(evidence.reason)
         return jar, evidence
@@ -377,7 +378,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
             # Only a declared range is rewritten; anything else stays a refusal
             return Rejected(f"refused for something other than its range ({message})")
         static = gather(Subject(jar, target, built_for, mod.title), ctx.config,
-                        ["linkage", "mixins"], required=["linkage"])
+                        ["linkage", "mixins"], required=["linkage"], events=ctx.events)
         if not static.ok:
             return Rejected(static.reason)
         _print_static(static, ctx.events)
@@ -397,7 +398,7 @@ class RelaxedOfficialSource(OlderOfficialSource):
         # Docker or an inconclusive boot is a rejection here, not a skipped check.
         deps = ctx.modrinth.download_modrinth_deps({"required_deps": _required_deps(version)})
         runtime = gather(Subject(dest, target, built_for, mod.title, deps or []), ctx.config,
-                         ["metadata", "docker_server"])
+                         ["metadata", "docker_server"], events=ctx.events)
         if not runtime.ok:
             dest.unlink(missing_ok=True)
             failure = runtime.failure
@@ -527,7 +528,7 @@ class ForkSource(SourceStrategy):
             return Found(note="needs a GitHub token: modkeel token --set ghp_YOUR_TOKEN")
 
         config = ctx.config_with_token(token)
-        github = GitHubClient(config)
+        github = GitHubClient(config, ctx.events)
         # Forks of the mod's own repo when Modrinth names it, else repos named like the query
         owner, repo = (mod.source_repo.split("/", 1) if mod.source_repo
                        else (mod.query, mod.query))
@@ -542,7 +543,7 @@ class ForkSource(SourceStrategy):
         upstream = (owner, repo, github.get_branches(owner, repo)) if mod.source_repo else None
         copies: List[str] = []
         possible: List[str] = []
-        validated = prefilter_forks(github, BranchValidator(github, config), forks,
+        validated = prefilter_forks(github, BranchValidator(github, config, ctx.events), forks,
                                     upstream=upstream, copies=copies, possible=possible)
         if not validated:
             n = len(copies)

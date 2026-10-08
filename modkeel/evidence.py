@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from modkeel.core.events import Emitter
+from modkeel.core.text import print_event
 from modkeel.build import validate_jar
 from modkeel.models import ModCompilerConfig
 
@@ -206,7 +208,8 @@ def check_mixins(subject: Subject, config: ModCompilerConfig) -> Outcome:
                    f"{report.checked} mixin injections still apply{note}", report)
 
 
-def check_server_boot(subject: Subject, config: ModCompilerConfig) -> Outcome:
+def check_server_boot(subject: Subject, config: ModCompilerConfig,
+                      events: Emitter = print_event) -> Outcome:
     """Does a headless server boot with it and its dependencies (DockerTester and its cache).
 
     No Docker, an infrastructure error and a client-only mod (a server cannot load it) all
@@ -215,7 +218,7 @@ def check_server_boot(subject: Subject, config: ModCompilerConfig) -> Outcome:
     from modkeel.docker import DockerTester
     from modkeel.models import CompilationResult
 
-    tester = DockerTester(config)
+    tester = DockerTester(config, events)
     if not tester.check_docker_available():
         return Outcome("docker_server", NOT_RUN, "needs Docker (a server must boot with it)")
     results = [CompilationResult(repo_url=str(subject.jar), success=True,
@@ -234,16 +237,18 @@ def check_server_boot(subject: Subject, config: ModCompilerConfig) -> Outcome:
 
 
 # Looked up at call time, so a check can be replaced (tests patch the functions above).
-CHECKS: Dict[str, Callable[[Subject, ModCompilerConfig], Outcome]] = {
-    "metadata": lambda s, c: check_metadata(s, c),
-    "linkage": lambda s, c: check_linkage(s, c),
-    "mixins": lambda s, c: check_mixins(s, c),
-    "docker_server": lambda s, c: check_server_boot(s, c),
+# The emitter reaches the checks that report progress (the server boot).
+CHECKS: Dict[str, Callable[[Subject, ModCompilerConfig, Emitter], Outcome]] = {
+    "metadata": lambda s, c, e: check_metadata(s, c),
+    "linkage": lambda s, c, e: check_linkage(s, c),
+    "mixins": lambda s, c, e: check_mixins(s, c),
+    "docker_server": lambda s, c, e: check_server_boot(s, c, e),
 }
 
 
 def gather(subject: Subject, config: ModCompilerConfig, checks: Iterable[str],
-           required: Optional[Iterable[str]] = None) -> Evidence:
+           required: Optional[Iterable[str]] = None,
+           events: Emitter = print_event) -> Evidence:
     """Run `checks` cheapest first; stop at a failure or a required check that cannot run.
 
     required defaults to every check asked for. A check name without an implementation
@@ -253,7 +258,7 @@ def gather(subject: Subject, config: ModCompilerConfig, checks: Iterable[str],
     evidence = Evidence(required=frozenset(checks if required is None else required))
     for name in checks:
         run = CHECKS.get(name)
-        outcome = (run(subject, config) if run
+        outcome = (run(subject, config, events) if run
                    else Outcome(name, NOT_RUN, f"no {name} check available"))
         evidence.outcomes.append(outcome)
         if evidence.failure is not None:

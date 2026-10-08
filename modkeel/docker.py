@@ -26,6 +26,8 @@ from modkeel.loaders import (
 )
 from modkeel.models import CompilationResult, DockerTestCache, ModCompilerConfig
 from modkeel.constants import MODKEEL_HOME
+from modkeel.core.events import Emitter, Message, Progress
+from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
 
@@ -168,8 +170,13 @@ def _container_name() -> str:
 class DockerTester:
     """Encapsulates Docker-based mod testing."""
 
-    def __init__(self, config: ModCompilerConfig):
+    def __init__(self, config: ModCompilerConfig, events: Emitter = print_event):
+        self.events = events  # progress (modkeel/core/events.py)
         self.config = config
+
+    def _say(self, text: str) -> None:
+        """A progress line as a Message event (same text it always printed)."""
+        self.events(Message(text))
 
     def _loader_version(self) -> Optional[str]:
         """Loader version the test server runs, used by every cache and container below.
@@ -289,25 +296,20 @@ class DockerTester:
                         f.write(chunk)
                         downloaded += len(chunk)
                         if total:
-                            pct = downloaded * 100 // total
-                            print(
-                                f"\r     {downloaded // 1024}KB / "
-                                f"{total // 1024}KB ({pct}%)",
-                                end="", flush=True,
-                            )
+                            self.events(Progress(downloaded, total))
 
-                print()
+                self._say("")
                 if downloaded >= total and total > 0:
                     return True
 
             except Exception as e:
-                print(
+                self._say(
                     f"\n  \u26a0\ufe0f  Download interrupted (attempt "
                     f"{attempt}/{max_retries}): {e}"
                 )
                 if attempt < max_retries:
                     wait = min(5 * attempt, 30)
-                    print(f"     Resuming in {wait}s...")
+                    self._say(f"     Resuming in {wait}s...")
                     time.sleep(wait)
 
         return dest.exists() and dest.stat().st_size > 0
@@ -331,7 +333,7 @@ class DockerTester:
 
         cache_dir = self._get_loader_cache_dir(loader_version)
         if self._is_loader_installed(cache_dir):
-            print(f"  \u2705 Loader cached at {cache_dir}")
+            self._say(f"  \u2705 Loader cached at {cache_dir}")
             return cache_dir
 
         installer_dir = MODKEEL_HOME / "installers"
@@ -342,22 +344,22 @@ class DockerTester:
 
         display = profile["display_name"]
         if not (installer.exists() and installer.stat().st_size > 1_000_000):
-            print(
+            self._say(
                 f"  \U0001f4e5 Downloading {display} {loader_version} installer "
                 f"(with retry+resume)..."
             )
             if not self._download_installer_with_resume(url, installer):
-                print("  \u274c Could not download installer after retries")
+                self._say("  \u274c Could not download installer after retries")
                 return None
 
         install_retries = 10
         for inst_attempt in range(1, install_retries + 1):
             if self._is_loader_installed(cache_dir):
-                print(f"  \u2705 {display} installed \u2192 {cache_dir}")
+                self._say(f"  \u2705 {display} installed \u2192 {cache_dir}")
                 (cache_dir / "eula.txt").write_text("eula=true\n")
                 return cache_dir
 
-            print(
+            self._say(
                 f"  \U0001f527 Installing {display} {loader_version} "
                 f"(attempt {inst_attempt}/{install_retries})..."
             )
@@ -377,7 +379,7 @@ class DockerTester:
                     capture_output=True, text=True, timeout=600,
                 )
                 if result.returncode == 0:
-                    print(f"  \u2705 {display} installed \u2192 {cache_dir}")
+                    self._say(f"  \u2705 {display} installed \u2192 {cache_dir}")
                     (cache_dir / "eula.txt").write_text("eula=true\n")
                     return cache_dir
 
@@ -389,31 +391,31 @@ class DockerTester:
                     1 for line in lines
                     if "failed to download" in line.lower()
                 )
-                print(
+                self._say(
                     f"     Libraries: {ok} cached, "
                     f"{failed} failed to download"
                 )
                 if inst_attempt < install_retries:
                     wait = min(10 * inst_attempt, 60)
-                    print(
+                    self._say(
                         f"     Retrying in {wait}s "
                         f"(progress is saved)..."
                     )
                     time.sleep(wait)
 
             except subprocess.TimeoutExpired:
-                print(
+                self._say(
                     f"  \u26a0\ufe0f  Installer timed out "
                     f"(attempt {inst_attempt}/{install_retries})"
                 )
                 if inst_attempt < install_retries:
-                    print("     Retrying (progress is saved)...")
+                    self._say("     Retrying (progress is saved)...")
             except Exception as e:
-                print(f"  \u26a0\ufe0f  Installer error: {e}")
+                self._say(f"  \u26a0\ufe0f  Installer error: {e}")
                 return None
 
         maven = get_maven_domain(loader) or "the download server"
-        print(
+        self._say(
             f"  \u274c Could not install {display} after "
             f"{install_retries} attempts. "
             f"The {maven} CDN may be down."
@@ -571,22 +573,22 @@ class DockerTester:
 
             maven = get_maven_domain(self.config.loader) or "the download server"
             if attempt < DOCKER_INSTALL_MAX_RETRIES:
-                print(
+                self._say(
                     f"  \u26a0\ufe0f  Loader install failed (attempt "
                     f"{attempt}/{DOCKER_INSTALL_MAX_RETRIES}). "
                     f"This is a server-side issue "
                     f"({maven} CDN), not your fault."
                 )
-                print("     Retrying in 10s...")
+                self._say("     Retrying in 10s...")
                 time.sleep(10)
             else:
-                print(
+                self._say(
                     f"  \u274c Loader install failed after "
                     f"{DOCKER_INSTALL_MAX_RETRIES} attempts. "
                     f"The {loader_type} download server "
                     f"({maven}) is unreliable right now."
                 )
-                print(
+                self._say(
                     "     Try again later, or use a VPN to connect "
                     "through a different region."
                 )
@@ -763,31 +765,31 @@ class DockerTester:
     def test_mods_in_docker(self, results: List[CompilationResult]) -> None:
         """Docker-test all successfully compiled mods."""
         if not self.check_docker_available():
-            print("\n\u26a0\ufe0f  Docker is not available. Skipping Docker tests.")
-            print("   Install Docker and ensure the daemon is running "
+            self._say("\n\u26a0\ufe0f  Docker is not available. Skipping Docker tests.")
+            self._say("   Install Docker and ensure the daemon is running "
                   "to enable headless server testing.")
             return
 
         successful = [r for r in results if r.success and r.jar_path]
         if not successful:
-            print("\n\u26a0\ufe0f  No successful mods to Docker-test.")
+            self._say("\n\u26a0\ufe0f  No successful mods to Docker-test.")
             return
 
         jar_paths = [Path(r.jar_path) for r in successful]
         existing_jars = [j for j in jar_paths if j.exists()]
         if not existing_jars:
-            print("\n\u26a0\ufe0f  No JAR files found on disk for Docker testing.")
+            self._say("\n\u26a0\ufe0f  No JAR files found on disk for Docker testing.")
             return
 
-        print(f"\n{'='*80}")
-        print(f"\U0001f433 DOCKER TEST: Testing {len(existing_jars)} mod(s) "
+        self._say(f"\n{'='*80}")
+        self._say(f"\U0001f433 DOCKER TEST: Testing {len(existing_jars)} mod(s) "
               f"in headless Minecraft server")
-        print(f"{'='*80}")
+        self._say(f"{'='*80}")
         requested = getattr(self.config, "loader_version", None)
         if requested and requested != "0" and not is_explicit_loader_version(requested):
-            print(f"  \u26a0\ufe0f  Loader version '{requested}' is not a full version; "
+            self._say(f"  \u26a0\ufe0f  Loader version '{requested}' is not a full version; "
                   f"testing on {self._describe_loader()}")
-        print(f"  Server: Minecraft {self.config.mc_version} + {self._describe_loader()}")
+        self._say(f"  Server: Minecraft {self.config.mc_version} + {self._describe_loader()}")
 
         cache = DockerTestCache()
         jar_hash = DockerTestCache.compute_jar_set_hash(existing_jars)
@@ -797,18 +799,18 @@ class DockerTester:
         )
         if cached is not None:
             status = "PASSED" if cached else "FAILED"
-            print(f"  \U0001f4cb Cached result found: {status}")
+            self._say(f"  \U0001f4cb Cached result found: {status}")
             for r in successful:
                 r.docker_tested = True
                 r.docker_test_passed = cached
             return
 
-        print(f"  \U0001f504 Batch test: loading all {len(existing_jars)} "
+        self._say(f"  \U0001f504 Batch test: loading all {len(existing_jars)} "
               f"mod(s) into one server...")
         batch = self._test_batch_docker(existing_jars, results)
 
         if batch["passed"]:
-            print("  \u2705 Batch test PASSED \u2014 all mods loaded successfully")
+            self._say("  \u2705 Batch test PASSED \u2014 all mods loaded successfully")
             for r in successful:
                 r.docker_tested = True
                 r.docker_test_passed = True
@@ -820,12 +822,12 @@ class DockerTester:
             )
             return
 
-        print(f"  \u274c Batch test FAILED: {batch['error']}")
+        self._say(f"  \u274c Batch test FAILED: {batch['error']}")
 
         if batch.get("is_loader_error"):
-            print("  \u26a0\ufe0f  This is a loader/infrastructure error, "
+            self._say("  \u26a0\ufe0f  This is a loader/infrastructure error, "
                   "not caused by the mods.")
-            print(f"     Snippet: {' | '.join(batch['log_snippet'][-3:])}")
+            self._say(f"     Snippet: {' | '.join(batch['log_snippet'][-3:])}")
             for r in successful:
                 r.docker_tested = True
                 r.docker_test_passed = None
@@ -838,39 +840,39 @@ class DockerTester:
             r.docker_tested = True
             r.docker_test_passed = None
             r.docker_error = batch["error"]
-            print(f"  \u2139\ufe0f  {mod_label} is client-only \u2014 cannot test "
+            self._say(f"  \u2139\ufe0f  {mod_label} is client-only \u2014 cannot test "
                   f"on headless server")
             return
 
-        print("  \U0001f50d Testing mods individually to isolate failures...")
+        self._say("  \U0001f50d Testing mods individually to isolate failures...")
 
         for result in successful:
             jar = Path(result.jar_path)
             if not jar.exists():
                 continue
             mod_label = result.mod_name or jar.stem
-            print(f"\n    \U0001f9ea Testing: {mod_label}...")
+            self._say(f"\n    \U0001f9ea Testing: {mod_label}...")
             single = self._test_single_docker(jar, results)
             result.docker_tested = True
 
             if single.get("is_loader_error"):
                 result.docker_test_passed = None
                 result.docker_error = single["error"]
-                print(f"    \u26a0\ufe0f  {mod_label}: INCONCLUSIVE \u2014 "
+                self._say(f"    \u26a0\ufe0f  {mod_label}: INCONCLUSIVE \u2014 "
                       f"{result.docker_error}")
                 continue
 
             if single.get("is_client_only"):
                 result.docker_test_passed = None
                 result.docker_error = single["error"]
-                print(f"    \u2139\ufe0f  {mod_label}: CLIENT-ONLY \u2014 "
+                self._say(f"    \u2139\ufe0f  {mod_label}: CLIENT-ONLY \u2014 "
                       f"cannot test on headless server")
                 continue
 
             result.docker_test_passed = single["passed"]
             result.docker_load_time_ms = single.get("load_time_ms")
             if single["passed"]:
-                print(f"    \u2705 {mod_label}: PASSED")
+                self._say(f"    \u2705 {mod_label}: PASSED")
             else:
                 result.docker_error = single["error"]
                 missing = self._extract_missing_deps_from_logs(
@@ -880,4 +882,4 @@ class DockerTester:
                     result.docker_error += (
                         f" (missing: {', '.join(missing)})"
                     )
-                print(f"    \u274c {mod_label}: FAILED \u2014 {result.docker_error}")
+                self._say(f"    \u274c {mod_label}: FAILED \u2014 {result.docker_error}")

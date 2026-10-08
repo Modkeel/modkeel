@@ -27,6 +27,8 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
+from modkeel.core.events import Emitter, Message
+from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
 
@@ -552,10 +554,16 @@ class PreBuildGate:
     # candidates. Anything dropped is logged rather than silently ignored.
     SYMBOL_CHECK_LIMIT = 3
 
-    def __init__(self, github_client, jdk_major=AUTO_DETECT_JDK, config=None):
+    def __init__(self, github_client, jdk_major=AUTO_DETECT_JDK, config=None,
+                 events: Emitter = print_event):
+        self.events = events  # progress (modkeel/core/events.py)
         self.finder = PrebuiltFinder(github_client)
         self.checker = StaticBuildCheck(github_client, jdk_major=jdk_major)
         self.symbols = SymbolChecker(github_client, config) if config else None
+
+    def _say(self, text: str) -> None:
+        """A progress line as a Message event (same text it always printed)."""
+        self.events(Message(text))
 
     def find_prebuilt(
         self, owner: str, repo: str, branch: str, mc_version: Optional[str] = None
@@ -578,7 +586,7 @@ class PreBuildGate:
 
         checked = survivors[: self.SYMBOL_CHECK_LIMIT]
         if verbose and len(survivors) > len(checked):
-            print(
+            self._say(
                 f"  \U0001f50e Symbol check on top {len(checked)} of "
                 f"{len(survivors)} candidates"
             )
@@ -590,9 +598,9 @@ class PreBuildGate:
 
             if verbose and report.checked:
                 mark = "✓" if report.is_clean else "⚠"
-                print(f"     {mark} {branch.name}: {report.summary}")
+                self._say(f"     {mark} {branch.name}: {report.summary}")
                 for finding in report.findings[:3]:
-                    print(f"        - {finding}")
+                    self._say(f"        - {finding}")
 
         survivors.sort(key=lambda b: b.score, reverse=True)
 
@@ -625,15 +633,15 @@ class PreBuildGate:
             survivors.append(branch)
 
         if verbose and rejected:
-            print(
+            self._say(
                 f"  ⚡ Pre-build gate rejected {len(rejected)} branch(es) without building:"
             )
             for branch, verdict in rejected:
-                print(f"     ✗ {branch.name}: {verdict.summary}")
+                self._say(f"     ✗ {branch.name}: {verdict.summary}")
 
         if not survivors:
             if verbose:
-                print("  ⚠️  All branches failed the pre-build gate; trying them anyway")
+                self._say("  ⚠️  All branches failed the pre-build gate; trying them anyway")
             return branches
 
         survivors.sort(key=lambda b: b.score, reverse=True)
@@ -643,6 +651,6 @@ class PreBuildGate:
             for branch in survivors[:3]:
                 ci = getattr(branch, "ci_status", None)
                 if ci and ci.last_conclusion:
-                    print(f"     ✓ {branch.name}: {ci.summary} (score {branch.score})")
+                    self._say(f"     ✓ {branch.name}: {ci.summary} (score {branch.score})")
 
         return survivors

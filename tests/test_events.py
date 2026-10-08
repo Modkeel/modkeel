@@ -148,3 +148,65 @@ class TestPipelineEvents:
         assert any(isinstance(e, Message) and "Processing" in e.text for e in events)
         delivered = [e for e in events if isinstance(e, SourceTried) and e.ok]
         assert len(delivered) == 1 and delivered[0].mod == "mod"
+
+
+class TestProgress:
+    def test_redrawn_in_place_without_a_newline(self, capsys):
+        from modkeel.core.events import Progress
+
+        print_event(Progress(512 * 1024, 1024 * 1024))
+        assert capsys.readouterr().out == "\r     512KB / 1024KB (50%)"
+
+
+class TestClientEvents:
+    """The API clients and the build report through the emitter they are given (1b)."""
+
+    @pytest.fixture
+    def config(self, tmp_path):
+        return ModCompilerConfig(mc_version="1.21.10", loader="neoforge", loader_version="64",
+                                 output_dir=str(tmp_path / "out"))
+
+    def test_github_client(self, config, capsys):
+        from modkeel.github import GitHubClient
+
+        events = []
+        with patch("modkeel.github.requests.get", return_value=MagicMock(status_code=404)):
+            assert GitHubClient(config, events.append).get_repo_info("o", "r") is None
+        assert [e.text for e in events] == ["  ⚠️  Repository not found: o/r"]
+        assert capsys.readouterr().out == ""
+
+    def test_modrinth_client(self, config, capsys):
+        import requests
+
+        from modkeel.modrinth import ModrinthClient
+
+        events = []
+        with patch("modkeel.modrinth.requests.get", side_effect=requests.ConnectionError("x")):
+            assert ModrinthClient(config, events.append).check_modrinth("Mod") is None
+        assert events and all(isinstance(e, Message) for e in events)
+        assert "Checking Modrinth for 'Mod'" in events[0].text
+        assert capsys.readouterr().out == ""
+
+    def test_docker_tester(self, config, capsys):
+        from modkeel.docker import DockerTester
+
+        events = []
+        tester = DockerTester(config, events.append)
+        with patch.object(DockerTester, "check_docker_available", return_value=False):
+            tester.test_mods_in_docker([])
+        assert "Docker is not available" in events[0].text
+        assert capsys.readouterr().out == ""
+
+    def test_compile_mod(self, tmp_path, capsys):
+        from modkeel.build import compile_mod
+
+        events = []
+        ok, *_ = compile_mod(tmp_path, events=events.append)  # no gradle wrapper there
+        assert not ok and events[0].text == "    \U0001f528 Compiling..."
+        assert capsys.readouterr().out == ""
+
+    def test_pipeline_hands_its_emitter_to_its_clients(self, config):
+        events = []
+        p = Pipeline(config, events=events.append)
+        for client in (p.github, p.validator, p.modrinth, p.docker, p.prebuild):
+            assert client.events is p.events

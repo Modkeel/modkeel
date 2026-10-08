@@ -223,7 +223,7 @@ class TestGather:
         calls = []
 
         def fake(name):
-            def check(s, c):
+            def check(s, c, events=None):
                 calls.append(name)
                 return outcomes[name]
             return check

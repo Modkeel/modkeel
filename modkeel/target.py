@@ -228,7 +228,8 @@ def carry_over(previous: Iterable[CompilationResult], config: ModCompilerConfig,
         built_for = r.compiled_mc_version or first_target
         name = r.mod_name or r.repo_url
         evidence = gather(Subject(Path(r.jar_path), target, built_for, name), config,
-                          ["metadata", "linkage", "mixins"], required=["metadata", "linkage"])
+                          ["metadata", "linkage", "mixins"], required=["metadata", "linkage"],
+                          events=events)
         if not evidence.ok:
             events(CarriedOver(name, target, first_target, False, evidence.reason))
             continue

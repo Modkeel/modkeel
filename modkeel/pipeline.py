@@ -100,15 +100,15 @@ class Pipeline:
         # Progress goes out as events (modkeel/core/events.py); the default prints the
         # terminal lines. Most pipeline lines are still plain Messages (see _say).
         self.events = events
-        self.github = GitHubClient(config)
-        self.validator = BranchValidator(self.github, config)
-        self.modrinth = ModrinthClient(config)
-        self.docker = DockerTester(config)
+        self.github = GitHubClient(config, events)
+        self.validator = BranchValidator(self.github, config, events)
+        self.modrinth = ModrinthClient(config, events)
+        self.docker = DockerTester(config, events)
         # getattr: configs built before the symbol check existed (the deprecated shim,
         # partial test doubles) must keep working.
         symbol_check = getattr(config, "symbol_check", True)
         self.prebuild = PreBuildGate(
-            self.github, config=config if symbol_check else None
+            self.github, config=config if symbol_check else None, events=events
         )
         self.results: List[CompilationResult] = []
         self.temp_dir = None
@@ -801,7 +801,8 @@ class Pipeline:
             self._say(f"    ✅ {message}")
 
             success, jar_path, message, fail_type, missing_deps = compile_mod(
-                repo_temp_dir, extra_gradle_args, self.config.mc_version
+                repo_temp_dir, extra_gradle_args, self.config.mc_version,
+                events=self.events,
             )
             if not success:
                 self._say(f"    ❌ {message}")
@@ -925,7 +926,7 @@ class Pipeline:
                 pass1_results[repo_url] = result
 
                 if result.success and result.clone_dir and result.clone_dir.exists():
-                    publish_to_maven_local(result.clone_dir)
+                    publish_to_maven_local(result.clone_dir, events=self.events)
 
                 time.sleep(1)
 
@@ -960,7 +961,8 @@ class Pipeline:
                                 and compile_result.clone_dir
                                 and compile_result.clone_dir.exists()
                             ):
-                                publish_to_maven_local(compile_result.clone_dir)
+                                publish_to_maven_local(compile_result.clone_dir,
+                                                       events=self.events)
                         except Exception as e:
                             self._say(f"    \u26a0\ufe0f  Maven publish failed: {e}")
 
@@ -1005,7 +1007,8 @@ class Pipeline:
                         and result.clone_dir
                         and result.clone_dir.exists()
                     ):
-                        publish_to_maven_local(result.clone_dir, maven_args)
+                        publish_to_maven_local(result.clone_dir, maven_args,
+                                               events=self.events)
 
                     time.sleep(1)
 

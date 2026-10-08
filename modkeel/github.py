@@ -12,6 +12,8 @@ import requests
 
 from modkeel.loaders import get_cross_loader_chain
 from modkeel.models import BranchCandidate, ModCompilerConfig
+from modkeel.core.events import Emitter, Message
+from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
 
@@ -51,10 +53,15 @@ def parse_repo_url(url: str) -> Tuple[str, str, Optional[str]]:
 class GitHubClient:
     """Encapsulates all GitHub API interactions."""
 
-    def __init__(self, config: ModCompilerConfig):
+    def __init__(self, config: ModCompilerConfig, events: Emitter = print_event):
+        self.events = events  # progress (modkeel/core/events.py)
         self.config = config
         self.search_denied = 0
         self._commit_dates: Dict[str, str] = {}  # head SHA -> committer date (ISO)
+
+    def _say(self, text: str) -> None:
+        """A progress line as a Message event (same text it always printed)."""
+        self.events(Message(text))
 
     def get_repo_info(self, owner: str, repo: str) -> Optional[Dict]:
         """Fetch repository information from GitHub API."""
@@ -64,18 +71,18 @@ class GitHubClient:
             response = requests.get(url, headers=self.config.github_headers, timeout=10)
 
             if response.status_code == 404:
-                print(f"  \u26a0\ufe0f  Repository not found: {owner}/{repo}")
+                self._say(f"  \u26a0\ufe0f  Repository not found: {owner}/{repo}")
                 return None
             elif response.status_code == 403:
-                print("  \u26a0\ufe0f  GitHub API rate limit exceeded. Consider using --github-token")
+                self._say("  \u26a0\ufe0f  GitHub API rate limit exceeded. Consider using --github-token")
                 return None
             elif response.status_code != 200:
-                print(f"  \u26a0\ufe0f  GitHub API error: {response.status_code}")
+                self._say(f"  \u26a0\ufe0f  GitHub API error: {response.status_code}")
                 return None
 
             return response.json()
         except requests.RequestException as e:
-            print(f"  \u26a0\ufe0f  Error fetching repo info: {e}")
+            self._say(f"  \u26a0\ufe0f  Error fetching repo info: {e}")
             return None
 
     def search_compatible_repos(self, original_owner: str, original_repo: str,
@@ -84,7 +91,7 @@ class GitHubClient:
         Search for forks and independent ports that might have the target
         Minecraft version.
         """
-        print(f"  \U0001f374 Searching for community forks and ports with MC {self.config.mc_version}...")
+        self._say(f"  \U0001f374 Searching for community forks and ports with MC {self.config.mc_version}...")
         # Searches GitHub refused (403: rate limit or no access), so "no forks found" can be
         # told apart from "GitHub would not answer".
         self.search_denied = 0
@@ -110,20 +117,20 @@ class GitHubClient:
             }
 
             try:
-                print(f"    \U0001f50e Searching: {query[:60]}...")
+                self._say(f"    \U0001f50e Searching: {query[:60]}...")
                 response = requests.get(url, params=params, headers=headers, timeout=15)
 
-                print(f"       Status: {response.status_code}")
+                self._say(f"       Status: {response.status_code}")
 
                 if response.status_code == 403:
                     self.search_denied += 1
-                    print("       \u26a0\ufe0f  Rate limit hit or forbidden")
+                    self._say("       \u26a0\ufe0f  Rate limit hit or forbidden")
                     remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
-                    print(f"       Rate limit remaining: {remaining}")
+                    self._say(f"       Rate limit remaining: {remaining}")
                     continue
 
                 if response.status_code != 200:
-                    print(f"       \u26a0\ufe0f  HTTP {response.status_code}: {response.text[:100]}")
+                    self._say(f"       \u26a0\ufe0f  HTTP {response.status_code}: {response.text[:100]}")
                     continue
 
                 response.raise_for_status()
@@ -131,7 +138,7 @@ class GitHubClient:
 
                 total_count = results.get('total_count', 0)
                 items = results.get('items', [])
-                print(f"       Found: {total_count} total, {len(items)} returned")
+                self._say(f"       Found: {total_count} total, {len(items)} returned")
 
                 for repo_data in items:
                     repo_id = repo_data['id']
@@ -141,48 +148,48 @@ class GitHubClient:
                     repo_name = repo_data.get('full_name', 'unknown')
 
                     if not repo_data.get('fork'):
-                        print(f"       \u26a0\ufe0f  {repo_name}: Not marked as fork")
+                        self._say(f"       \u26a0\ufe0f  {repo_name}: Not marked as fork")
                         continue
 
                     parent = repo_data.get('parent', {})
                     if not parent:
-                        print(f"       \u26a0\ufe0f  {repo_name}: No parent info (accepting anyway)")
+                        self._say(f"       \u26a0\ufe0f  {repo_name}: No parent info (accepting anyway)")
                         fork_repo_name = repo_name.split('/')[-1].lower()
                         orig_lower = original_repo.lower()
                         if fork_repo_name == orig_lower or fork_repo_name.startswith(orig_lower + "-") or fork_repo_name.startswith(orig_lower + "_"):
                             all_forks[repo_id] = repo_data
-                            print(f"       \u2705 Fork: {repo_name}")
+                            self._say(f"       \u2705 Fork: {repo_name}")
                         else:
-                            print(f"       \u274c {repo_name}: Name mismatch (expected {original_repo}*)")
+                            self._say(f"       \u274c {repo_name}: Name mismatch (expected {original_repo}*)")
                         continue
 
                     parent_full_name = parent.get('full_name', '')
                     original_full = f"{original_owner}/{original_repo}"
 
-                    print(f"       \U0001f50d {repo_name}: parent={parent_full_name}")
+                    self._say(f"       \U0001f50d {repo_name}: parent={parent_full_name}")
 
                     if original_full.lower() in parent_full_name.lower():
                         all_forks[repo_id] = repo_data
-                        print(f"       \u2705 Fork: {repo_name}")
+                        self._say(f"       \u2705 Fork: {repo_name}")
                     else:
-                        print(f"       \u274c {repo_name}: Parent mismatch (expected {original_full})")
+                        self._say(f"       \u274c {repo_name}: Parent mismatch (expected {original_full})")
 
                 time.sleep(0.3)
 
             except requests.exceptions.Timeout:
-                print("       \u26a0\ufe0f  Query timed out")
+                self._say("       \u26a0\ufe0f  Query timed out")
                 continue
             except requests.exceptions.RequestException as e:
-                print(f"       \u26a0\ufe0f  Request failed: {str(e)[:100]}")
+                self._say(f"       \u26a0\ufe0f  Request failed: {str(e)[:100]}")
                 continue
             except Exception as e:
-                print(f"       \u26a0\ufe0f  Unexpected error: {str(e)[:100]}")
+                self._say(f"       \u26a0\ufe0f  Unexpected error: {str(e)[:100]}")
                 continue
 
-        print(f"    \u2139\ufe0f  Phase 1 found {len(all_forks)} unique forks")
+        self._say(f"    \u2139\ufe0f  Phase 1 found {len(all_forks)} unique forks")
 
         # Phase 2: Search for independent ports
-        print("    \U0001f50e Phase 2: Searching independent ports...")
+        self._say("    \U0001f50e Phase 2: Searching independent ports...")
         independent_searches = [
             f'"{original_repo}" {self.config.mc_version} {self.config.loader}',
             f'"{original_repo}" {self.config.loader} port',
@@ -210,22 +217,22 @@ class GitHubClient:
             }
 
             try:
-                print(f"    \U0001f50e Searching: {query[:60]}...")
+                self._say(f"    \U0001f50e Searching: {query[:60]}...")
                 response = requests.get(url, params=params, headers=headers, timeout=15)
 
                 if response.status_code == 403:
                     self.search_denied += 1
                     remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
-                    print(f"       \u26a0\ufe0f  Rate limit hit (remaining: {remaining})")
+                    self._say(f"       \u26a0\ufe0f  Rate limit hit (remaining: {remaining})")
                     continue
 
                 if response.status_code != 200:
-                    print(f"       \u26a0\ufe0f  HTTP {response.status_code}: {response.text[:100]}")
+                    self._say(f"       \u26a0\ufe0f  HTTP {response.status_code}: {response.text[:100]}")
                     continue
 
                 results = response.json()
                 items = results.get('items', [])
-                print(f"       Found: {results.get('total_count', 0)} total, {len(items)} returned")
+                self._say(f"       Found: {results.get('total_count', 0)} total, {len(items)} returned")
 
                 for repo_data in items:
                     repo_id = repo_data['id']
@@ -259,26 +266,26 @@ class GitHubClient:
                         port_owner, port_repo, default_branch, 'gradle.properties'
                     )
                     if gradle_props is None:
-                        print(f"       \u274c {repo_full_name}: No gradle.properties found")
+                        self._say(f"       \u274c {repo_full_name}: No gradle.properties found")
                         continue
 
                     repo_data['_is_independent_port'] = True
                     independent_repos[repo_id] = repo_data
-                    print(f"       \u2705 Independent: {repo_full_name}")
+                    self._say(f"       \u2705 Independent: {repo_full_name}")
 
                 time.sleep(0.3)
 
             except requests.exceptions.Timeout:
-                print("       \u26a0\ufe0f  Query timed out")
+                self._say("       \u26a0\ufe0f  Query timed out")
                 continue
             except requests.exceptions.RequestException as e:
-                print(f"       \u26a0\ufe0f  Request failed: {str(e)[:100]}")
+                self._say(f"       \u26a0\ufe0f  Request failed: {str(e)[:100]}")
                 continue
             except Exception as e:
-                print(f"       \u26a0\ufe0f  Unexpected error: {str(e)[:100]}")
+                self._say(f"       \u26a0\ufe0f  Unexpected error: {str(e)[:100]}")
                 continue
 
-        print(f"    \u2139\ufe0f  Phase 2 found {len(independent_repos)} independent ports")
+        self._say(f"    \u2139\ufe0f  Phase 2 found {len(independent_repos)} independent ports")
 
         # Merge all candidates
         all_candidates = {}
@@ -286,10 +293,10 @@ class GitHubClient:
         all_candidates.update(independent_repos)
 
         if not all_candidates:
-            print("    \u2139\ufe0f  No forks or independent ports found")
+            self._say("    \u2139\ufe0f  No forks or independent ports found")
             return []
 
-        print(f"    \u2139\ufe0f  Total: {len(all_candidates)} candidates, analyzing...")
+        self._say(f"    \u2139\ufe0f  Total: {len(all_candidates)} candidates, analyzing...")
 
         fork_candidates = []
 
@@ -339,20 +346,20 @@ class GitHubClient:
                 trust_indicator = "\U0001f512" if trust_analysis['trust_score'] >= 70 else "\u26a0\ufe0f" if trust_analysis['trust_score'] >= 50 else "\U0001f6a8"
                 kind = "Independent" if is_independent else "Fork"
 
-                print(f"    \U0001f4e6 {fork_full_name} [{kind}] {trust_indicator}")
-                print(f"       Score: {scored['score']}, Trust: {trust_analysis['trust_score']}%, {', '.join(scored['signals'][:3])}")
+                self._say(f"    \U0001f4e6 {fork_full_name} [{kind}] {trust_indicator}")
+                self._say(f"       Score: {scored['score']}, Trust: {trust_analysis['trust_score']}%, {', '.join(scored['signals'][:3])}")
 
                 if trust_analysis['warnings']:
                     for warning in trust_analysis['warnings'][:2]:
-                        print(f"       \u26a0\ufe0f  {warning}")
+                        self._say(f"       \u26a0\ufe0f  {warning}")
             elif trust_analysis['trust_score'] < 40:
-                print(f"    \U0001f6a8 {fork_full_name} - REJECTED (Trust: {trust_analysis['trust_score']}%)")
+                self._say(f"    \U0001f6a8 {fork_full_name} - REJECTED (Trust: {trust_analysis['trust_score']}%)")
                 if trust_analysis['warnings']:
-                    print(f"       \u26a0\ufe0f  {trust_analysis['warnings'][0]}")
+                    self._say(f"       \u26a0\ufe0f  {trust_analysis['warnings'][0]}")
 
         fork_candidates.sort(key=lambda x: x['score'], reverse=True)
 
-        print(f"  \u2139\ufe0f  {len(fork_candidates)} candidates match criteria")
+        self._say(f"  \u2139\ufe0f  {len(fork_candidates)} candidates match criteria")
 
         return fork_candidates[:5]
 
@@ -651,7 +658,7 @@ class GitHubClient:
                 response = requests.get(url, headers=self.config.github_headers,
                                         params=params, timeout=10)
                 if response.status_code != 200:
-                    print(f"  \u26a0\ufe0f  Could not fetch branches: HTTP {response.status_code}")
+                    self._say(f"  \u26a0\ufe0f  Could not fetch branches: HTTP {response.status_code}")
                     return branches
                 for branch in response.json():
                     branches.append(BranchCandidate(
@@ -665,7 +672,7 @@ class GitHubClient:
             return branches
 
         except requests.RequestException as e:
-            print(f"  \u26a0\ufe0f  Error fetching branches: {e}")
+            self._say(f"  \u26a0\ufe0f  Error fetching branches: {e}")
             return branches
 
     def fill_commit_dates(self, owner: str, repo: str, branches: List[BranchCandidate]) -> None:

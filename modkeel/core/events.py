@@ -58,6 +58,15 @@ class Downloading(Event):
 
 
 @dataclass(frozen=True)
+class Progress(Event):
+    """Bytes of a long download so far (the Docker test's loader installer)."""
+
+    kind: ClassVar[str] = "progress"
+    done: int
+    total: int
+
+
+@dataclass(frozen=True)
 class Saved(Event):
     """A JAR was written: to the output directory, or into the instance (installed)."""
 

@@ -12,6 +12,8 @@ from modkeel.constants import MODRINTH_USER_AGENT
 from modkeel.loaders import get_bridge_mods, get_cross_loader_chain
 from modkeel.models import ModCompilerConfig
 from modkeel.utils import fuzzy_score
+from modkeel.core.events import Emitter, Message
+from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
 
@@ -35,12 +37,17 @@ def pick_version(versions: List[Dict]) -> Dict:
 class ModrinthClient:
     """Encapsulates Modrinth API interactions."""
 
-    def __init__(self, config: ModCompilerConfig):
+    def __init__(self, config: ModCompilerConfig, events: Emitter = print_event):
+        self.events = events  # progress (modkeel/core/events.py)
         self.config = config
         # Why the last check_modrinth() returned None when Modrinth could not answer (network,
         # HTTP error, timeout); None when it answered. Lets callers tell "not on Modrinth" from
         # "Modrinth unreachable" without changing the Optional[Dict] return the pipeline uses.
         self.last_error: Optional[str] = None
+
+    def _say(self, text: str) -> None:
+        """A progress line as a Message event (same text it always printed)."""
+        self.events(Message(text))
 
     def is_cross_loader_available(self) -> bool:
         """Check if cross-loader bridge mods are available on Modrinth."""
@@ -82,10 +89,10 @@ class ModrinthClient:
 
         self._cross_loader_available = available
         if not available:
-            print(f"  \u26a0\ufe0f  Cross-loader unavailable: bridge mods "
+            self._say(f"  \u26a0\ufe0f  Cross-loader unavailable: bridge mods "
                   f"not found for MC {mc_version}")
         else:
-            print(f"  \u2705 Cross-loader available for MC {mc_version}")
+            self._say(f"  \u2705 Cross-loader available for MC {mc_version}")
         return available
 
     def check_modrinth(self, mod_name: str,
@@ -113,7 +120,7 @@ class ModrinthClient:
         self.last_error = None
 
         try:
-            print(f"  \U0001f50d Checking Modrinth for '{mod_name}' "
+            self._say(f"  \U0001f50d Checking Modrinth for '{mod_name}' "
                   f"({loader} + MC {mc_version})...")
             resp = requests.get(
                 f"{base_url}/search",
@@ -123,7 +130,7 @@ class ModrinthClient:
             )
 
             if resp.status_code != 200:
-                print(f"    \u26a0\ufe0f  Modrinth search failed: HTTP {resp.status_code}")
+                self._say(f"    \u26a0\ufe0f  Modrinth search failed: HTTP {resp.status_code}")
                 self.last_error = f"HTTP {resp.status_code}"
                 return None
 
@@ -131,7 +138,7 @@ class ModrinthClient:
             hits = data.get("hits", [])
 
             if not hits:
-                print("    \u2139\ufe0f  Not found on Modrinth")
+                self._say("    \u2139\ufe0f  Not found on Modrinth")
                 return None
 
             if source_repo:
@@ -140,7 +147,7 @@ class ModrinthClient:
                 if exact:
                     hits = exact[:1]
                 if not hits:
-                    print("    ℹ️  Modrinth results belong to other repositories")
+                    self._say("    ℹ️  Modrinth results belong to other repositories")
                     return None
 
             best = None
@@ -161,13 +168,13 @@ class ModrinthClient:
                 best = None
 
             if not best:
-                print(f"    \u2139\ufe0f  Modrinth results don't match '{mod_name}'")
+                self._say(f"    \u2139\ufe0f  Modrinth results don't match '{mod_name}'")
                 return None
 
             slug = best["slug"]
             title = best["title"]
             downloads = best.get("downloads", 0)
-            print(f"    \u2705 Found on Modrinth: {title} ({slug}) "
+            self._say(f"    \u2705 Found on Modrinth: {title} ({slug}) "
                   f"- {downloads:,} downloads")
 
             ver_resp = requests.get(
@@ -181,12 +188,12 @@ class ModrinthClient:
             )
 
             if ver_resp.status_code != 200:
-                print("    \u26a0\ufe0f  Modrinth version lookup failed: "
+                self._say("    \u26a0\ufe0f  Modrinth version lookup failed: "
                       f"HTTP {ver_resp.status_code}")
                 self.last_error = f"HTTP {ver_resp.status_code}"
                 return None
             if not ver_resp.json():
-                print(f"    \u26a0\ufe0f  No version files for {loader} + MC {mc_version}")
+                self._say(f"    \u26a0\ufe0f  No version files for {loader} + MC {mc_version}")
                 return None
 
             version_data = pick_version(ver_resp.json())
@@ -220,17 +227,17 @@ class ModrinthClient:
             }
 
             size_mb = result["file_size"] / (1024 * 1024)
-            print(f"    \U0001f4e6 Version: {result['version_number']} "
+            self._say(f"    \U0001f4e6 Version: {result['version_number']} "
                   f"({result['version_type']}) - {size_mb:.1f} MB")
 
             return result
 
         except requests.exceptions.Timeout:
-            print("    \u26a0\ufe0f  Modrinth search timed out")
+            self._say("    \u26a0\ufe0f  Modrinth search timed out")
             self.last_error = "timed out"
             return None
         except Exception as e:
-            print(f"    \u26a0\ufe0f  Modrinth search error: {e}")
+            self._say(f"    \u26a0\ufe0f  Modrinth search error: {e}")
             self.last_error = _short_error(e)
             return None
 
@@ -320,7 +327,7 @@ class ModrinthClient:
                     headers=headers, timeout=15,
                 )
                 if not vr.ok or not vr.json():
-                    print(f"    \u26a0\ufe0f  Required dependency {title} has no "
+                    self._say(f"    \u26a0\ufe0f  Required dependency {title} has no "
                           f"{loader} build for MC {mc}: the mod won't load without it")
                     continue
 
@@ -338,7 +345,7 @@ class ModrinthClient:
                     files[0],
                 )
 
-                print(f"    \U0001f4e6 Dependency: {title} "
+                self._say(f"    \U0001f4e6 Dependency: {title} "
                       f"v{vdata['version_number']}")
                 dl = requests.get(
                     primary["url"], headers=headers, timeout=120,
@@ -348,7 +355,7 @@ class ModrinthClient:
                 dest = self.config.output_dir / fname
                 dest.write_bytes(dl.content)
                 saved.append(dest)
-                print(f"    \U0001f4be Saved: {dest}")
+                self._say(f"    \U0001f4be Saved: {dest}")
 
                 if self.config.mods_path:
                     (self.config.mods_path / fname).write_bytes(
@@ -409,19 +416,19 @@ class ModrinthClient:
                 download_url = primary['url']
                 filename = primary['filename']
 
-                print(f"    \U0001f4e5 Downloading {slug}: {filename} "
+                self._say(f"    \U0001f4e5 Downloading {slug}: {filename} "
                       f"(MC {try_version})...")
                 dl_resp = requests.get(download_url, timeout=120)
                 dl_resp.raise_for_status()
 
                 dest = self.config.output_dir / filename
                 dest.write_bytes(dl_resp.content)
-                print(f"    \U0001f4be Saved: {dest}")
+                self._say(f"    \U0001f4be Saved: {dest}")
 
                 if self.config.mods_path:
                     instance_dest = self.config.mods_path / filename
                     instance_dest.write_bytes(dl_resp.content)
-                    print(f"    \U0001f4be Installed: {instance_dest}")
+                    self._say(f"    \U0001f4be Installed: {instance_dest}")
 
                 return dest
 
@@ -430,9 +437,9 @@ class ModrinthClient:
                              slug, try_version, e)
                 continue
 
-        print(f"    \u26a0\ufe0f  Could not download {slug} from Modrinth for "
+        self._say(f"    \u26a0\ufe0f  Could not download {slug} from Modrinth for "
               f"MC {mc_version}")
-        print(f"       Manual download: https://modrinth.com/mod/{slug}")
+        self._say(f"       Manual download: https://modrinth.com/mod/{slug}")
         return None
 
     # ------------------------------------------------------------------
