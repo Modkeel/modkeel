@@ -129,6 +129,7 @@ def search_command(
     is_interactive = not no_prompt and console.is_terminal
     question = {
         "official": "Download it?",
+        "curseforge": "Download it from CurseForge?",
         "older_official": "Download and verify them (nearest first)?",
         "fork": "Compile the best fork?",
     }.get(strategy, "Fetch it?")
@@ -193,6 +194,19 @@ def _print_candidates(strategy: str, resolution, mc_version: str) -> None:
                 if d.get("dependency_type") == "required"]
         if deps:
             table.add_row("Dependencies", str(len(deps)))
+        console.print(table)
+    elif strategy == "curseforge":
+        cf_file, cf_mod = candidates[0].data["file"], candidates[0].data["mod"]
+        table = Table(title=f"CurseForge build for MC {mc_version}")
+        table.add_column("Field", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Version", escape(cf_file.display))
+        table.add_row("Type", cf_file.type)
+        table.add_row("File", escape(cf_file.name))
+        if cf_file.requires:
+            table.add_row("Dependencies", str(len(cf_file.requires)))
+        if not cf_file.url:
+            table.add_row("Download", f"only from CurseForge: {escape(cf_mod.url or '')}")
         console.print(table)
     elif strategy == "older_official":
         table = Table(title=f"Older official builds to verify on MC {mc_version}")

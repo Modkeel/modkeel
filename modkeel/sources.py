@@ -4,6 +4,8 @@ See modkeel/resolve.py for the contract. SOURCE_ORDER is the single place that d
 is tried first; each strategy only knows how to find and deliver its own kind of JAR:
 
   official        the mod's own published build for the exact target
+  curseforge      the author's build for the exact target on CurseForge, through Modkeel's
+                  service (modkeel/curseforge.py); skipped while that service is off
   official_source the author's own branch for the target, prebuilt or compiled (compile
                   only: it needs the repo; implemented in modkeel/pipeline.py)
   older_official  the mod's own build for an older Minecraft version that still runs on the
@@ -26,6 +28,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 
+import re
+
 import requests
 
 from modkeel.build import validate_jar
@@ -35,6 +39,7 @@ from modkeel.core.events import (
     Downloading,
     Emitter,
     ForkChosen,
+    Message,
     RangeRelaxed,
     Saved,
 )
@@ -42,7 +47,7 @@ from modkeel.core.text import print_event
 from modkeel.evidence import Evidence, Subject, gather
 from modkeel.loaders import get_profile
 from modkeel.models import ModCompilerConfig
-from modkeel.modrinth import ModrinthClient, pick_version
+from modkeel.modrinth import ModrinthClient, pick_version, same_mod_name
 from modkeel.resolve import (
     Candidate,
     Delivered,
@@ -57,10 +62,12 @@ from modkeel.version import compare_versions
 # validate_jar's message when a JAR's declared Minecraft range excludes the target
 RANGE_REFUSAL = "JAR declares incompatible MC version"
 
-SOURCE_ORDER = ["official", "official_source", "older_official", "fork", "relaxed_official"]
+SOURCE_ORDER = ["official", "curseforge", "official_source", "older_official", "fork",
+                "relaxed_official"]
 
 STRATEGY_LABELS = {
     "official": "Official build",
+    "curseforge": "CurseForge build",
     "official_source": "Author's branch",
     "older_official": "Older official build",
     "fork": "Community fork",
@@ -231,6 +238,115 @@ class OfficialSource(SourceStrategy):
             mod_version=version.get("version_number", "unknown"),
             evidence=["published"], dependencies=deps or [],
         )
+
+
+# ---------------------------------------------------------------------------
+# curseforge
+# ---------------------------------------------------------------------------
+
+def _cf_client(ctx: ResolveContext):
+    from modkeel.curseforge import default_client
+
+    return ctx.curseforge or default_client()
+
+
+def _cf_lookup(mod: ModRef) -> Optional[Tuple[str, Optional[str]]]:
+    """(what to ask CurseForge for, name it must agree with). A project id known exactly
+    needs no check; a slug borrowed from Modrinth or the query might be another mod there."""
+    if mod.curseforge:
+        return str(mod.curseforge.id), None
+    if mod.project:
+        return mod.project["slug"], mod.project.get("title") or mod.project["slug"]
+    slug = re.sub(r"[^a-z0-9]+", "-", mod.query.lower()).strip("-")
+    return (slug, mod.query) if slug else None
+
+
+def _pick_cf(files: List) -> object:
+    """The newest release, else the newest file of any type (files come newest first)."""
+    return next((f for f in files if f.type == "release"), files[0])
+
+
+class CurseForgeSource(SourceStrategy):
+    """The author's own build for the exact target, published on CurseForge but not on
+    Modrinth. Asked through Modkeel's service, which holds the API key; while the service
+    is off the strategy is skipped and leaves no trail step."""
+
+    name = "curseforge"
+    label = "CurseForge build"
+    cheap = True
+
+    def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
+        client = _cf_client(ctx)
+        lookup = _cf_lookup(mod) if client.available else None
+        if lookup is None:
+            return Found(skipped=True)
+        ref, must_match = lookup
+        project = client.files(ref, ctx.mc_version, ctx.loader)
+        if project is None:
+            if not client.available:
+                return Found(skipped=True)
+            return Found(note=f"CurseForge unavailable ({client.last_error})")
+        if project.mod is None:
+            return Found(note="Not found on CurseForge")
+        if must_match and not same_mod_name(must_match, project.mod.name):
+            return Found(note=f"CurseForge's {ref} is another mod ({project.mod.name})")
+        mod.curseforge = project.mod
+        if not mod.source_repo and project.mod.github_repo:
+            mod.source_repo = project.mod.github_repo
+        if not project.files:
+            return Found(note=f"{project.mod.name} has no {_display(ctx.loader)} build for "
+                              f"MC {ctx.mc_version} on CurseForge")
+        chosen = _pick_cf(project.files)
+        return Found([Candidate(label=f"{chosen.display} ({chosen.type})",
+                                data={"file": chosen, "mod": project.mod})])
+
+    def check(self, candidate: Candidate, mod: ModRef,
+              ctx: ResolveContext) -> Optional[Rejected]:
+        """The author's build for the exact target is its own evidence, if we may fetch it."""
+        return _locked(candidate)
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        import hashlib
+
+        locked = _locked(candidate)
+        if locked:
+            return locked
+        cf_file = candidate.data["file"]
+        dest = ctx.config.output_dir / cf_file.name
+        ctx.events(Downloading(cf_file.name))
+        try:
+            _download(cf_file.url, dest)
+        except requests.RequestException as e:
+            return Rejected(f"download failed ({e})")
+        if cf_file.sha1 and hashlib.sha1(dest.read_bytes()).hexdigest() != cf_file.sha1.lower():
+            dest.unlink(missing_ok=True)
+            return Rejected("the download does not match CurseForge's SHA-1")
+        _install(dest, ctx.config, ctx.events)
+        self._report_dependencies(cf_file, mod, ctx)
+        return Delivered(jar_path=dest, mod_name=mod.title, mod_version=cf_file.display,
+                         evidence=["published"])
+
+    @staticmethod
+    def _report_dependencies(cf_file, mod: ModRef, ctx: ResolveContext) -> None:
+        """Required CurseForge projects are named, not fetched: in a pack they are usually
+        its own JARs already, and fetching them here could add a second copy."""
+        if not cf_file.requires:
+            return
+        client = _cf_client(ctx)
+        names = []
+        for project_id in cf_file.requires:
+            found = client.files(str(project_id), ctx.mc_version, ctx.loader)
+            names.append(found.mod.name if found and found.mod else f"project {project_id}")
+        ctx.events(Message(f"  {mod.title} also needs: {', '.join(names)} (CurseForge)"))
+
+
+def _locked(candidate: Candidate) -> Optional[Rejected]:
+    """A file its author lets only CurseForge serve: the player downloads it there."""
+    if candidate.data["file"].url:
+        return None
+    page = candidate.data["mod"].url or "its CurseForge page"
+    return Rejected(f"its author allows downloads only from CurseForge: {page}")
 
 
 # ---------------------------------------------------------------------------
@@ -590,8 +706,8 @@ class ForkSource(SourceStrategy):
         )
 
 
-STRATEGIES = {cls.name: cls for cls in (OfficialSource, OlderOfficialSource, ForkSource,
-                                         RelaxedOfficialSource)}
+STRATEGIES = {cls.name: cls for cls in (OfficialSource, CurseForgeSource, OlderOfficialSource,
+                                         ForkSource, RelaxedOfficialSource)}
 
 
 def default_strategies() -> List[SourceStrategy]:

@@ -174,11 +174,11 @@ class TestResolver:
         assert res.delivered is booted
 
     def test_default_order(self):
-        assert SOURCE_ORDER == ["official", "official_source", "older_official", "fork",
-                                "relaxed_official"]
+        assert SOURCE_ORDER == ["official", "curseforge", "official_source", "older_official",
+                                "fork", "relaxed_official"]
         # get/search know no repo branches: official_source is skipped, order kept
         assert [s.name for s in default_strategies()] == [
-            "official", "older_official", "fork", "relaxed_official"]
+            "official", "curseforge", "older_official", "fork", "relaxed_official"]
 
     def test_unknown_strategy_name_is_a_bug(self):
         with pytest.raises(KeyError):
@@ -608,5 +608,5 @@ class TestWouldResolve:
 
     def test_which_strategies_are_cheap(self):
         from modkeel.sources import default_strategies
-        assert [s.name for s in default_strategies() if s.cheap] == ["official",
-                                                                      "older_official"]
+        assert [s.name for s in default_strategies() if s.cheap] == [
+            "official", "curseforge", "older_official"]

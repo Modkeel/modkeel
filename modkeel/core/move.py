@@ -7,10 +7,14 @@ target out (IDEA-023 "your instances"; the engine's pack entry point, IDEA-028).
    names the project and version with nothing to guess. For a JAR Modrinth does not know,
    the launcher's own record of what it installed is read (instances.launcher_records):
    a Modrinth project id there is exact too ("launcher"); a CurseForge project gives its
-   slug and name to try on Modrinth. Then the name in the JAR's metadata ("name": shown as
-   a guess), else the mod is left unknown.
+   slug and name to try on Modrinth. JARs left without either are looked up on CurseForge
+   by fingerprint in one request ("fingerprint", exact; modkeel/curseforge.py, only while
+   Modkeel's CurseForge service is on). Then the name in the JAR's metadata ("name": shown
+   as a guess), else the mod is left unknown.
 2. Each identified mod goes through the sources for the target (the same Resolver as `get`:
-   official build, older build that still runs, community fork, relaxed range).
+   official build, its CurseForge build, older build that still runs, community fork,
+   relaxed range). A mod known only on CurseForge goes through them too, with its CurseForge
+   project; the nearest-version proposal (step 4) counts only mods known on Modrinth.
 3. A JAR nobody can resolve (not on Modrinth, or no build found) is judged as it is: if the
    player's own file passes the static checks on the target (metadata, linkage, mixins), it
    is reused, since that copy runs there too.
@@ -89,6 +93,7 @@ class _Entry:
     mod: MovedMod
     project: Optional[Dict] = None
     record: object = None                 # instances.LauncherRecord, when Modrinth lacks the hash
+    curseforge: object = None             # curseforge.CfMod, when its CurseForge project is known
 
 
 def _as_hit(project: Dict) -> Dict:
@@ -96,9 +101,23 @@ def _as_hit(project: Dict) -> Dict:
     return {**project, "project_id": project.get("project_id") or project.get("id")}
 
 
-def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_Entry]:
-    """Every JAR in the folder with who it is (step 1 above)."""
-    from modkeel.instances import launcher_records
+def _cf_identity(record, match) -> object:
+    """The JAR's CurseForge project: the fingerprint match's, else the launcher's record."""
+    from modkeel.curseforge import CfMod
+
+    if match is not None:
+        return match.mod
+    if record is not None and record.source == "curseforge" and record.project_id.isdigit():
+        return CfMod(int(record.project_id), record.slug or "", record.name or "")
+    return None
+
+
+def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event,
+              curseforge=None) -> List[_Entry]:
+    """Every JAR in the folder with who it is (step 1 above). `curseforge` defaults to the
+    run's shared client (curseforge.default_client)."""
+    from modkeel.curseforge import default_client
+    from modkeel.instances import LauncherRecord, launcher_records
     from modkeel.scanner import _scan_single_jar, compute_sha1
     from modkeel.sources import identify_mod
 
@@ -108,6 +127,12 @@ def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_
     projects = modrinth.fetch_projects([v["project_id"] for v in by_hash.values()])
     records = launcher_records(Path(mods_dir), [j.name for j in jars
                                                 if hashes[j] not in by_hash])
+    # what neither Modrinth nor the launcher names: CurseForge by fingerprint, one request
+    by_print = (curseforge or default_client()).match(
+        [j for j in jars if hashes[j] not in by_hash and j.name not in records])
+    for jar, match in by_print.items():
+        records[jar.name] = LauncherRecord("curseforge", str(match.mod.id), match.mod.name,
+                                           match.mod.slug)
     entries = []
     for jar in jars:
         scanned = _scan_single_jar(jar, hashes[jar])
@@ -121,7 +146,10 @@ def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_
             record = records.get(jar.name)
             if not scanned and record and record.name:
                 name = record.name
-            entry = _Entry(jar, scanned, MovedMod(jar.name, name, None), record=record)
+            cf_mod = _cf_identity(record, by_print.get(jar))
+            how = "fingerprint" if jar in by_print else "launcher" if cf_mod else None
+            entry = _Entry(jar, scanned, MovedMod(jar.name, name, how), record=record,
+                           curseforge=cf_mod)
             found = _by_launcher(record, scanned, modrinth) if record else None
             if not found and scanned:
                 full = _by_metadata(scanned, modrinth, identify_mod)
@@ -147,7 +175,7 @@ def _by_launcher(record, scanned, modrinth) -> Optional[Tuple[Dict, str]]:
     project ("launcher", exact). A CurseForge project is tried on Modrinth by its slug there,
     kept only if the names agree too and it is a mod for the JAR's loader (a guess, "name");
     most mods use the same slug on both sites."""
-    from modkeel.modrinth import _norm_name
+    from modkeel.modrinth import same_mod_name
 
     if record.source == "modrinth":
         project = modrinth.fetch_project(record.project_id)
@@ -157,9 +185,7 @@ def _by_launcher(record, scanned, modrinth) -> Optional[Tuple[Dict, str]]:
     project = modrinth.fetch_project(record.slug)
     if not project or not _for_loader(project, scanned):
         return None
-    ours, theirs = _norm_name(record.name), _norm_name(project.get("title", ""))
-    # "Just Enough Items (JEI)" on CurseForge is "Just Enough Items" on Modrinth
-    if len(theirs) >= 4 and (ours in theirs or theirs in ours):
+    if same_mod_name(record.name, project.get("title", "")):
         return project, "name"
     return None
 
@@ -272,9 +298,11 @@ def _run(entries: List[_Entry], request: MoveRequest, target: str, loader: str,
     for entry in entries:
         check_cancel(cancelled)
         mod = MovedMod(entry.mod.file, entry.mod.name, entry.mod.identified_by, entry.mod.slug)
-        if entry.project is not None:
-            ref = ModRef(query=mod.name, project=entry.project,
-                         source_repo=ModrinthClient.source_repo_of(entry.project))
+        if entry.project is not None or entry.curseforge is not None:
+            repo = (ModrinthClient.source_repo_of(entry.project) if entry.project is not None
+                    else entry.curseforge.github_repo)
+            ref = ModRef(query=mod.name, project=entry.project, curseforge=entry.curseforge,
+                         source_repo=repo)
             ctx = ResolveContext(config=config, modrinth=client, github_token=token_on_demand,
                                  make_config=make_config, events=events)
             resolution = Resolver().resolve(ref, ctx)
@@ -284,11 +312,21 @@ def _run(entries: List[_Entry], request: MoveRequest, target: str, loader: str,
             if resolution.delivered:
                 mod.status, mod.delivered = "delivered", _delivery(resolution.delivered)
             else:
-                mod.detail = resolution.trail[-1].detail if resolution.trail else "no build"
+                mod.detail = _missing_detail(entry, resolution.trail)
         if mod.status != "delivered":
             _reuse_if_it_runs(entry, mod, target, config, out, events)
         result.mods.append(mod)
     return result
+
+
+def _missing_detail(entry: _Entry, trail) -> str:
+    """Why no build was found: the last strategy's word, except for a mod known only on
+    CurseForge, where the Modrinth strategies have nothing to say (they need its Modrinth
+    project) and the CurseForge one does, or there is no CurseForge service to ask."""
+    if entry.project is None and entry.curseforge is not None:
+        said = [s.detail for s in trail if s.strategy == "curseforge"]
+        return said[-1] if said else "on CurseForge only, not on Modrinth"
+    return trail[-1].detail if trail else "no build"
 
 
 def _reuse_if_it_runs(entry: _Entry, mod: MovedMod, target: str, config: ModCompilerConfig,
@@ -301,11 +339,12 @@ def _reuse_if_it_runs(entry: _Entry, mod: MovedMod, target: str, config: ModComp
                       ["metadata", "linkage", "mixins"], required=["metadata", "linkage"],
                       events=events)
     if not evidence.ok:
-        if entry.project is None:
-            where = ("on CurseForge only, not on Modrinth"
-                     if getattr(entry.record, "source", None) == "curseforge" else "not on Modrinth")
+        if entry.curseforge is not None and entry.project is None:
+            # known exactly on CurseForge: what its build search said, then why ours fails
+            mod.detail = f"{mod.detail}; your JAR does not run there: {evidence.reason}"
+        elif entry.project is None:
             mod.status = "unknown"
-            mod.detail = f"{where}, and your JAR does not run there: {evidence.reason}"
+            mod.detail = f"not on Modrinth, and your JAR does not run there: {evidence.reason}"
         return
     dest = out / entry.jar.name
     shutil.copy2(entry.jar, dest)

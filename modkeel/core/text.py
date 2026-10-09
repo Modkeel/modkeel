@@ -74,11 +74,13 @@ def render_text(event: Event) -> Optional[str]:
     if isinstance(event, PackScanned):
         exact = sum(1 for m in event.mods if m[3] == "hash")
         launcher = sum(1 for m in event.mods if m[3] == "launcher")
+        on_cf = sum(1 for m in event.mods if m[3] == "fingerprint")
         guessed = sum(1 for m in event.mods if m[3] == "name")
-        unknown = len(event.mods) - exact - launcher - guessed
+        unknown = len(event.mods) - exact - launcher - on_cf - guessed
         by_launcher = f"{launcher} by the launcher's records, " if launcher else ""
+        by_cf = f"{on_cf} by CurseForge's fingerprint, " if on_cf else ""
         return (f"\n{len(event.mods)} JARs in {event.folder}: {exact} identified by their hash, "
-                f"{by_launcher}{guessed} by name, {unknown} unknown")
+                f"{by_launcher}{by_cf}{guessed} by name, {unknown} unknown")
     if isinstance(event, GitHubCode):
         return (f"\nSign in with GitHub: open {event.url} and enter the code {event.code}"
                 f" (valid {event.minutes} minutes)")

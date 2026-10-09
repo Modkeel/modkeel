@@ -39,10 +39,15 @@ class ModRef:
     source_repo: Optional[str] = None     # "owner/repo" on GitHub, from the project
     related: List[Dict] = field(default_factory=list)  # near misses: addons, ports...
     lookup_error: Optional[str] = None    # why Modrinth could not be asked, if it could not
+    # CurseForge project (curseforge.CfMod), when known exactly: from a JAR's fingerprint or
+    # the launcher's record, or confirmed by the curseforge strategy
+    curseforge: Optional[Any] = None
 
     @property
     def title(self) -> str:
-        return self.project["title"] if self.project else self.query
+        if self.project:
+            return self.project["title"]
+        return self.curseforge.name if self.curseforge else self.query
 
 
 @dataclass
@@ -65,6 +70,8 @@ class ResolveContext:
     # Where strategies report progress (modkeel/core/events.py); the default prints the
     # terminal lines, a front end passes its own.
     events: Emitter = print_event
+    # curseforge.CurseForgeClient; None: the run's shared one (curseforge.default_client)
+    curseforge: Optional[Any] = None
 
     def config_with_token(self, token: Optional[str]) -> ModCompilerConfig:
         return self.make_config(token) if self.make_config else self.config
@@ -101,6 +108,9 @@ class Found:
     # Strategy-specific detail for callers that need more than the note (the pipeline's
     # CompilationResult for a failed plan). Collected in Resolution.payloads.
     payload: Any = None
+    # The strategy cannot run in this setup at all (its service is off): it leaves no step in
+    # the trail, so a feature that is not there yet adds no line to every run.
+    skipped: bool = False
 
 
 @dataclass
@@ -240,7 +250,8 @@ class Resolver:
             if found.payload is not None:
                 resolution.payloads.append(found.payload)
             if not found.candidates:
-                _record(resolution, Step(strategy.name, False, found.note), mod, ctx)
+                if not found.skipped:
+                    _record(resolution, Step(strategy.name, False, found.note), mod, ctx)
                 continue
             if not deliver:
                 resolution.pending = (index, found.candidates, strategy.name)
