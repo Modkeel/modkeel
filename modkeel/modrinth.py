@@ -3,8 +3,10 @@
 import json
 import logging
 import re
+import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -16,6 +18,54 @@ from modkeel.core.events import Emitter, Message, Saved
 from modkeel.core.text import print_event
 
 logger = logging.getLogger("modkeel")
+
+
+# Modrinth limits each IP to 300 API requests a minute. Every answer carries
+# X-Ratelimit-Remaining (requests left in the window) and X-Ratelimit-Reset (seconds until it
+# resets); over the limit it answers 429. One player stays far below it, but a large pack (or
+# several modkeel runs behind one IP) can reach it, and a 429 used to read as "not on
+# Modrinth". modrinth_call() waits for the window instead: before a call when the last answer
+# said none were left, and after a 429, retried a couple of times. Waits are capped, since the
+# window is a minute long; CDN downloads (cdn.modrinth.com) are not counted and skip this.
+RATE_LIMIT_MAX_WAIT = 60.0
+RATE_LIMIT_RETRIES = 2
+_paused_until = 0.0                       # time.monotonic() when the window reopens
+
+
+def _header_seconds(resp, name: str) -> Optional[float]:
+    """A numeric header of a real response, or None (missing, malformed, or a test double)."""
+    headers = getattr(resp, "headers", None)
+    value = headers.get(name) if isinstance(headers, Mapping) else None
+    try:
+        return max(0.0, float(value)) if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+def modrinth_call(send: Callable, url: str, *, sleep: Optional[Callable[[float], None]] = None,
+                  clock: Optional[Callable[[], float]] = None, **kwargs):
+    """send(url, **kwargs) within Modrinth's rate limit; returns the last response.
+
+    `send` is the caller's own requests.get/post, looked up when called, so tests that patch
+    `modkeel.<module>.requests.get` keep working. Exceptions from `send` propagate unchanged.
+    """
+    global _paused_until
+    sleep, clock = sleep or time.sleep, clock or time.monotonic    # looked up now: patchable
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        wait = min(_paused_until - clock(), RATE_LIMIT_MAX_WAIT)
+        if wait > 0:
+            logger.info("Modrinth rate limit reached; waiting %.0fs", wait)
+            sleep(wait)
+        resp = send(url, **kwargs)
+        reset = _header_seconds(resp, "X-Ratelimit-Reset")
+        limited = getattr(resp, "status_code", None) == 429
+        if limited or _header_seconds(resp, "X-Ratelimit-Remaining") == 0:
+            retry_after = _header_seconds(resp, "Retry-After")
+            _paused_until = clock() + (reset if reset is not None
+                                       else retry_after if retry_after is not None else 10.0)
+        if not limited or attempt == RATE_LIMIT_RETRIES:
+            return resp
+    return resp
 
 
 def _short_error(exc: Exception) -> str:
@@ -69,7 +119,8 @@ class ModrinthClient:
             bridge_slugs = get_bridge_mods(loader, target_loader)
             for slug in bridge_slugs:
                 try:
-                    resp = requests.get(
+                    resp = modrinth_call(
+                        requests.get,
                         f"{base_url}/project/{slug}/version",
                         params={
                             "game_versions": f'["{mc_version}"]',
@@ -122,7 +173,8 @@ class ModrinthClient:
         try:
             self._say(f"  \U0001f50d Checking Modrinth for '{mod_name}' "
                   f"({loader} + MC {mc_version})...")
-            resp = requests.get(
+            resp = modrinth_call(
+                requests.get,
                 f"{base_url}/search",
                 params={"query": search_query, "facets": facets, "limit": 5},
                 headers=headers,
@@ -177,7 +229,8 @@ class ModrinthClient:
             self._say(f"    \u2705 Found on Modrinth: {title} ({slug}) "
                   f"- {downloads:,} downloads")
 
-            ver_resp = requests.get(
+            ver_resp = modrinth_call(
+                requests.get,
                 f"{base_url}/project/{slug}/version",
                 params={
                     "loaders": f'["{loader_facet}"]',
@@ -253,8 +306,9 @@ class ModrinthClient:
         """Tag hits whose project source_url is source_repo; drop other GitHub repos."""
         ids = [h["project_id"] for h in hits if h.get("project_id")]
         try:
-            resp = requests.get("https://api.modrinth.com/v2/projects",
-                                params={"ids": json.dumps(ids)}, headers=headers, timeout=15)
+            resp = modrinth_call(requests.get, "https://api.modrinth.com/v2/projects",
+                                 params={"ids": json.dumps(ids)}, headers=headers,
+                                 timeout=15)
             projects = {p["id"]: p for p in resp.json()} if resp.status_code == 200 else {}
         except (requests.RequestException, ValueError):
             return hits
@@ -297,7 +351,8 @@ class ModrinthClient:
             _seen.add(project_id)
 
             try:
-                pr = requests.get(
+                pr = modrinth_call(
+                    requests.get,
                     f"{base_url}/project/{project_id}",
                     headers=headers, timeout=15,
                 )
@@ -318,7 +373,8 @@ class ModrinthClient:
                     saved.extend(existing)
                     continue
 
-                vr = requests.get(
+                vr = modrinth_call(
+                    requests.get,
                     f"{base_url}/project/{slug}/version",
                     params={
                         "loaders": f'["{loader}"]',
@@ -396,7 +452,7 @@ class ModrinthClient:
                 url = (f"{base_url}/project/{slug}/version"
                        f"?game_versions=[\"{try_version}\"]"
                        f"&loaders=[\"{loader}\"]")
-                resp = requests.get(url, headers=headers, timeout=30)
+                resp = modrinth_call(requests.get, url, headers=headers, timeout=30)
                 if resp.status_code != 200:
                     continue
 
@@ -463,7 +519,8 @@ class ModrinthClient:
         self.last_error = None
         search_query = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', query)
         try:
-            resp = requests.get(
+            resp = modrinth_call(
+                requests.get,
                 "https://api.modrinth.com/v2/search",
                 params={"query": search_query, "facets": '[["project_type:mod"]]',
                         "limit": 10},
@@ -524,7 +581,8 @@ class ModrinthClient:
         if game_version:
             params["game_versions"] = json.dumps([game_version])
         try:
-            resp = requests.get(
+            resp = modrinth_call(
+                requests.get,
                 f"https://api.modrinth.com/v2/project/{project_id}/version",
                 params=params, headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=15,
             )
@@ -555,7 +613,8 @@ class ModrinthClient:
         if not sha1s:
             return {}
         try:
-            resp = requests.post(
+            resp = modrinth_call(
+                requests.post,
                 "https://api.modrinth.com/v2/version_files",
                 json={"hashes": list(sha1s), "algorithm": "sha1"},
                 headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30,
@@ -574,9 +633,9 @@ class ModrinthClient:
         if not ids:
             return {}
         try:
-            resp = requests.get("https://api.modrinth.com/v2/projects",
-                                params={"ids": json.dumps(ids)},
-                                headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30)
+            resp = modrinth_call(requests.get, "https://api.modrinth.com/v2/projects",
+                                 params={"ids": json.dumps(ids)},
+                                 headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30)
             return {p["id"]: p for p in resp.json()} if resp.status_code == 200 else {}
         except (requests.RequestException, ValueError, KeyError):
             return {}
@@ -584,7 +643,8 @@ class ModrinthClient:
     def fetch_project(self, project_id: str) -> Optional[Dict]:
         """Full project record (search hits lack source_url). None on any failure."""
         try:
-            resp = requests.get(
+            resp = modrinth_call(
+                requests.get,
                 f"https://api.modrinth.com/v2/project/{project_id}",
                 headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=15,
             )
