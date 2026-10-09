@@ -264,7 +264,7 @@ token?) and ends with a result. Nothing but protocol lines is written to stdout.
 
 ```bash
 $ modkeel serve --stdio
-{"type":"hello","protocol":1,"modkeel":"0.1.5","methods":["get","instances","move"]}
+{"type":"hello","protocol":1,"modkeel":"0.1.6","methods":["get","instances","move"]}
 {"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
 {"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
 ...
@@ -276,14 +276,25 @@ A question (`{"type":"question","qid":"1.1",...}`) waits for `{"type":"answer","
 version, no token). `{"type":"cancel","id":"1"}` stops a request. The full message list is in
 `modkeel/core/wire.py`.
 
-## GitHub API Token
+## GitHub sign-in
 
-Without a token you're limited to 60 API requests/hour. With a token: 5,000/hour.
+Searching community forks uses GitHub's API: 60 requests/hour without signing in, 5,000/hour
+with your own account. The easy way:
 
-1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
-2. **Generate new token** > **Tokens (classic)**
-3. Select scope: **`public_repo`** (only permission needed)
-4. Save the token: `echo "ghp_xxx..." > github_token.txt`
+```bash
+modkeel login
+```
+
+Modkeel shows a code and opens github.com/login/device; enter the code there and approve.
+The token is saved in `~/.modkeel/config.toml` and used by every command (and the desktop
+app, which has the same "Sign in with GitHub" button). It asks for no permissions: it reads
+public data only. `modkeel token --clear` removes it here; revoke it on GitHub under
+Settings > Applications > Authorized OAuth Apps. When a run needs GitHub and you are not
+signed in, it asks: type `login` there to do the same.
+
+Prefer a token of your own? Make a classic one at
+[github.com/settings/tokens](https://github.com/settings/tokens) with no scopes and save it
+with `modkeel token --set ghp_...` (or pass `-t` once: it is saved).
 
 ## Troubleshooting
 
@@ -291,7 +302,7 @@ Without a token you're limited to 60 API requests/hour. With a token: 5,000/hour
 |-------|-------|-----|
 | `gradle.properties not found` | Branch lacks Gradle files | Try a different branch |
 | `Compilation timeout (>10 min)` | Large mod or slow machine | Build manually with `./gradlew build` |
-| `GitHub API rate limit exceeded` | No token or too many requests | Use `--github-token` |
+| `GitHub API rate limit exceeded` | Not signed in, or too many requests | `modkeel login` |
 | `minecraft_version is X, expected Y` | Branch targets wrong version | Expected -- Modkeel tries the next branch |
 | `No JAR file found in build/libs` | Unusual output path | Check `build.gradle` |
 | `JAR declares incompatible MC version` | Misconfigured `mods.toml` | Try another branch |

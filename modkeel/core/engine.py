@@ -25,7 +25,7 @@ from modkeel.core.decisions import (
     Cancel,
     ChangeTarget,
     Decide,
-    NeedToken,
+    TokenAsker,
     check_cancel,
     safe_default,
 )
@@ -82,23 +82,16 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
     from modkeel.sources import identify_mod
 
     loader = request.loader.lower()
-    token: List[Optional[str]] = [request.github_token]
-    asked: List[bool] = [False]
-
     def make_config(tok: Optional[str], mc: str, out: str, lv: Optional[str],
                     inst: Optional[str]) -> ModCompilerConfig:
         # "0" marks "no loader version given": lookups don't need one, compiling does.
         return ModCompilerConfig(mc_version=mc, loader=loader, loader_version=lv or "0",
                                  github_token=tok, output_dir=out, instance_path=inst)
 
-    def token_on_demand() -> Optional[str]:
-        """Called by the fork strategy: the token is asked for once, only when needed."""
-        if not token[0] and not asked[0]:
-            asked[0] = True
-            token[0] = decide(NeedToken("forks"))
-        return token[0]
+    # the fork strategy's token: asked for once, only when needed (or signed in then)
+    token_on_demand = TokenAsker(request.github_token, decide, events, cancelled)
 
-    config = make_config(token[0], request.mc_version, request.output_dir,
+    config = make_config(token_on_demand.current, request.mc_version, request.output_dir,
                          request.loader_version, request.instance)
     modrinth = ModrinthClient(config, events)
     mod = identify_mod(request.query, modrinth)
@@ -143,7 +136,7 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
     result.target, result.output_dir, result.retargeted = option.mc_version, out, True
     # A different Minecraft version: never into the instance, and no -lv (Docker picks the
     # loader for this one).
-    result.delivered = resolve_on(make_config(token[0], option.mc_version, str(out), None,
+    result.delivered = resolve_on(make_config(token_on_demand.current, option.mc_version, str(out), None,
                                               None), retarget=True)
     return result
 

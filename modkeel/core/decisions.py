@@ -39,7 +39,9 @@ class ChangeTarget(Question):
 
 @dataclass(frozen=True)
 class NeedToken(Question):
-    """A GitHub token, needed now (forks are the only source left). Answer: the token or None.
+    """A GitHub token, needed now (forks are the only source left). Answer: the token, None
+    (skip forks), or SIGN_IN: sign in with GitHub right now (ghauth.py, a GitHubCode event
+    shows the code; the token is saved for the next runs).
 
     Asked once per run, at the moment a strategy needs GitHub, never up front.
     """
@@ -47,6 +49,19 @@ class NeedToken(Question):
     kind: ClassVar[str] = "need_token"
     reason: str = "forks"
 
+
+class SignIn:
+    """The NeedToken answer "sign in with GitHub now" (on the wire: {"sign_in": true}).
+    open_browser: the engine opens GitHub's page itself (a desktop front end on this machine)."""
+
+    def __init__(self, open_browser: bool = False):
+        self.open_browser = open_browser
+
+    def __repr__(self) -> str:
+        return f"SignIn(open_browser={self.open_browser})"
+
+
+SIGN_IN = SignIn()
 
 Decide = Callable[[Question], Any]
 
@@ -73,3 +88,33 @@ def check_cancel(cancelled: Optional[Cancel]) -> None:
     """Stop here if the run was cancelled (checked between resolutions and before re-runs)."""
     if cancelled is not None and cancelled():
         raise Cancelled()
+
+
+class TokenAsker:
+    """The fork strategy's token source: `initial`, else NeedToken asked once, when first
+    needed (calling it). A SIGN_IN answer runs GitHub's sign-in there; if it fails the run
+    goes on without forks (the reason is shown), and a cancel during it cancels the run.
+    `current` is the token known so far, without asking."""
+
+    def __init__(self, initial: Optional[str], decide: Decide, events,
+                 cancelled: Optional[Cancel] = None):
+        self.current: Optional[str] = initial
+        self._asked = False
+        self._decide, self._events, self._cancelled = decide, events, cancelled
+
+    def __call__(self) -> Optional[str]:
+        if not self.current and not self._asked:
+            self._asked = True
+            answer = self._decide(NeedToken("forks"))
+            if isinstance(answer, SignIn):
+                from modkeel.core.events import Message
+                from modkeel.ghauth import SignInError, sign_in
+
+                try:
+                    answer = sign_in(self._events, self._cancelled,
+                                     open_browser=answer.open_browser).token
+                except SignInError as e:
+                    self._events(Message(f"\nGitHub sign-in failed: {e}. Forks skipped."))
+                    answer = None
+            self.current = answer if isinstance(answer, str) and answer else None
+        return self.current

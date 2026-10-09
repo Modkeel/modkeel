@@ -203,4 +203,14 @@ class TargetSearch(Event):
     subject: str = ""                     # the mod's title for scope "mod"
 
 
+@dataclass(frozen=True)
+class GitHubCode(Event):
+    """Signing in with GitHub (ghauth.py): the player opens `url` and enters `code` there."""
+
+    kind: ClassVar[str] = "github_code"
+    code: str
+    url: str
+    expires_in: int                       # seconds the code stays valid
+
+
 Emitter = Callable[[Event], None]

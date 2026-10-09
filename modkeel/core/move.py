@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from modkeel.core.decisions import Cancel, ChangeTarget, Decide, NeedToken, check_cancel, \
+from modkeel.core.decisions import Cancel, ChangeTarget, Decide, TokenAsker, check_cancel, \
     safe_default
 from modkeel.core.engine import _delivery, _propose
 from modkeel.core.events import Delivery, Emitter, Message, ModResolved, PackScanned
@@ -196,14 +196,7 @@ def move_pack(request: MoveRequest, events: Emitter = print_event,
     modrinth = ModrinthClient(probe_config, events)
     entries = scan_pack(Path(request.mods_dir), modrinth, events)
     loader = (request.loader or pack_loader(entries) or "fabric").lower()
-    token: List[Optional[str]] = [request.github_token]
-    asked: List[bool] = [False]
-
-    def token_on_demand() -> Optional[str]:
-        if not token[0] and not asked[0]:
-            asked[0] = True
-            token[0] = decide(NeedToken("forks"))
-        return token[0]
+    token_on_demand = TokenAsker(request.github_token, decide, events, cancelled)
 
     result = _run(entries, request, request.mc_version, loader, False, modrinth, events,
                   token_on_demand, cancelled)
