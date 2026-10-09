@@ -185,7 +185,7 @@ class ModResolved(Event):
 
 @dataclass(frozen=True)
 class PackScanned(Event):
-    """A mods folder read and identified (core/port.py): one row per JAR,
+    """A mods folder read and identified (core/move.py): one row per JAR,
     (file, name, Modrinth slug or None, identified_by: "hash" | "name" | None)."""
 
     kind: ClassVar[str] = "pack_scanned"

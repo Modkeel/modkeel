@@ -1,8 +1,8 @@
-"""Moving a pack to another Minecraft version (modkeel/core/port.py, `modkeel port`).
+"""Moving a pack to another Minecraft version (modkeel/core/move.py, `modkeel move`).
 
 Identification (hash exact, metadata id or name as a guess, unknown), what becomes of each
 JAR (delivered, reused when the player's file passes on the target, unknown), the pack-level
-version proposal, and the `port` protocol method. Modrinth and the resolver are doubles; the
+version proposal, and the `move` protocol method. Modrinth and the resolver are doubles; the
 JARs are tiny real files.
 """
 
@@ -15,7 +15,7 @@ import pytest
 
 from modkeel.core.decisions import ChangeTarget, safe_default
 from modkeel.core.events import PackScanned
-from modkeel.core.port import PortRequest, pack_loader, port_pack, scan_pack
+from modkeel.core.move import MoveRequest, pack_loader, move_pack, scan_pack
 from modkeel.evidence import Evidence, Outcome
 from modkeel.modrinth import ModrinthClient
 from modkeel.resolve import Delivered, Resolution, Step
@@ -108,7 +108,7 @@ def _config():
 class TestPort:
     def test_each_jar_ends_delivered_reused_or_unknown(self, pack):
         with resolving({"Sodium", "Cloth Config API"}), evidence(ok=True):
-            result = port_pack(PortRequest(str(pack), "1.21.10"), events=lambda e: None)
+            result = move_pack(MoveRequest(str(pack), "1.21.10"), events=lambda e: None)
         status = {m.file: m.status for m in result.mods}
         assert status == {"sodium.jar": "delivered", "cloth.jar": "delivered",
                           "mine.jar": "reused"}
@@ -119,7 +119,7 @@ class TestPort:
 
     def test_an_unknown_jar_that_does_not_pass_is_left_out(self, pack):
         with resolving({"Sodium", "Cloth Config API"}), evidence(ok=False):
-            result = port_pack(PortRequest(str(pack), "1.21.10"), events=lambda e: None)
+            result = move_pack(MoveRequest(str(pack), "1.21.10"), events=lambda e: None)
         mine = next(m for m in result.mods if m.file == "mine.jar")
         assert mine.status == "unknown" and "not on Modrinth" in mine.detail
         assert not (result.output_dir / "mine.jar").exists()
@@ -138,7 +138,7 @@ class TestPort:
                 patch("modkeel.target.propose_targets", return_value=[option]), \
                 patch("modkeel.target.older_build_probe"), \
                 patch("modkeel.mappings.release_versions", return_value=()):
-            result = port_pack(PortRequest(str(pack), "1.21.10"), events=lambda e: None,
+            result = move_pack(MoveRequest(str(pack), "1.21.10"), events=lambda e: None,
                                decide=decide)
         change = [q for q in asked if isinstance(q, ChangeTarget)]
         assert change and change[0].scope == "pack" and change[0].current == "1.21.10"
@@ -153,7 +153,7 @@ class TestPort:
                       return_value=[TargetOption("1.21.1", covered=["Sodium"])]), \
                 patch("modkeel.target.older_build_probe"), \
                 patch("modkeel.mappings.release_versions", return_value=()):
-            result = port_pack(PortRequest(str(pack), "1.21.10"), events=lambda e: None,
+            result = move_pack(MoveRequest(str(pack), "1.21.10"), events=lambda e: None,
                                decide=safe_default)
         assert not result.retargeted and result.proposal.mc_version == "1.21.1"
 
@@ -164,7 +164,7 @@ class TestWire:
 
         events = []
         with resolving({"Sodium", "Cloth Config API"}), evidence(ok=True):
-            out = METHODS["port"]({"mods_dir": str(pack), "mc_version": "1.21.10"},
+            out = METHODS["move"]({"mods_dir": str(pack), "mc_version": "1.21.10"},
                                   events.append, safe_default, lambda: False)
         assert json.loads(json.dumps(out))["ready"] == 3
         assert {m["file"]: m["status"] for m in out["mods"]}["mine.jar"] == "reused"
@@ -173,5 +173,5 @@ class TestWire:
         from modkeel.core.wire import METHODS
 
         with pytest.raises(TypeError, match="not a folder"):
-            METHODS["port"]({"mods_dir": str(tmp_path / "nope"), "mc_version": "1.21.10"},
+            METHODS["move"]({"mods_dir": str(tmp_path / "nope"), "mc_version": "1.21.10"},
                             lambda e: None, safe_default, lambda: False)

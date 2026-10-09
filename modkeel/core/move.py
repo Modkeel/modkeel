@@ -1,7 +1,7 @@
 """Move a pack to another Minecraft version: a mods folder in, a folder of JARs for the
 target out (IDEA-023 "your instances"; the engine's pack entry point, IDEA-028).
 
-    port_pack(PortRequest(mods_dir, mc_version))
+    move_pack(MoveRequest(mods_dir, mc_version))
 
 1. Identify every JAR exactly: its SHA-1 is looked up on Modrinth in one request, which
    names the project and version with nothing to guess. A JAR Modrinth does not know is
@@ -12,7 +12,7 @@ target out (IDEA-023 "your instances"; the engine's pack entry point, IDEA-028).
    player's own file passes the static checks on the target (metadata, linkage, mixins), it
    is reused, since that copy runs there too.
 4. When mods are left without a build, the nearest version where more of the pack runs is
-   proposed (ChangeTarget, scope "pack"); accepted, the whole port runs there instead.
+   proposed (ChangeTarget, scope "pack"); accepted, the whole move runs there instead.
 
 Everything is written to <output_dir>/mc-<version>/; the player's folder is only read.
 """
@@ -36,8 +36,8 @@ LOADERS = ("neoforge", "forge", "fabric", "quilt")
 
 
 @dataclass
-class PortRequest:
-    """What `port` asks for: a mods folder and the Minecraft version to move it to."""
+class MoveRequest:
+    """What `move` asks for: a mods folder and the Minecraft version to move it to."""
 
     mods_dir: str
     mc_version: str
@@ -48,7 +48,7 @@ class PortRequest:
 
 
 @dataclass
-class PortedMod:
+class MovedMod:
     """One JAR of the folder and what became of it on the target."""
 
     file: str                             # the JAR's file name in the player's folder
@@ -61,11 +61,11 @@ class PortedMod:
 
 
 @dataclass
-class PortResult:
+class MoveResult:
     target: str
     loader: str
     output_dir: Path
-    mods: List[PortedMod] = field(default_factory=list)
+    mods: List[MovedMod] = field(default_factory=list)
     retargeted: bool = False
     proposal: object = None               # target.TargetOption, taken or not
 
@@ -78,7 +78,7 @@ class PortResult:
 class _Entry:
     jar: Path
     scanned: object                       # scanner.ScannedMod or None (no metadata)
-    mod: PortedMod
+    mod: MovedMod
     project: Optional[Dict] = None
 
 
@@ -103,14 +103,14 @@ def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_
         version = by_hash.get(hashes[jar])
         project = projects.get(version["project_id"]) if version else None
         if project:
-            entry = _Entry(jar, scanned, PortedMod(jar.name, project["title"], "hash",
+            entry = _Entry(jar, scanned, MovedMod(jar.name, project["title"], "hash",
                                                    project["slug"]), _as_hit(project))
         else:
-            entry = _Entry(jar, scanned, PortedMod(jar.name, name, None))
+            entry = _Entry(jar, scanned, MovedMod(jar.name, name, None))
             full = _by_metadata(scanned, modrinth, identify_mod) if scanned else None
             if full:
                 entry.project = _as_hit(full)
-                entry.mod = PortedMod(jar.name, full.get("title", name), "name",
+                entry.mod = MovedMod(jar.name, full.get("title", name), "name",
                                       full.get("slug"))
         entries.append(entry)
     events(PackScanned(str(mods_dir), tuple(
@@ -142,8 +142,8 @@ def pack_loader(entries: List[_Entry]) -> Optional[str]:
     return votes.most_common(1)[0][0] if votes else None
 
 
-def port_pack(request: PortRequest, events: Emitter = print_event,
-              decide: Decide = safe_default, cancelled: Optional[Cancel] = None) -> PortResult:
+def move_pack(request: MoveRequest, events: Emitter = print_event,
+              decide: Decide = safe_default, cancelled: Optional[Cancel] = None) -> MoveResult:
     """Move the folder's mods to request.mc_version (or the nearest version accepted)."""
     from modkeel.modrinth import ModrinthClient
 
@@ -181,8 +181,8 @@ def port_pack(request: PortRequest, events: Emitter = print_event,
     return moved
 
 
-def _run(entries: List[_Entry], request: PortRequest, target: str, loader: str,
-         retarget: bool, modrinth, events: Emitter, token_on_demand, cancelled) -> PortResult:
+def _run(entries: List[_Entry], request: MoveRequest, target: str, loader: str,
+         retarget: bool, modrinth, events: Emitter, token_on_demand, cancelled) -> MoveResult:
     """Steps 2 and 3 for one target version."""
     from modkeel.modrinth import ModrinthClient
     from modkeel.resolve import ModRef, ResolveContext, Resolver
@@ -199,10 +199,10 @@ def _run(entries: List[_Entry], request: PortRequest, target: str, loader: str,
 
     config = make_config(request.github_token)
     client = ModrinthClient(config, events)   # dependencies for this target, into `out`
-    result = PortResult(target, loader, out, retargeted=retarget)
+    result = MoveResult(target, loader, out, retargeted=retarget)
     for entry in entries:
         check_cancel(cancelled)
-        mod = PortedMod(entry.mod.file, entry.mod.name, entry.mod.identified_by, entry.mod.slug)
+        mod = MovedMod(entry.mod.file, entry.mod.name, entry.mod.identified_by, entry.mod.slug)
         if entry.project is not None:
             ref = ModRef(query=mod.name, project=entry.project,
                          source_repo=ModrinthClient.source_repo_of(entry.project))
@@ -222,7 +222,7 @@ def _run(entries: List[_Entry], request: PortRequest, target: str, loader: str,
     return result
 
 
-def _reuse_if_it_runs(entry: _Entry, mod: PortedMod, target: str, config: ModCompilerConfig,
+def _reuse_if_it_runs(entry: _Entry, mod: MovedMod, target: str, config: ModCompilerConfig,
                       out: Path, events: Emitter) -> None:
     """Step 3: the player's own JAR, kept when it passes the static checks on the target."""
     from modkeel.evidence import Subject, evidence_line, gather

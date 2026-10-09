@@ -1,8 +1,8 @@
-"""`modkeel port`: move a pack to another Minecraft version.
+"""`modkeel move`: move a pack to another Minecraft version.
 
 Reads a mods folder (only reads it), identifies each JAR (exactly by its hash on Modrinth,
 else by name), gets every mod for the target and writes them to <output>/mc-<version>/.
-The flow is modkeel.core.port.port_pack; this command renders its events and answers its
+The flow is modkeel.core.move.move_pack; this command renders its events and answers its
 questions like `get` does.
 """
 
@@ -27,7 +27,7 @@ STATUS = {"delivered": "[green]✓[/green]", "reused": "[green]↻[/green]",
           "missing": "[red]✗[/red]", "unknown": "[yellow]?[/yellow]"}
 
 
-def port_command(
+def move_command(
     mods_dir: Path = typer.Argument(..., help="The pack's mods folder (only read)."),
     mc_version: str = typer.Option(..., "--mc-version", "-m",
                                    help="Minecraft version to move the pack to."),
@@ -46,7 +46,7 @@ def port_command(
 ):
     """Move a pack (a mods folder) to another Minecraft version."""
     from modkeel.core.events import ModResolved, PackScanned, TargetSearch
-    from modkeel.core.port import PortRequest, port_pack
+    from modkeel.core.move import MoveRequest, move_pack
     from modkeel.core.text import print_event
     from modkeel.target import FALLBACK_MODES, default_mode
 
@@ -74,11 +74,11 @@ def port_command(
             print_event(event)
 
     def hint(option) -> str:
-        return f"modkeel port {mods_dir} -m {option.mc_version}"
+        return f"modkeel move {mods_dir} -m {option.mc_version}"
 
     decide = cli_decide((fallback or default_mode(console.is_terminal)).lower(), hint,
                         modkeel_cfg)
-    result = port_pack(PortRequest(str(mods_dir), mc_version, loader, loader_version,
+    result = move_pack(MoveRequest(str(mods_dir), mc_version, loader, loader_version,
                                    output_dir, token), events=view, decide=decide)
 
     console.print(f"\n[bold]MC {result.target} ({result.loader}): {result.ready} of "
