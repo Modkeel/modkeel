@@ -544,6 +544,43 @@ class ModrinthClient:
             return None
         return f"{match.group(1)}/{match.group(2).removesuffix('.git')}"
 
+    def versions_by_hash(self, sha1s: List[str]) -> Optional[Dict[str, Dict]]:
+        """The Modrinth version each file is, by its SHA-1: {sha1: version}, one request.
+
+        A JAR whose hash Modrinth knows is that exact project and version, with no name to
+        guess. Files Modrinth does not know are absent. None when Modrinth could not answer
+        (last_error says why).
+        """
+        self.last_error = None
+        if not sha1s:
+            return {}
+        try:
+            resp = requests.post(
+                "https://api.modrinth.com/v2/version_files",
+                json={"hashes": list(sha1s), "algorithm": "sha1"},
+                headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30,
+            )
+            if resp.status_code != 200:
+                self.last_error = f"HTTP {resp.status_code}"
+                return None
+            return resp.json()
+        except (requests.RequestException, ValueError) as e:
+            self.last_error = "timed out" if isinstance(e, requests.Timeout) else _short_error(e)
+            return None
+
+    def fetch_projects(self, project_ids: List[str]) -> Dict[str, Dict]:
+        """Full project records by id, in one request: {id: project}. {} on any failure."""
+        ids = sorted(set(project_ids))
+        if not ids:
+            return {}
+        try:
+            resp = requests.get("https://api.modrinth.com/v2/projects",
+                                params={"ids": json.dumps(ids)},
+                                headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30)
+            return {p["id"]: p for p in resp.json()} if resp.status_code == 200 else {}
+        except (requests.RequestException, ValueError, KeyError):
+            return {}
+
     def fetch_project(self, project_id: str) -> Optional[Dict]:
         """Full project record (search hits lack source_url). None on any failure."""
         try:

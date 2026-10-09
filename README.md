@@ -213,6 +213,22 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 
 No arguments. Shows version, config, cached loaders, and known NeoForge versions.
 
+### `modkeel port`
+
+Moves a pack to another Minecraft version: point it at a mods folder (it is only read) and
+the version you want, and the whole pack lands in `out/mc-<version>/`.
+
+```bash
+modkeel port ~/.minecraft/mods -m 1.21.10
+```
+
+Each JAR is identified exactly by its hash on Modrinth (no name to guess); one Modrinth does
+not know is looked up by the id and name in its metadata and marked as a guess. Then every
+mod goes through the same sources as `get`. A JAR that is on no catalog is checked as it is:
+if your own file passes the checks on the new version, it is reused. When some mods have no
+build there, Modkeel proposes the nearest version where more of the pack runs (`--fallback
+ask|auto|never`). Shared dependencies are downloaded once.
+
 ### `modkeel serve --stdio`
 
 Runs the engine for another program (the upcoming Modkeel app, a script, an editor plugin)
@@ -222,7 +238,7 @@ token?) and ends with a result. Nothing but protocol lines is written to stdout.
 
 ```bash
 $ modkeel serve --stdio
-{"type":"hello","protocol":1,"modkeel":"0.1.2","methods":["get"]}
+{"type":"hello","protocol":1,"modkeel":"0.1.2","methods":["get","port"]}
 {"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
 {"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
 ...

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TextIO
 
 from modkeel.core.decisions import (
@@ -105,7 +106,34 @@ def _get(params, events, decide, cancelled) -> Dict[str, Any]:
                                    cancelled=cancelled))
 
 
-METHODS: Dict[str, Handler] = {"get": _get}
+def port_result_dict(result) -> Dict[str, Any]:
+    """port.PortResult on the wire."""
+    proposal = result.proposal
+    return {
+        "target": result.target,
+        "loader": result.loader,
+        "output_dir": str(result.output_dir),
+        "retargeted": result.retargeted,
+        "ready": result.ready,
+        "mods": [{**_plain(asdict(m))} for m in result.mods],
+        "proposal": ({**_plain(asdict(proposal)), "summary": proposal.summary}
+                     if proposal is not None and is_dataclass(proposal) else None),
+    }
+
+
+def _port(params, events, decide, cancelled) -> Dict[str, Any]:
+    from modkeel.core.port import PortRequest, port_pack
+
+    request = PortRequest(**params)   # unknown or missing fields: TypeError -> bad_params
+    if not (request.mods_dir and request.mc_version):
+        raise TypeError("mods_dir and mc_version are required")
+    if not Path(request.mods_dir).is_dir():
+        raise TypeError(f"not a folder: {request.mods_dir}")
+    return port_result_dict(port_pack(request, events=events, decide=decide,
+                                      cancelled=cancelled))
+
+
+METHODS: Dict[str, Handler] = {"get": _get, "port": _port}
 
 
 class _Run:

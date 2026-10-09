@@ -242,6 +242,18 @@ class TestFabricRangeParsing(unittest.TestCase):
         """~1.21.0 should match 1.21.x."""
         self.assertTrue(self.compiler.is_version_in_fabric_range("1.21.1", "~1.21.0"))
         self.assertTrue(self.compiler.is_version_in_fabric_range("1.21.10", "~1.21.0"))
+
+    def test_fabric_range_prerelease_dash_and_x_wildcard(self):
+        """">=1.21.9-" admits 1.21.9's pre-releases (Mod Menu 16 declares ">=1.21.9- <1.21.11");
+        "1.21.x" is Fabric's wildcard."""
+        check = self.compiler.is_version_in_fabric_range
+        self.assertTrue(check("1.21.10", ">=1.21.9- <1.21.11"))
+        self.assertTrue(check("1.21.9", ">=1.21.9- <1.21.11"))
+        self.assertFalse(check("1.21.11", ">=1.21.9- <1.21.11"))
+        self.assertFalse(check("1.21.8", ">=1.21.9- <1.21.11"))
+        self.assertTrue(check("1.21.10", "1.21.x"))
+        self.assertFalse(check("1.20.1", "1.21.x"))
+        self.assertTrue(check("1.21.10", "1.x"))
         self.assertFalse(self.compiler.is_version_in_fabric_range("1.20.4", "~1.21.0"))
 
     def test_exact_version(self):

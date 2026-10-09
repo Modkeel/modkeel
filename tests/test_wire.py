@@ -157,7 +157,7 @@ class TestProtocolRules:
     def test_hello_names_the_protocol_and_methods(self, session):
         hello = session().hello
         assert hello["type"] == "hello" and hello["protocol"] == 1
-        assert hello["methods"] == ["get"] and hello["modkeel"]
+        assert hello["methods"] == ["get", "port"] and hello["modkeel"]
 
     def test_bad_lines_get_errors_and_never_stop_the_server(self, session):
         s = session({"echo": lambda params, *_: params})

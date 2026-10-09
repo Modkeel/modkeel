@@ -18,6 +18,7 @@ from modkeel.core.events import (
     Message,
     ModIdentified,
     ModResolved,
+    PackScanned,
     Progress,
     RangeRelaxed,
     Saved,
@@ -69,6 +70,12 @@ def render_text(event: Event) -> Optional[str]:
         lines = ["\nTried:"] + [f"  {'✓' if ok else '✗'} {strategy}: {detail}"
                                  for strategy, ok, detail in event.trail]
         return "\n".join(lines)
+    if isinstance(event, PackScanned):
+        exact = sum(1 for m in event.mods if m[3] == "hash")
+        guessed = sum(1 for m in event.mods if m[3] == "name")
+        unknown = len(event.mods) - exact - guessed
+        return (f"\n{len(event.mods)} JARs in {event.folder}: {exact} identified by their hash, "
+                f"{guessed} by name, {unknown} unknown")
     if isinstance(event, TargetSearch):
         what = (f"{event.subject} runs" if event.scope == "mod"
                 else "more of these mods run")
