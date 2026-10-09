@@ -264,7 +264,7 @@ token?) and ends with a result. Nothing but protocol lines is written to stdout.
 
 ```bash
 $ modkeel serve --stdio
-{"type":"hello","protocol":1,"modkeel":"0.1.6","methods":["get","instances","move"]}
+{"type":"hello","protocol":1,"modkeel":"0.1.7","methods":["get","github","instances","move","sign_in"]}
 {"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
 {"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
 ...

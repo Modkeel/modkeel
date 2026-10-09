@@ -6,7 +6,7 @@ from pathlib import Path
 # config, caches and downloads; the MODKEEL_HOME environment variable moves it
 MODKEEL_HOME = Path(os.environ.get("MODKEEL_HOME", Path.home() / ".modkeel"))
 
-MODKEEL_VERSION = "0.1.6"
+MODKEEL_VERSION = "0.1.7"
 MODRINTH_USER_AGENT = f"Modkeel/{MODKEEL_VERSION} (github.com/Modkeel/modkeel)"
 
 # "Sign in with GitHub" (modkeel/ghauth.py, OAuth device flow). A client id is public by
