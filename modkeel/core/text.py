@@ -81,7 +81,7 @@ def render_text(event: Event) -> Optional[str]:
                 f"{by_launcher}{guessed} by name, {unknown} unknown")
     if isinstance(event, GitHubCode):
         return (f"\nSign in with GitHub: open {event.url} and enter the code {event.code}"
-                f" (valid {event.expires_in // 60} minutes)")
+                f" (valid {event.minutes} minutes)")
     if isinstance(event, TargetSearch):
         what = (f"{event.subject} runs" if event.scope == "mod"
                 else "more of these mods run")
