@@ -208,6 +208,59 @@ class TestLauncherRecords:
             "mod1.jar": ("curseforge", "238222", "jei"),
         }
 
+    def test_the_files_prism_writes(self, tmp_path):
+        # Prism serialises with toml++: literal strings, sorted keys, its x-prismlauncher-*
+        # fields, dependencies as an array of tables; CurseForge entries carry sha1, md5 or
+        # murmur2 (no hashlib name: the record is trusted) and no URL
+        mods = tmp_path / "mods"
+        jars(mods, 2)
+        sha512 = hashlib.sha512(b"PK").hexdigest()
+        (mods / ".index").mkdir()
+        (mods / ".index/sodium.pw.toml").write_text(f"""filename = 'mod0.jar'
+name = 'Sodium'
+side = 'both'
+x-prismlauncher-loaders = [ 'fabric', 'quilt' ]
+x-prismlauncher-lock-update = false
+x-prismlauncher-mc-versions = [ '1.21.6' ]
+x-prismlauncher-release-type = 'release'
+x-prismlauncher-version-number = 'mc1.21.6-0.6.13-fabric'
+
+[[x-prismlauncher-dependencies]]
+addonId = 'P7dR8mSH'
+type = 'required'
+
+[download]
+hash = '{sha512}'
+hash-format = 'sha512'
+mode = 'url'
+url = 'https://cdn.modrinth.com/data/AANobbMI/versions/x/sodium.jar'
+
+[update.modrinth]
+mod-id = 'AANobbMI'
+version = 'x'
+""")
+        (mods / ".index/jei.pw.toml").write_text("""filename = 'mod1.jar'
+name = 'Just Enough Items (JEI)'
+side = 'both'
+x-prismlauncher-dependencies = []
+x-prismlauncher-loaders = [ 'neoforge' ]
+
+[download]
+hash = '1234567890'
+hash-format = 'murmur2'
+mode = 'metadata:curseforge'
+url = ''
+
+[update.curseforge]
+file-id = 5101366
+project-id = 238222
+""")
+        found = launcher_records(mods)
+        assert {f: (r.source, r.project_id, r.name) for f, r in found.items()} == {
+            "mod0.jar": ("modrinth", "AANobbMI", "Sodium"),
+            "mod1.jar": ("curseforge", "238222", "Just Enough Items (JEI)"),
+        }
+
     def test_a_replaced_jar_loses_its_record(self, tmp_path):
         jars(tmp_path / "mods", 1)
         self.pw(tmp_path / "mods/.index", "s", "mod0.jar", '[update.modrinth]\nmod-id = "A"',
