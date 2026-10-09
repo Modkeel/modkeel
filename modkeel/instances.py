@@ -338,9 +338,10 @@ def _curseforge_addons(game: Path) -> Dict[str, LauncherRecord]:
         filename = file.get("fileNameOnDisk") or file.get("fileName")
         if not filename:
             continue
-        # hashes: [{"type": 1, "value": sha1}, {"type": 2, "value": md5}] (CurseForge's HashAlgo)
+        # hashes: [{"type": 1, "value": sha1}, {"type": 2, "value": md5}]: CurseForge's HashAlgo
+        # (1 sha1, 2 md5), under "type" in the app's file and "algo" in its web API's records
         sha1 = next((h.get("value") for h in file.get("hashes") or []
-                     if isinstance(h, dict) and h.get("type") == 1), None)
+                     if isinstance(h, dict) and (h.get("type") or h.get("algo")) == 1), None)
         site = urlparse(addon.get("webSiteURL") or "").path.rstrip("/").rsplit("/", 1)[-1]
         records[filename] = LauncherRecord("curseforge", str(addon["addonID"]), addon.get("name"),
                                            site or None, "sha1" if sha1 else None, sha1)

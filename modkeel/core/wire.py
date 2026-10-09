@@ -120,6 +120,8 @@ def move_result_dict(result) -> Dict[str, Any]:
         "mods": [{**_plain(asdict(m))} for m in result.mods],
         "proposal": ({**_plain(asdict(proposal)), "summary": proposal.summary}
                      if proposal is not None and is_dataclass(proposal) else None),
+        "instance": result.instance.to_dict() if result.instance is not None else None,
+        "instance_note": result.instance_note,
     }
 
 
