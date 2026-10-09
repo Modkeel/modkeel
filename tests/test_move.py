@@ -206,6 +206,51 @@ class TestWire:
                             lambda e: None, safe_default, lambda: False)
 
 
+class TestNewInstance:
+    """move_pack(new_instance=True): the moved pack added to Prism beside the old instance."""
+
+    def prism(self, pack, tmp_path):
+        import shutil
+
+        from modkeel.instances import Instance
+
+        game = tmp_path / "instances/ATM/minecraft"
+        game.mkdir(parents=True)
+        shutil.move(str(pack), str(game / "mods"))
+        (game.parent / "instance.cfg").write_text("[General]\nname=All the Mods 10\n")
+        return [Instance("prism", "All the Mods 10", str(game.parent), str(game / "mods"),
+                         "1.21.1", "fabric", "0.16.0", 3)]
+
+    def test_created_with_what_was_moved(self, pack, tmp_path):
+        instances = self.prism(pack, tmp_path)
+        events = []
+        with resolving({"Sodium", "Cloth Config API"}), evidence(ok=True), \
+                patch("modkeel.instances.find_instances", lambda: instances), \
+                patch("modkeel.newinstance._get_json",
+                      lambda url: {"versions": [{"version": "0.17.2", "recommended": True}]}):
+            result = move_pack(MoveRequest(instances[0].mods_dir, "1.21.10",
+                                           new_instance=True), events=events.append)
+        made = Path(result.instance.path)
+        assert made == tmp_path / "instances/ATM 1.21.10" and not result.instance_note
+        assert len(list((made / "minecraft/mods").glob("*.jar"))) == 3
+        pack = json.loads((made / "mmc-pack.json").read_text())["components"]
+        assert [(c["uid"], c["version"]) for c in pack] == [
+            ("net.minecraft", "1.21.10"), ("net.fabricmc.intermediary", "1.21.10"),
+            ("net.fabricmc.fabric-loader", "0.17.2")]
+        assert any("New Prism Launcher instance: All the Mods 10 (1.21.10)"
+                   in getattr(e, "text", "") for e in events)
+
+    def test_without_a_loader_version_the_pack_stays_in_out(self, pack, tmp_path):
+        instances = self.prism(pack, tmp_path)
+        with resolving({"Sodium", "Cloth Config API"}), evidence(ok=True), \
+                patch("modkeel.instances.find_instances", lambda: instances), \
+                patch("modkeel.newinstance._get_json", lambda url: None):
+            result = move_pack(MoveRequest(instances[0].mods_dir, "1.21.10",
+                                           new_instance=True), events=lambda e: None)
+        assert result.instance is None and "no fabric version" in result.instance_note
+        assert result.ready == 3
+
+
 class TestCommand:
     """`modkeel move` takes a folder or an instance's name; `modkeel instances` lists them."""
 
@@ -236,6 +281,7 @@ class TestCommand:
             result = self.run("move", "all the mods 10", "-m", "1.21.10", "--fallback", "never")
         assert seen["request"].mods_dir == str(pack)
         assert seen["request"].loader == "neoforge"        # the instance's, not guessed
+        assert seen["request"].new_instance                 # beside it, in the launcher
         assert "Prism Launcher: All the Mods 10 (1.21.1 neoforge)" in result.output
 
     def test_an_ambiguous_or_unknown_name_is_refused(self, pack):
@@ -253,9 +299,27 @@ class TestCommand:
             from modkeel.core.move import MoveResult
             return MoveResult(request.mc_version, "fabric", Path("out"))
 
-        with patch("modkeel.core.move.move_pack", fake_move):
+        with patch("modkeel.core.move.move_pack", fake_move), \
+                patch("modkeel.instances.find_instances", lambda: []):
             self.run("move", str(pack.parent), "-m", "1.21.10", "--fallback", "never")
         assert seen["dir"] == str(pack)
+
+    def test_a_new_instance_only_for_a_launchers_folder_and_unless_refused(self, pack):
+        seen = []
+
+        def fake_move(request, **_):
+            seen.append(request.new_instance)
+            from modkeel.core.move import MoveResult
+            return MoveResult(request.mc_version, "fabric", Path("out"))
+
+        with patch("modkeel.core.move.move_pack", fake_move):
+            with patch("modkeel.instances.find_instances", lambda: []):
+                self.run("move", str(pack), "-m", "1.21.10", "--fallback", "never")
+            with patch("modkeel.instances.find_instances", lambda: self._instances(pack)):
+                self.run("move", str(pack), "-m", "1.21.10", "--fallback", "never")
+                self.run("move", "All the Mods 10", "-m", "1.21.10", "--fallback", "never",
+                         "--no-new-instance")
+        assert seen == [False, True, False]
 
     def test_instances_lists_and_prints_json(self, pack):
         with patch("modkeel.instances.find_instances", lambda: self._instances(pack)):

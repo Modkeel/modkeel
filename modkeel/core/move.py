@@ -18,6 +18,8 @@ target out (IDEA-023 "your instances"; the engine's pack entry point, IDEA-028).
    proposed (ChangeTarget, scope "pack"); accepted, the whole move runs there instead.
 
 Everything is written to <output_dir>/mc-<version>/; the player's folder is only read.
+With new_instance, a mods folder of a Prism Launcher instance also becomes a new instance
+next to it, "<name> (<version>)" (modkeel/newinstance.py); the old one is never touched.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from modkeel.core.decisions import Cancel, ChangeTarget, Decide, NeedToken, check_cancel, \
     safe_default
 from modkeel.core.engine import _delivery, _propose
-from modkeel.core.events import Delivery, Emitter, ModResolved, PackScanned
+from modkeel.core.events import Delivery, Emitter, Message, ModResolved, PackScanned
 from modkeel.core.text import print_event
 from modkeel.models import ModCompilerConfig
 
@@ -48,6 +50,7 @@ class MoveRequest:
     loader_version: Optional[str] = None  # needed only to compile a fork
     output_dir: str = "out"
     github_token: Optional[str] = None
+    new_instance: bool = False            # also create the pack beside its launcher instance
 
 
 @dataclass
@@ -71,6 +74,8 @@ class MoveResult:
     mods: List[MovedMod] = field(default_factory=list)
     retargeted: bool = False
     proposal: object = None               # target.TargetOption, taken or not
+    instance: object = None               # instances.Instance created (new_instance)
+    instance_note: str = ""               # why none was created, when one was asked for
 
     @property
     def ready(self) -> int:
@@ -205,7 +210,7 @@ def move_pack(request: MoveRequest, events: Emitter = print_event,
     left = [e for e in entries if e.project is not None
             and next(m for m in result.mods if m.file == e.jar.name).status == "missing"]
     if not left:
-        return result
+        return _as_instance(result, request, events)
 
     option = _propose([(e.mod.name, e.project["project_id"])
                        for e in entries if e.project is not None],
@@ -213,11 +218,43 @@ def move_pack(request: MoveRequest, events: Emitter = print_event,
                       scope="pack", subject="", events=events)
     result.proposal = option
     if option is None or not decide(ChangeTarget(option, request.mc_version, "pack")):
-        return result
+        return _as_instance(result, request, events)
     moved = _run(entries, request, option.mc_version, loader, True, modrinth, events,
                  token_on_demand, cancelled)
     moved.retargeted, moved.proposal = True, option
-    return moved
+    return _as_instance(moved, request, events)
+
+
+def _as_instance(result: MoveResult, request: MoveRequest, events: Emitter) -> MoveResult:
+    """The moved pack as a new launcher instance beside the old one, when asked and possible;
+    otherwise instance_note says why (the pack is still in result.output_dir)."""
+    from modkeel.instances import LAUNCHER_NAMES
+    from modkeel.newinstance import NewInstanceError, instance_of, new_instance
+
+    if not request.new_instance:
+        return result
+    old = instance_of(Path(request.mods_dir))
+    if result.ready == 0:
+        result.instance_note = "nothing to put in it"
+    elif old is None:
+        result.instance_note = "this folder is not a launcher instance's"
+    else:
+        try:
+            made = new_instance(old, result.target, result.loader, result.output_dir,
+                                request.loader_version if result.target == request.mc_version
+                                and request.loader_version != "0" else None)
+        except NewInstanceError as e:
+            result.instance_note = f"{LAUNCHER_NAMES.get(old.launcher, old.launcher)}: {e}"
+        else:
+            result.instance = made.instance
+            carried = f", with your {', '.join(made.copied)}" if made.copied else ""
+            events(Message(f"\nNew {LAUNCHER_NAMES[made.instance.launcher]} instance: "
+                           f"{made.instance.name} ({result.loader} "
+                           f"{made.instance.loader_version}){carried} -> {made.instance.path}"))
+    if result.instance_note:
+        events(Message(f"\nNo new instance: {result.instance_note}; "
+                       f"the pack is in {result.output_dir}/"))
+    return result
 
 
 def _run(entries: List[_Entry], request: MoveRequest, target: str, loader: str,

@@ -45,6 +45,10 @@ def move_command(
         help="When mods are left without a build, try the nearest version where more of the "
              "pack runs: ask (countdown; default in a terminal), auto, never.",
         case_sensitive=False),
+    new_instance: bool = typer.Option(
+        True, "--new-instance/--no-new-instance",
+        help="For a Prism Launcher instance, also add the moved pack to the launcher as a "
+             "new instance next to it (the old one is never changed)."),
 ):
     """Move a pack (a mods folder) to another Minecraft version."""
     from modkeel.core.events import ModResolved, PackScanned, TargetSearch
@@ -81,8 +85,13 @@ def move_command(
 
     decide = cli_decide((fallback or default_mode(console.is_terminal)).lower(), hint,
                         modkeel_cfg)
+    # a plain folder (no launcher's) has no instance to sit beside: not even a note for it
+    if new_instance and instance is None:
+        from modkeel.newinstance import instance_of
+
+        new_instance = instance_of(mods_dir) is not None
     result = move_pack(MoveRequest(str(mods_dir), mc_version, loader, loader_version,
-                                   output_dir, token), events=view, decide=decide)
+                                   output_dir, token, new_instance), events=view, decide=decide)
 
     console.print(f"\n[bold]MC {result.target} ({result.loader}): {result.ready} of "
                   f"{len(result.mods)} ready in {escape(str(result.output_dir))}/[/bold]")

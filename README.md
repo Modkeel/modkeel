@@ -233,6 +233,14 @@ if your own file passes the checks on the new version, it is reused. When some m
 build there, Modkeel proposes the nearest version where more of the pack runs (`--fallback
 ask|auto|never`). Shared dependencies are downloaded once.
 
+When the pack is a Prism Launcher instance, the moved pack is also added to Prism as a new
+instance next to it, "<name> (<version>)": the loader at a version for the new Minecraft, the
+moved mods, your settings, `options.txt`, `config/`, resource and shader packs. Your worlds
+are not copied (opening one on a new version upgrades it for good: copy it yourself, from a
+backup), and the old instance is never changed. `--no-new-instance` leaves only the folder.
+The Modrinth App and CurseForge keep their instances in their own database, so for them the
+pack stays in `out/mc-<version>/`.
+
 ### `modkeel instances`
 
 Lists the instances of the launchers on this machine (Prism Launcher, Modrinth App,
