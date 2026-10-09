@@ -13,6 +13,7 @@ import requests
 
 from modkeel.constants import MODRINTH_USER_AGENT
 from modkeel.loaders import ALL_LOADERS
+from modkeel.modrinth import modrinth_call
 from modkeel.models import ModAvailability, RecommendationResult, ScannedMod
 from modkeel.utils import fuzzy_score
 
@@ -67,7 +68,8 @@ class RecommendationEngine:
         for i in range(0, len(all_hashes), batch_size):
             batch = all_hashes[i:i + batch_size]
             try:
-                resp = requests.post(
+                resp = modrinth_call(
+                    requests.post,
                     f"{_BASE_URL}/version_files",
                     json={"hashes": batch, "algorithm": "sha1"},
                     headers=_HEADERS,
@@ -116,7 +118,8 @@ class RecommendationEngine:
     def _fetch_project_details(self, avail: ModAvailability) -> None:
         """Fetch project slug and downloads from project_id."""
         try:
-            resp = requests.get(
+            resp = modrinth_call(
+                requests.get,
                 f"{_BASE_URL}/project/{avail.modrinth_project_id}",
                 headers=_HEADERS,
                 timeout=10,
@@ -136,7 +139,8 @@ class RecommendationEngine:
 
         try:
             facets = '[["project_type:mod"]]'
-            resp = requests.get(
+            resp = modrinth_call(
+                requests.get,
                 f"{_BASE_URL}/search",
                 params={"query": search_query, "facets": facets, "limit": 5},
                 headers=_HEADERS,
@@ -195,7 +199,8 @@ class RecommendationEngine:
                 continue
 
             try:
-                resp = requests.get(
+                resp = modrinth_call(
+                    requests.get,
                     f"{_BASE_URL}/project/{slug}/version",
                     headers=_HEADERS,
                     timeout=20,
