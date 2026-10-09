@@ -212,5 +212,10 @@ class GitHubCode(Event):
     url: str
     expires_in: int                       # seconds the code stays valid
 
+    @property
+    def minutes(self) -> int:
+        """Whole minutes to show, rounded up: GitHub gives 899 seconds, which reads as 15."""
+        return max(1, -(-self.expires_in // 60))
+
 
 Emitter = Callable[[Event], None]

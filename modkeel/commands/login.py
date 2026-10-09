@@ -25,7 +25,7 @@ def login_command(
         if isinstance(event, GitHubCode):
             console.print(f"\nOpen [bold]{escape(event.url)}[/bold] and enter the code\n\n"
                           f"    [bold cyan]{escape(event.code)}[/bold cyan]\n\n"
-                          f"[dim]Valid {event.expires_in // 60} minutes. Waiting for GitHub "
+                          f"[dim]Valid {event.minutes} minutes. Waiting for GitHub "
                           "(Ctrl+C to stop)...[/dim]")
             if not no_browser and console.is_terminal:
                 try:

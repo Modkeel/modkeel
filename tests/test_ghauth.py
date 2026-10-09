@@ -179,13 +179,22 @@ class TestLoginCommand:
         from modkeel.ghauth import SignedIn
 
         def fake(events, *a, **k):
-            events(GitHubCode("ABCD-1234", "https://github.com/login/device", 900))
+            events(GitHubCode("ABCD-1234", "https://github.com/login/device", 899))
             return SignedIn("gho_x", "juan")
 
         with patch("modkeel.ghauth.sign_in", fake):
             out = self.run()
         assert out.exit_code == 0
         assert "ABCD-1234" in out.output and "Signed in with GitHub as juan" in out.output
+        assert "Valid 15 minutes" in out.output
+
+    @pytest.mark.parametrize("seconds, minutes", [(900, 15), (899, 15), (61, 2), (5, 1)])
+    def test_minutes_are_rounded_up(self, seconds, minutes):
+        from modkeel.core.text import render_text
+
+        event = GitHubCode("ABCD-1234", "https://github.com/login/device", seconds)
+        assert event.minutes == minutes
+        assert f"(valid {minutes} minutes)" in render_text(event)
 
     def test_a_failure_exits_1(self):
         with patch("modkeel.ghauth.sign_in", side_effect=SignInError("access was refused")):
