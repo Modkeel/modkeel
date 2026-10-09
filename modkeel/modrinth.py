@@ -660,6 +660,14 @@ def _norm_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+def same_mod_name(ours: str, theirs: str) -> bool:
+    """Do two sites' names for a project agree? One contains the other once normalized:
+    "Just Enough Items (JEI)" on CurseForge is "Just Enough Items" on Modrinth. Names under
+    four characters are too short to tell anything apart."""
+    a, b = _norm_name(ours), _norm_name(theirs)
+    return len(b) >= 4 and len(a) >= 1 and (a in b or b in a)
+
+
 def _name_keys(hit: Dict) -> set:
     """Normalized names a project answers to: slug, title, and both halves of
     'Title (ALIAS)' (e.g. 'YetAnotherConfigLib (YACL)')."""

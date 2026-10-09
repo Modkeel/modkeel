@@ -120,7 +120,9 @@ class TestScan:
         with resolving({"Sodium", "Cloth Config API"}), evidence(ok=False):
             result = move_pack(MoveRequest(str(pack), "1.21.10"), events=lambda e: None)
         mine = next(m for m in result.mods if m.file == "mine.jar")
-        assert mine.status == "unknown" and mine.detail.startswith("on CurseForge only")
+        # known exactly (the launcher's record), so missing rather than unknown
+        assert (mine.status, mine.identified_by) == ("missing", "launcher")
+        assert mine.detail.startswith("on CurseForge only, not on Modrinth; your JAR does not")
 
     def test_the_pack_loader_is_what_its_jars_declare(self, pack):
         entries = scan_pack(pack, ModrinthClient(_config(), lambda e: None), lambda e: None)
