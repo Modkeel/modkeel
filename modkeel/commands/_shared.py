@@ -54,10 +54,22 @@ def resolve_github_token(
         console.print(
             "\n[yellow]No GitHub token found.[/yellow] "
             "A token is needed to search GitHub forks.\n"
-            "  Create one at: [bold]https://github.com/settings/tokens[/bold]\n"
-            "  Scopes needed: [dim]none (public repo access only)[/dim]\n"
+            "  Type [bold]login[/bold] to sign in with GitHub in your browser, or paste a token\n"
+            "  (https://github.com/settings/tokens, no scopes needed). Enter skips forks.\n"
         )
-        token = typer.prompt("  GitHub token", hide_input=True, default="")
+        token = typer.prompt("  GitHub token", hide_input=True, default="",
+                             show_default=False)
+        if token.strip().lower() == "login":
+            from modkeel.commands.login import login_command
+
+            try:
+                login_command(no_browser=False)      # saves the token on success
+            except typer.Exit:
+                console.print("[dim]  Going on without forks.[/dim]")
+                return None
+            # the caller's config object would save its stale copy over the new token
+            modkeel_cfg.github_token = ModkeelConfig().github_token
+            return modkeel_cfg.github_token
         if token:
             modkeel_cfg.github_token = token
             console.print("[green]Token saved to ~/.modkeel/config.toml[/green]")

@@ -16,6 +16,7 @@ from modkeel.commands.recommend import recommend_command
 from modkeel.commands.search import search_command
 from modkeel.commands.serve import serve_command
 from modkeel.commands.status import status_command
+from modkeel.commands.login import login_command
 from modkeel.commands.token import token_command
 from modkeel.constants import MODKEEL_VERSION
 
@@ -56,6 +57,7 @@ app.command(name="get")(get_command)
 app.command(name="move")(move_command)
 app.command(name="instances")(instances_command)
 app.command(name="token")(token_command)
+app.command(name="login")(login_command)
 app.command(name="status")(status_command)
 app.command(name="recommend")(recommend_command)
 app.command(name="serve")(serve_command)

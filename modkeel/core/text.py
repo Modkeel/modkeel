@@ -15,6 +15,7 @@ from modkeel.core.events import (
     Downloading,
     Event,
     ForkChosen,
+    GitHubCode,
     Message,
     ModIdentified,
     ModResolved,
@@ -78,6 +79,9 @@ def render_text(event: Event) -> Optional[str]:
         by_launcher = f"{launcher} by the launcher's records, " if launcher else ""
         return (f"\n{len(event.mods)} JARs in {event.folder}: {exact} identified by their hash, "
                 f"{by_launcher}{guessed} by name, {unknown} unknown")
+    if isinstance(event, GitHubCode):
+        return (f"\nSign in with GitHub: open {event.url} and enter the code {event.code}"
+                f" (valid {event.expires_in // 60} minutes)")
     if isinstance(event, TargetSearch):
         what = (f"{event.subject} runs" if event.scope == "mod"
                 else "more of these mods run")

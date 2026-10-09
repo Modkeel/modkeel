@@ -17,8 +17,13 @@ events, the same questions, the same result. One JSON object per line, UTF-8.
 Rules that keep a front end from hanging or guessing:
 
 - One request at a time; a second one while the first runs gets error "busy".
-- Queries (QUERIES: "instances") only read this machine: answered at once with a result,
-  no events or questions, even while a request runs.
+- Queries (QUERIES: "instances", "github") only read this machine: answered at once with a
+  result, no events or questions, even while a request runs.
+- GitHub: a request without github_token uses the token saved on this machine (config.toml,
+  `modkeel token` / `modkeel login`). need_token is answered with a token, null (skip forks)
+  or {"sign_in": true, "open_browser": bool}: the engine then signs in with GitHub (a
+  github_code event shows the code; open_browser: the engine opens GitHub's page itself) and
+  saves the token. The method "sign_in" ({"open_browser": bool}) does the same outside a run.
 - A question waits for its answer. An answer of the wrong type, or the client closing its
   input, answers it with the engine's safe default (decisions.safe_default).
 - Closing the input also cancels the running request; the server exits when it is done.
@@ -44,6 +49,7 @@ from modkeel.core.decisions import (
     ChangeTarget,
     NeedToken,
     Question,
+    SignIn,
     safe_default,
 )
 from modkeel.core.events import PROTOCOL, Event, _plain
@@ -76,6 +82,8 @@ def accepted_answer(question: Question, value: Any) -> Any:
     if isinstance(question, ChangeTarget):
         return value if isinstance(value, bool) else safe_default(question)
     if isinstance(question, NeedToken):
+        if isinstance(value, dict) and value.get("sign_in") is True:
+            return SignIn(open_browser=value.get("open_browser") is True)
         return value if isinstance(value, str) and value else safe_default(question)
     return safe_default(question)
 
@@ -98,10 +106,23 @@ def get_result_dict(result) -> Dict[str, Any]:
     }
 
 
+def saved_token() -> Optional[str]:
+    """The GitHub token saved on this machine, read without creating a config file."""
+    from modkeel.config import ModkeelConfig
+
+    if not ModkeelConfig.CONFIG_FILE.exists():
+        return None
+    return ModkeelConfig().github_token
+
+
+def _with_saved_token(params: Dict[str, Any]) -> Dict[str, Any]:
+    return params if params.get("github_token") else {**params, "github_token": saved_token()}
+
+
 def _get(params, events, decide, cancelled) -> Dict[str, Any]:
     from modkeel.core.engine import GetRequest, get_mod
 
-    request = GetRequest(**params)   # unknown or missing fields: TypeError -> bad_params
+    request = GetRequest(**_with_saved_token(params))   # unknown or missing fields: TypeError -> bad_params
     if not (request.query and request.mc_version and request.loader):
         raise TypeError("query, mc_version and loader are required")
     return get_result_dict(get_mod(request, events=events, decide=decide,
@@ -128,7 +149,7 @@ def move_result_dict(result) -> Dict[str, Any]:
 def _move(params, events, decide, cancelled) -> Dict[str, Any]:
     from modkeel.core.move import MoveRequest, move_pack
 
-    request = MoveRequest(**params)   # unknown or missing fields: TypeError -> bad_params
+    request = MoveRequest(**_with_saved_token(params))   # unknown field: TypeError
     if not (request.mods_dir and request.mc_version):
         raise TypeError("mods_dir and mc_version are required")
     if not Path(request.mods_dir).is_dir():
@@ -137,7 +158,22 @@ def _move(params, events, decide, cancelled) -> Dict[str, Any]:
                                       cancelled=cancelled))
 
 
-METHODS: Dict[str, Handler] = {"get": _get, "move": _move}
+def _sign_in(params, events, decide, cancelled) -> Dict[str, Any]:
+    """Sign in with GitHub outside a run (ghauth.sign_in): the code as a github_code event,
+    the token saved on this machine. A refusal or an expired code is a result, not an error."""
+    from modkeel.ghauth import SignInError, sign_in
+
+    unknown = set(params) - {"open_browser"}
+    if unknown:
+        raise TypeError(f"sign_in takes only open_browser, got {', '.join(sorted(unknown))}")
+    try:
+        done = sign_in(events, cancelled, open_browser=params.get("open_browser") is True)
+    except SignInError as e:
+        return {"signed_in": False, "user": None, "reason": str(e)}
+    return {"signed_in": True, "user": done.user, "reason": ""}
+
+
+METHODS: Dict[str, Handler] = {"get": _get, "move": _move, "sign_in": _sign_in}
 
 
 def _instances(params) -> Dict[str, Any]:
@@ -150,7 +186,15 @@ def _instances(params) -> Dict[str, Any]:
 
 
 # A query: (params) -> JSON-ready result; quick and read-only, so it never waits for a run.
-QUERIES: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {"instances": _instances}
+def _github(params) -> Dict[str, Any]:
+    """Whether a GitHub token is saved here (the app offers "Sign in with GitHub" if not)."""
+    if params:
+        raise TypeError(f"github takes no params, got {', '.join(sorted(params))}")
+    return {"signed_in": bool(saved_token())}
+
+
+QUERIES: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
+    "instances": _instances, "github": _github}
 
 
 class _Run:
