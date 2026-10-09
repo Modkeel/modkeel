@@ -159,7 +159,7 @@ class TestPort:
 
 
 class TestWire:
-    def test_port_method_runs_and_reports_each_mod(self, pack):
+    def test_move_method_runs_and_reports_each_mod(self, pack):
         from modkeel.core.wire import METHODS
 
         events = []
@@ -169,9 +169,69 @@ class TestWire:
         assert json.loads(json.dumps(out))["ready"] == 3
         assert {m["file"]: m["status"] for m in out["mods"]}["mine.jar"] == "reused"
 
-    def test_port_refuses_a_path_that_is_not_a_folder(self, tmp_path):
+    def test_move_refuses_a_path_that_is_not_a_folder(self, tmp_path):
         from modkeel.core.wire import METHODS
 
         with pytest.raises(TypeError, match="not a folder"):
             METHODS["move"]({"mods_dir": str(tmp_path / "nope"), "mc_version": "1.21.10"},
                             lambda e: None, safe_default, lambda: False)
+
+
+class TestCommand:
+    """`modkeel move` takes a folder or an instance's name; `modkeel instances` lists them."""
+
+    def _instances(self, pack):
+        from modkeel.instances import Instance
+
+        return [Instance("prism", "All the Mods 10", str(pack.parent), str(pack), "1.21.1",
+                         "neoforge", "21.1.77", 3),
+                Instance("prism", "All the Mods 9", "/nowhere", "/nowhere/mods", "1.20.1")]
+
+    def run(self, *args):
+        from typer.testing import CliRunner
+
+        from modkeel.cli import app
+
+        return CliRunner().invoke(app, list(args))
+
+    def test_an_instance_name_moves_its_mods_with_its_loader(self, pack):
+        seen = {}
+
+        def fake_move(request, **_):
+            seen["request"] = request
+            from modkeel.core.move import MoveResult
+            return MoveResult(request.mc_version, request.loader, Path("out"))
+
+        with patch("modkeel.instances.find_instances", lambda: self._instances(pack)), \
+                patch("modkeel.core.move.move_pack", fake_move):
+            result = self.run("move", "all the mods 10", "-m", "1.21.10", "--fallback", "never")
+        assert seen["request"].mods_dir == str(pack)
+        assert seen["request"].loader == "neoforge"        # the instance's, not guessed
+        assert "Prism Launcher: All the Mods 10 (1.21.1 neoforge)" in result.output
+
+    def test_an_ambiguous_or_unknown_name_is_refused(self, pack):
+        with patch("modkeel.instances.find_instances", lambda: self._instances(pack)):
+            ambiguous = self.run("move", "All the Mods", "-m", "1.21.10")
+            unknown = self.run("move", "Create Above", "-m", "1.21.10")
+        assert ambiguous.exit_code == 2 and "several instances match" in ambiguous.output
+        assert unknown.exit_code == 2 and "nor an instance's name" in unknown.output
+
+    def test_an_instance_folder_means_its_mods(self, pack, tmp_path):
+        seen = {}
+
+        def fake_move(request, **_):
+            seen["dir"] = request.mods_dir
+            from modkeel.core.move import MoveResult
+            return MoveResult(request.mc_version, "fabric", Path("out"))
+
+        with patch("modkeel.core.move.move_pack", fake_move):
+            self.run("move", str(pack.parent), "-m", "1.21.10", "--fallback", "never")
+        assert seen["dir"] == str(pack)
+
+    def test_instances_lists_and_prints_json(self, pack):
+        with patch("modkeel.instances.find_instances", lambda: self._instances(pack)):
+            table = self.run("instances")
+            listed = self.run("instances", "--json")
+        assert "All the Mods 10" in table.output and "neoforge 21.1.77" in table.output
+        assert [i["name"] for i in json.loads(listed.output)] == ["All the Mods 10",
+                                                                    "All the Mods 9"]

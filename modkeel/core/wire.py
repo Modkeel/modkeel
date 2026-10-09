@@ -17,6 +17,8 @@ events, the same questions, the same result. One JSON object per line, UTF-8.
 Rules that keep a front end from hanging or guessing:
 
 - One request at a time; a second one while the first runs gets error "busy".
+- Queries (QUERIES: "instances") only read this machine: answered at once with a result,
+  no events or questions, even while a request runs.
 - A question waits for its answer. An answer of the wrong type, or the client closing its
   input, answers it with the engine's safe default (decisions.safe_default).
 - Closing the input also cancels the running request; the server exits when it is done.
@@ -136,6 +138,19 @@ def _move(params, events, decide, cancelled) -> Dict[str, Any]:
 METHODS: Dict[str, Handler] = {"get": _get, "move": _move}
 
 
+def _instances(params) -> Dict[str, Any]:
+    """The player's launcher instances (modkeel/instances.py), for a "pick your pack" list."""
+    from modkeel.instances import find_instances
+
+    if params:
+        raise TypeError(f"instances takes no params, got {', '.join(sorted(params))}")
+    return {"instances": [i.to_dict() for i in find_instances()]}
+
+
+# A query: (params) -> JSON-ready result; quick and read-only, so it never waits for a run.
+QUERIES: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {"instances": _instances}
+
+
 class _Run:
     """The request in progress: its cancel flag and the question waiting for an answer."""
 
@@ -150,9 +165,11 @@ class Server:
     """Serves the protocol over a pair of text streams (stdin/stdout, or pipes in tests)."""
 
     def __init__(self, reader: TextIO, writer: TextIO,
-                 methods: Optional[Dict[str, Handler]] = None):
+                 methods: Optional[Dict[str, Handler]] = None,
+                 queries: Optional[Dict[str, Callable]] = None):
         self.reader, self.writer = reader, writer
         self.methods = METHODS if methods is None else methods
+        self.queries = QUERIES if queries is None else queries
         self._lock = threading.Lock()
         self._run: Optional[_Run] = None
         self._worker: Optional[threading.Thread] = None
@@ -182,7 +199,7 @@ class Server:
         from modkeel.constants import MODKEEL_VERSION
 
         self.send({"type": "hello", "protocol": PROTOCOL, "modkeel": MODKEEL_VERSION,
-                   "methods": sorted(self.methods)})
+                   "methods": sorted({*self.methods, *self.queries})})
         for line in self.reader:
             if line.strip():
                 self._handle(line)
@@ -213,14 +230,18 @@ class Server:
         if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
             return self._error(None, "bad_message", "a request needs an id (string or number)")
         request_id = str(request_id)
-        method = self.methods.get(message.get("method"))
-        if method is None:
+        name = message.get("method")
+        method = self.methods.get(name)
+        query = self.queries.get(name) if isinstance(name, str) else None
+        if method is None and query is None:
+            known = ", ".join(sorted({*self.methods, *self.queries}))
             return self._error(request_id, "unknown_method",
-                               f"unknown method {message.get('method')!r}; "
-                               f"known: {', '.join(sorted(self.methods))}")
+                               f"unknown method {name!r}; known: {known}")
         params = message.get("params", {})
         if not isinstance(params, dict):
             return self._error(request_id, "bad_params", "params is a JSON object")
+        if query is not None:
+            return self._query(request_id, query, params)
         if self._worker is not None and self._worker.is_alive():
             return self._error(request_id, "busy", "one request at a time")
         run = self._run = _Run(request_id)
@@ -255,6 +276,16 @@ class Server:
             self._error(run.id, "internal", f"{type(e).__name__}: {e}")
         else:
             self.send({"type": "result", "id": run.id, "result": result})
+
+    def _query(self, request_id: str, query: Callable, params: Dict[str, Any]) -> None:
+        """A query runs on the reading thread, beside any request in progress."""
+        try:
+            result = query(dict(params))
+        except TypeError as e:
+            return self._error(request_id, "bad_params", str(e))
+        except Exception as e:  # the server outlives any one request
+            return self._error(request_id, "internal", f"{type(e).__name__}: {e}")
+        self.send({"type": "result", "id": request_id, "result": result})
 
     def _answer(self, message: Dict[str, Any]) -> None:
         run = self._run

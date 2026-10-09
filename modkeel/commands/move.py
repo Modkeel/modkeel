@@ -28,7 +28,9 @@ STATUS = {"delivered": "[green]✓[/green]", "reused": "[green]↻[/green]",
 
 
 def move_command(
-    mods_dir: Path = typer.Argument(..., help="The pack's mods folder (only read)."),
+    pack: str = typer.Argument(..., help="The pack: its mods folder, its instance folder, or "
+                                         "the instance's name (see modkeel instances). "
+                                         "Only read."),
     mc_version: str = typer.Option(..., "--mc-version", "-m",
                                    help="Minecraft version to move the pack to."),
     loader: Optional[str] = typer.Option(None, "--loader", "-l",
@@ -54,9 +56,9 @@ def move_command(
     if fallback is not None and fallback.lower() not in FALLBACK_MODES:
         console.print(f"[red]Error:[/red] --fallback must be one of {', '.join(FALLBACK_MODES)}")
         raise typer.Exit(2)
-    if not mods_dir.is_dir():
-        console.print(f"[red]Error:[/red] not a folder: {escape(str(mods_dir))}")
-        raise typer.Exit(2)
+    mods_dir, instance = _pack_folder(pack)
+    if instance is not None:
+        loader = loader or instance.loader
     if loader:
         require_valid_loader(loader)
     modkeel_cfg = ModkeelConfig()
@@ -74,7 +76,8 @@ def move_command(
             print_event(event)
 
     def hint(option) -> str:
-        return f"modkeel move {mods_dir} -m {option.mc_version}"
+        shown = f'"{pack}"' if " " in pack else pack
+        return f"modkeel move {shown} -m {option.mc_version}"
 
     decide = cli_decide((fallback or default_mode(console.is_terminal)).lower(), hint,
                         modkeel_cfg)
@@ -92,3 +95,30 @@ def move_command(
         console.print(line)
     if result.ready == 0:
         raise typer.Exit(1)
+
+
+def _pack_folder(pack: str):
+    """(mods folder, instance or None) for what the player typed: a folder (a mods folder,
+    or an instance/game folder whose mods/ is used), else an instance's name."""
+    from modkeel.instances import LAUNCHER_NAMES, find_instance, find_instances, mods_dir_of
+
+    folder = Path(pack).expanduser()
+    if folder.is_dir():
+        return mods_dir_of(folder), None
+    instance, candidates = find_instance(pack, find_instances())
+    if instance is None:
+        if candidates:
+            names = ", ".join(f'"{escape(i.name)}"' for i in candidates)
+            console.print(f"[red]Error:[/red] several instances match {escape(pack)!r}: {names}")
+        else:
+            console.print(f"[red]Error:[/red] not a folder, nor an instance's name: "
+                          f"{escape(pack)} (modkeel instances lists them)")
+        raise typer.Exit(2)
+    mods_dir = Path(instance.mods_dir)
+    if not mods_dir.is_dir():
+        console.print(f"[red]Error:[/red] {escape(instance.name)} has no mods folder yet")
+        raise typer.Exit(2)
+    runs = " ".join(x for x in (instance.mc_version, instance.loader) if x)
+    console.print(f"[dim]{LAUNCHER_NAMES[instance.launcher]}: {escape(instance.name)}"
+                  f"{f' ({runs})' if runs else ''} -> {escape(str(mods_dir))}[/dim]")
+    return mods_dir, instance
