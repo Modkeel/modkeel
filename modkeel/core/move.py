@@ -4,8 +4,11 @@ target out (IDEA-023 "your instances"; the engine's pack entry point, IDEA-028).
     move_pack(MoveRequest(mods_dir, mc_version))
 
 1. Identify every JAR exactly: its SHA-1 is looked up on Modrinth in one request, which
-   names the project and version with nothing to guess. A JAR Modrinth does not know is
-   looked up by the name in its metadata ("name": shown as a guess), else left unknown.
+   names the project and version with nothing to guess. For a JAR Modrinth does not know,
+   the launcher's own record of what it installed is read (instances.launcher_records):
+   a Modrinth project id there is exact too ("launcher"); a CurseForge project gives its
+   slug and name to try on Modrinth. Then the name in the JAR's metadata ("name": shown as
+   a guess), else the mod is left unknown.
 2. Each identified mod goes through the sources for the target (the same Resolver as `get`:
    official build, older build that still runs, community fork, relaxed range).
 3. A JAR nobody can resolve (not on Modrinth, or no build found) is judged as it is: if the
@@ -23,7 +26,7 @@ import shutil
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from modkeel.core.decisions import Cancel, ChangeTarget, Decide, NeedToken, check_cancel, \
     safe_default
@@ -53,7 +56,7 @@ class MovedMod:
 
     file: str                             # the JAR's file name in the player's folder
     name: str
-    identified_by: Optional[str]          # "hash" (exact), "name" (a guess), None (unknown)
+    identified_by: Optional[str]          # "hash" | "launcher" (exact), "name" (a guess), None
     slug: Optional[str] = None
     status: str = "missing"               # delivered | reused | missing | unknown
     delivered: Optional[Delivery] = None
@@ -80,6 +83,7 @@ class _Entry:
     scanned: object                       # scanner.ScannedMod or None (no metadata)
     mod: MovedMod
     project: Optional[Dict] = None
+    record: object = None                 # instances.LauncherRecord, when Modrinth lacks the hash
 
 
 def _as_hit(project: Dict) -> Dict:
@@ -89,6 +93,7 @@ def _as_hit(project: Dict) -> Dict:
 
 def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_Entry]:
     """Every JAR in the folder with who it is (step 1 above)."""
+    from modkeel.instances import launcher_records
     from modkeel.scanner import _scan_single_jar, compute_sha1
     from modkeel.sources import identify_mod
 
@@ -96,6 +101,8 @@ def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_
     hashes = {jar: compute_sha1(jar) for jar in jars}
     by_hash = modrinth.versions_by_hash(list(hashes.values())) or {}
     projects = modrinth.fetch_projects([v["project_id"] for v in by_hash.values()])
+    records = launcher_records(Path(mods_dir), [j.name for j in jars
+                                                if hashes[j] not in by_hash])
     entries = []
     for jar in jars:
         scanned = _scan_single_jar(jar, hashes[jar])
@@ -106,16 +113,50 @@ def scan_pack(mods_dir: Path, modrinth, events: Emitter = print_event) -> List[_
             entry = _Entry(jar, scanned, MovedMod(jar.name, project["title"], "hash",
                                                    project["slug"]), _as_hit(project))
         else:
-            entry = _Entry(jar, scanned, MovedMod(jar.name, name, None))
-            full = _by_metadata(scanned, modrinth, identify_mod) if scanned else None
-            if full:
+            record = records.get(jar.name)
+            if not scanned and record and record.name:
+                name = record.name
+            entry = _Entry(jar, scanned, MovedMod(jar.name, name, None), record=record)
+            found = _by_launcher(record, scanned, modrinth) if record else None
+            if not found and scanned:
+                full = _by_metadata(scanned, modrinth, identify_mod)
+                found = (full, "name") if full else None
+            if found:
+                full, how = found
                 entry.project = _as_hit(full)
-                entry.mod = MovedMod(jar.name, full.get("title", name), "name",
-                                      full.get("slug"))
+                entry.mod = MovedMod(jar.name, full.get("title", name), how, full.get("slug"))
         entries.append(entry)
     events(PackScanned(str(mods_dir), tuple(
         (e.mod.file, e.mod.name, e.mod.slug, e.mod.identified_by) for e in entries)))
     return entries
+
+
+def _for_loader(project: Dict, scanned) -> bool:
+    return (project.get("project_type") == "mod"
+            and (not scanned or not scanned.declared_loader
+                 or scanned.declared_loader in project.get("loaders", [])))
+
+
+def _by_launcher(record, scanned, modrinth) -> Optional[Tuple[Dict, str]]:
+    """(project, how) from the launcher's record of the JAR. A Modrinth project id names the
+    project ("launcher", exact). A CurseForge project is tried on Modrinth by its slug there,
+    kept only if the names agree too and it is a mod for the JAR's loader (a guess, "name");
+    most mods use the same slug on both sites."""
+    from modkeel.modrinth import _norm_name
+
+    if record.source == "modrinth":
+        project = modrinth.fetch_project(record.project_id)
+        return (project, "launcher") if project else None
+    if not (record.slug and record.name):
+        return None
+    project = modrinth.fetch_project(record.slug)
+    if not project or not _for_loader(project, scanned):
+        return None
+    ours, theirs = _norm_name(record.name), _norm_name(project.get("title", ""))
+    # "Just Enough Items (JEI)" on CurseForge is "Just Enough Items" on Modrinth
+    if len(theirs) >= 4 and (ours in theirs or theirs in ours):
+        return project, "name"
+    return None
 
 
 def _by_metadata(scanned, modrinth, identify_mod) -> Optional[Dict]:
@@ -124,9 +165,7 @@ def _by_metadata(scanned, modrinth, identify_mod) -> Optional[Dict]:
     A slug hit counts only if it is a mod for the JAR's loader. Still a guess ("name")."""
     for slug in dict.fromkeys([scanned.mod_id, scanned.mod_id.replace("_", "-")]):
         project = modrinth.fetch_project(slug)
-        if (project and project.get("project_type") == "mod"
-                and (not scanned.declared_loader
-                     or scanned.declared_loader in project.get("loaders", []))):
+        if project and _for_loader(project, scanned):
             return project
     ref = identify_mod(scanned.mod_name or scanned.mod_id, modrinth)
     if ref.project:
@@ -233,8 +272,10 @@ def _reuse_if_it_runs(entry: _Entry, mod: MovedMod, target: str, config: ModComp
                       events=events)
     if not evidence.ok:
         if entry.project is None:
+            where = ("on CurseForge only, not on Modrinth"
+                     if getattr(entry.record, "source", None) == "curseforge" else "not on Modrinth")
             mod.status = "unknown"
-            mod.detail = f"not on Modrinth, and your JAR does not run there: {evidence.reason}"
+            mod.detail = f"{where}, and your JAR does not run there: {evidence.reason}"
         return
     dest = out / entry.jar.name
     shutil.copy2(entry.jar, dest)

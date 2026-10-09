@@ -186,7 +186,8 @@ class ModResolved(Event):
 @dataclass(frozen=True)
 class PackScanned(Event):
     """A mods folder read and identified (core/move.py): one row per JAR,
-    (file, name, Modrinth slug or None, identified_by: "hash" | "name" | None)."""
+    (file, name, Modrinth slug or None, identified_by: "hash" | "launcher" | "name" | None).
+    hash and launcher (the launcher's record names the Modrinth project) are exact."""
 
     kind: ClassVar[str] = "pack_scanned"
     folder: str

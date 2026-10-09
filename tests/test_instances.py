@@ -5,11 +5,13 @@ The launchers' folders are built in tmp_path as each one writes them; `home`, `s
 `env` stand in for the machine.
 """
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
 
-from modkeel.instances import Instance, find_instance, find_instances, mods_dir_of
+from modkeel.instances import Instance, find_instance, find_instances, launcher_records, \
+    mods_dir_of
 
 
 def jars(mods: Path, n: int) -> None:
@@ -178,3 +180,63 @@ def test_a_game_folder_means_its_mods(tmp_path):
     assert mods_dir_of(tmp_path / "inst/minecraft/mods") == tmp_path / "inst/minecraft/mods"
     (tmp_path / "plain").mkdir()
     assert mods_dir_of(tmp_path / "plain") == tmp_path / "plain"
+
+
+class TestLauncherRecords:
+    """What the launcher says it installed: Prism's .index, packwiz, CurseForge's addons."""
+
+    @staticmethod
+    def pw(folder: Path, slug: str, filename: str, update: str, hash_line: str = "") -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{slug}.pw.toml").write_text(
+            f'name = "{slug.title()}"\nfilename = "{filename}"\nside = "both"\n\n'
+            f'[download]\n{hash_line}\n\n{update}\n')
+
+    def test_prism_index_names_the_project_on_either_site(self, tmp_path):
+        mods = tmp_path / "minecraft/mods"
+        jars(mods, 3)
+        sha512 = hashlib.sha512(b"PK").hexdigest()
+        self.pw(mods / ".index", "sodium", "mod0.jar",
+                '[update.modrinth]\nmod-id = "AANobbMI"\nversion = "x"',
+                f'hash-format = "sha512"\nhash = "{sha512}"')
+        self.pw(mods / ".index", "jei", "mod1.jar",
+                "[update.curseforge]\nfile-id = 5\nproject-id = 238222")
+        self.pw(mods / ".index", "gone", "removed.jar", '[update.modrinth]\nmod-id = "x"')
+        found = launcher_records(mods)
+        assert {f: (r.source, r.project_id, r.slug) for f, r in found.items()} == {
+            "mod0.jar": ("modrinth", "AANobbMI", "sodium"),
+            "mod1.jar": ("curseforge", "238222", "jei"),
+        }
+
+    def test_a_replaced_jar_loses_its_record(self, tmp_path):
+        jars(tmp_path / "mods", 1)
+        self.pw(tmp_path / "mods/.index", "s", "mod0.jar", '[update.modrinth]\nmod-id = "A"',
+                'hash-format = "sha1"\nhash = "0000"')
+        assert launcher_records(tmp_path / "mods") == {}
+
+    def test_curseforge_installed_addons(self, tmp_path):
+        jars(tmp_path / "mods", 2)
+        (tmp_path / "minecraftinstance.json").write_text(json.dumps({"installedAddons": [
+            {"addonID": 238222, "name": "Just Enough Items (JEI)",
+             "webSiteURL": "https://www.curseforge.com/minecraft/mc-mods/jei",
+             "installedFile": {"fileNameOnDisk": "mod0.jar", "hashes": [
+                 {"type": 1, "value": hashlib.sha1(b"PK").hexdigest()}]}},
+            {"addonID": 1, "name": "Changed", "installedFile": {
+                "fileName": "mod1.jar", "hashes": [{"type": 1, "value": "ff"}]}},
+            {"name": "broken entry"},
+        ]}))
+        found = launcher_records(tmp_path / "mods")
+        assert list(found) == ["mod0.jar"]
+        assert (found["mod0.jar"].name, found["mod0.jar"].slug) == \
+            ("Just Enough Items (JEI)", "jei")
+
+    def test_packwiz_files_beside_the_jars_and_only_the_files_asked(self, tmp_path):
+        jars(tmp_path / "mods", 2)
+        self.pw(tmp_path / "mods", "a", "mod0.jar", '[update.modrinth]\nmod-id = "A"')
+        self.pw(tmp_path / "mods", "b", "mod1.jar", '[update.modrinth]\nmod-id = "B"')
+        (tmp_path / "mods/bad.pw.toml").write_text("not = [toml")
+        assert list(launcher_records(tmp_path / "mods", ["mod1.jar"])) == ["mod1.jar"]
+
+    def test_no_launcher_files(self, tmp_path):
+        jars(tmp_path / "mods", 1)
+        assert launcher_records(tmp_path / "mods") == {}

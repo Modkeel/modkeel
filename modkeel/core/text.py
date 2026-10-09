@@ -72,10 +72,12 @@ def render_text(event: Event) -> Optional[str]:
         return "\n".join(lines)
     if isinstance(event, PackScanned):
         exact = sum(1 for m in event.mods if m[3] == "hash")
+        launcher = sum(1 for m in event.mods if m[3] == "launcher")
         guessed = sum(1 for m in event.mods if m[3] == "name")
-        unknown = len(event.mods) - exact - guessed
+        unknown = len(event.mods) - exact - launcher - guessed
+        by_launcher = f"{launcher} by the launcher's records, " if launcher else ""
         return (f"\n{len(event.mods)} JARs in {event.folder}: {exact} identified by their hash, "
-                f"{guessed} by name, {unknown} unknown")
+                f"{by_launcher}{guessed} by name, {unknown} unknown")
     if isinstance(event, TargetSearch):
         what = (f"{event.subject} runs" if event.scope == "mod"
                 else "more of these mods run")

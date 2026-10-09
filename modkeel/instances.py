@@ -19,11 +19,20 @@ stores its instances its own way; everything here only reads:
 A field a launcher does not give (or a file that cannot be read) is None, never a guess; an
 instance with no mods folder yet is still listed (mods = 0). Paths come from the platform's
 usual places; `home`, `system` and `env` are parameters so tests can build any of them.
+
+    launcher_records(mods_dir) -> {file name: LauncherRecord(source, project_id, name, ...)}
+
+What the launcher itself installed in a mods folder, from its own index: Prism's
+mods/.index/<slug>.pw.toml (packwiz format, also *.pw.toml beside the JARs of a packwiz
+pack) and CurseForge's minecraftinstance.json (installedAddons). It names the project a JAR
+came from even when the file is not on Modrinth (a CurseForge download). A record whose hash
+no longer matches the JAR on disk (replaced since) is dropped.
 """
 
 from __future__ import annotations
 
 import configparser
+import hashlib
 import json
 import os
 import platform
@@ -31,6 +40,9 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import urlparse
+
+import toml
 
 LAUNCHERS = ("prism", "modrinth", "curseforge", "minecraft")
 LAUNCHER_NAMES = {"prism": "Prism Launcher", "modrinth": "Modrinth App",
@@ -281,3 +293,87 @@ def mods_dir_of(folder: Path) -> Path:
         if folder.name != "mods" and (folder / sub).is_dir():
             return folder / sub
     return folder
+
+
+# --- What the launcher installed ------------------------------------------------------------
+
+@dataclass
+class LauncherRecord:
+    """A launcher's own record of one JAR it installed."""
+
+    source: str                      # "modrinth" | "curseforge": where it was downloaded from
+    project_id: str                  # that site's project id (Modrinth "AANobbMI", CF "238222")
+    name: Optional[str] = None       # the project's name on that site
+    slug: Optional[str] = None       # its slug there, when the record gives one
+    hash_format: Optional[str] = None
+    hash: Optional[str] = None       # of the file as installed, to tell a replaced JAR
+
+
+def _packwiz(path: Path) -> Optional[Tuple[str, LauncherRecord]]:
+    """One .pw.toml: (file name, record), or None if it names neither site."""
+    try:
+        data = toml.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, toml.TomlDecodeError):
+        return None
+    filename, update = data.get("filename"), data.get("update") or {}
+    download = data.get("download") or {}
+    if not isinstance(filename, str) or not isinstance(update, dict):
+        return None
+    slug = path.name[:-len(".pw.toml")]
+    for source, key in (("modrinth", "mod-id"), ("curseforge", "project-id")):
+        ids = update.get(source)
+        if isinstance(ids, dict) and ids.get(key) is not None:
+            return filename, LauncherRecord(source, str(ids[key]), data.get("name"), slug,
+                                            download.get("hash-format"), download.get("hash"))
+    return None
+
+
+def _curseforge_addons(game: Path) -> Dict[str, LauncherRecord]:
+    data = _read_json(game / "minecraftinstance.json") or {}
+    records = {}
+    for addon in data.get("installedAddons") or []:
+        file = addon.get("installedFile") if isinstance(addon, dict) else None
+        if not isinstance(file, dict) or addon.get("addonID") is None:
+            continue
+        filename = file.get("fileNameOnDisk") or file.get("fileName")
+        if not filename:
+            continue
+        # hashes: [{"type": 1, "value": sha1}, {"type": 2, "value": md5}] (CurseForge's HashAlgo)
+        sha1 = next((h.get("value") for h in file.get("hashes") or []
+                     if isinstance(h, dict) and h.get("type") == 1), None)
+        site = urlparse(addon.get("webSiteURL") or "").path.rstrip("/").rsplit("/", 1)[-1]
+        records[filename] = LauncherRecord("curseforge", str(addon["addonID"]), addon.get("name"),
+                                           site or None, "sha1" if sha1 else None, sha1)
+    return records
+
+
+def _still_installed(jar: Path, record: LauncherRecord) -> bool:
+    """The JAR on disk is the one the launcher installed (no hash in the record: trusted)."""
+    if not record.hash or not record.hash_format:
+        return True
+    try:
+        digest = hashlib.new(record.hash_format.lower())
+        with open(jar, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                digest.update(chunk)
+    except (OSError, ValueError):     # unreadable, or a hash format hashlib does not know
+        return True
+    return digest.hexdigest() == record.hash.lower()
+
+
+def launcher_records(mods_dir: Path, only: Optional[Iterable[str]] = None
+                     ) -> Dict[str, LauncherRecord]:
+    """File name -> the launcher's record of it, for the JARs in mods_dir (or those named in
+    `only`, so hashes are computed only for the files that need them). Prism's index wins
+    over CurseForge's when both name a file."""
+    mods_dir = Path(mods_dir)
+    records = _curseforge_addons(mods_dir.parent)
+    for path in [*sorted(mods_dir.glob("*.pw.toml")),
+                 *sorted((mods_dir / ".index").glob("*.pw.toml"))]:
+        found = _packwiz(path)
+        if found:
+            records[found[0]] = found[1]
+    wanted = set(only) if only is not None else None
+    return {name: rec for name, rec in records.items()
+            if (wanted is None or name in wanted) and (mods_dir / name).is_file()
+            and _still_installed(mods_dir / name, rec)}
