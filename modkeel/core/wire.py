@@ -106,8 +106,8 @@ def _get(params, events, decide, cancelled) -> Dict[str, Any]:
                                    cancelled=cancelled))
 
 
-def port_result_dict(result) -> Dict[str, Any]:
-    """port.PortResult on the wire."""
+def move_result_dict(result) -> Dict[str, Any]:
+    """move.MoveResult on the wire."""
     proposal = result.proposal
     return {
         "target": result.target,
@@ -121,19 +121,19 @@ def port_result_dict(result) -> Dict[str, Any]:
     }
 
 
-def _port(params, events, decide, cancelled) -> Dict[str, Any]:
-    from modkeel.core.port import PortRequest, port_pack
+def _move(params, events, decide, cancelled) -> Dict[str, Any]:
+    from modkeel.core.move import MoveRequest, move_pack
 
-    request = PortRequest(**params)   # unknown or missing fields: TypeError -> bad_params
+    request = MoveRequest(**params)   # unknown or missing fields: TypeError -> bad_params
     if not (request.mods_dir and request.mc_version):
         raise TypeError("mods_dir and mc_version are required")
     if not Path(request.mods_dir).is_dir():
         raise TypeError(f"not a folder: {request.mods_dir}")
-    return port_result_dict(port_pack(request, events=events, decide=decide,
+    return move_result_dict(move_pack(request, events=events, decide=decide,
                                       cancelled=cancelled))
 
 
-METHODS: Dict[str, Handler] = {"get": _get, "port": _port}
+METHODS: Dict[str, Handler] = {"get": _get, "move": _move}
 
 
 class _Run:

@@ -213,13 +213,13 @@ https://github.com/PepperCode1/Continuity/tree/1.21.10/dev
 
 No arguments. Shows version, config, cached loaders, and known NeoForge versions.
 
-### `modkeel port`
+### `modkeel move`
 
 Moves a pack to another Minecraft version: point it at a mods folder (it is only read) and
 the version you want, and the whole pack lands in `out/mc-<version>/`.
 
 ```bash
-modkeel port ~/.minecraft/mods -m 1.21.10
+modkeel move ~/.minecraft/mods -m 1.21.10
 ```
 
 Each JAR is identified exactly by its hash on Modrinth (no name to guess); one Modrinth does
@@ -238,7 +238,7 @@ token?) and ends with a result. Nothing but protocol lines is written to stdout.
 
 ```bash
 $ modkeel serve --stdio
-{"type":"hello","protocol":1,"modkeel":"0.1.2","methods":["get","port"]}
+{"type":"hello","protocol":1,"modkeel":"0.1.2","methods":["get","move"]}
 {"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
 {"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
 ...

@@ -10,7 +10,7 @@ import typer
 from modkeel.commands._shared import BANNER, TAGLINE, console, resolve_github_token
 from modkeel.commands.compile import compile_command
 from modkeel.commands.get import get_command
-from modkeel.commands.port import port_command
+from modkeel.commands.move import move_command
 from modkeel.commands.recommend import recommend_command
 from modkeel.commands.search import search_command
 from modkeel.commands.serve import serve_command
@@ -52,7 +52,7 @@ def main(
 app.command(name="compile")(compile_command)
 app.command(name="search")(search_command)
 app.command(name="get")(get_command)
-app.command(name="port")(port_command)
+app.command(name="move")(move_command)
 app.command(name="token")(token_command)
 app.command(name="status")(status_command)
 app.command(name="recommend")(recommend_command)
