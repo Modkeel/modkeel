@@ -220,6 +220,7 @@ the version you want, and the whole pack lands in `out/mc-<version>/`.
 
 ```bash
 modkeel move ~/.minecraft/mods -m 1.21.10
+modkeel move "All the Mods 10" -m 1.21.10     # an instance, by name
 ```
 
 Each JAR is identified exactly by its hash on Modrinth (no name to guess); one Modrinth does
@@ -228,6 +229,20 @@ mod goes through the same sources as `get`. A JAR that is on no catalog is check
 if your own file passes the checks on the new version, it is reused. When some mods have no
 build there, Modkeel proposes the nearest version where more of the pack runs (`--fallback
 ask|auto|never`). Shared dependencies are downloaded once.
+
+### `modkeel instances`
+
+Lists the instances of the launchers on this machine (Prism Launcher, Modrinth App,
+CurseForge, and the official launcher's `.minecraft/mods`) with their Minecraft version,
+loader and number of mods, so `modkeel move` can take an instance's name instead of a
+folder. Nothing is changed; `--json` prints them for scripts.
+
+```bash
+$ modkeel instances
+ Name              Minecraft   Loader             Mods   Launcher
+ All the Mods 10   1.21.1      neoforge 21.1.77   412    Prism Launcher
+ Cobblemon         1.21.1      fabric 0.16.14     88     Modrinth App
+```
 
 ### `modkeel serve --stdio`
 
@@ -238,7 +253,7 @@ token?) and ends with a result. Nothing but protocol lines is written to stdout.
 
 ```bash
 $ modkeel serve --stdio
-{"type":"hello","protocol":1,"modkeel":"0.1.2","methods":["get","move"]}
+{"type":"hello","protocol":1,"modkeel":"0.1.3","methods":["get","instances","move"]}
 {"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
 {"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
 ...

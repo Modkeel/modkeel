@@ -157,7 +157,7 @@ class TestProtocolRules:
     def test_hello_names_the_protocol_and_methods(self, session):
         hello = session().hello
         assert hello["type"] == "hello" and hello["protocol"] == 1
-        assert hello["methods"] == ["get", "move"] and hello["modkeel"]
+        assert hello["methods"] == ["get", "instances", "move"] and hello["modkeel"]
 
     def test_bad_lines_get_errors_and_never_stop_the_server(self, session):
         s = session({"echo": lambda params, *_: params})
@@ -205,6 +205,30 @@ class TestProtocolRules:
                             "error": {"code": "busy", "message": "one request at a time"}}
         s.send({"type": "answer", "qid": question["qid"], "value": "tok"})
         assert s.next()["result"] == {"answer": "tok"}
+
+    def test_a_query_answers_while_a_request_runs(self, session, monkeypatch):
+        from modkeel.instances import Instance
+
+        monkeypatch.setattr("modkeel.instances.find_instances",
+                            lambda: [Instance("prism", "ATM", "/i", "/i/mods", "1.21.1",
+                                              "neoforge", "21.1.77", 3)])
+        s = session(asks(NeedToken()))
+        s.send({"type": "request", "id": "run", "method": "ask"})
+        question = s.next()
+        s.send({"type": "request", "id": "list", "method": "instances"})
+        listed = s.next()
+        assert listed["type"] == "result" and listed["id"] == "list"
+        assert listed["result"]["instances"] == [{
+            "launcher": "prism", "name": "ATM", "path": "/i", "mods_dir": "/i/mods",
+            "mc_version": "1.21.1", "loader": "neoforge", "loader_version": "21.1.77",
+            "mods": 3}]
+        s.send({"type": "answer", "qid": question["qid"], "value": "tok"})
+        assert s.next()["result"] == {"answer": "tok"}       # the run was not disturbed
+
+    def test_a_query_with_params_it_does_not_take(self, session):
+        s = session({})
+        s.send({"type": "request", "id": "q", "method": "instances", "params": {"x": 1}})
+        assert s.next()["error"]["code"] == "bad_params"
 
     def test_cancel_releases_the_question_and_ends_the_request(self, session):
         s = session(asks(ChangeTarget(None, "1.21.10")))
