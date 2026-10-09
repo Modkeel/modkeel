@@ -151,6 +151,12 @@ class TestRateLimit:
         self.call(send, clock)
         assert clock.slept == [2.0, 10.0]
 
+    def test_a_429_with_a_reset_of_0_still_waits_a_second(self):
+        clock = Clock()
+        send = MagicMock(side_effect=[limited(429, X_Ratelimit_Reset="0"), limited(200)])
+        self.call(send, clock)
+        assert clock.slept == [1.0]
+
     def test_answers_without_rate_headers_never_wait(self):
         clock = Clock()
         send = MagicMock(return_value=response(200, {}))     # a MagicMock's headers

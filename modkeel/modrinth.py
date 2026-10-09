@@ -61,8 +61,10 @@ def modrinth_call(send: Callable, url: str, *, sleep: Optional[Callable[[float],
         limited = getattr(resp, "status_code", None) == 429
         if limited or _header_seconds(resp, "X-Ratelimit-Remaining") == 0:
             retry_after = _header_seconds(resp, "Retry-After")
-            _paused_until = clock() + (reset if reset is not None
-                                       else retry_after if retry_after is not None else 10.0)
+            wait_for = (reset if reset is not None
+                        else retry_after if retry_after is not None else 10.0)
+            # Modrinth sends a reset of 0 while the window is open; a 429 still waits a second
+            _paused_until = clock() + (max(wait_for, 1.0) if limited else wait_for)
         if not limited or attempt == RATE_LIMIT_RETRIES:
             return resp
     return resp
