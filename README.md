@@ -223,8 +223,11 @@ modkeel move ~/.minecraft/mods -m 1.21.10
 modkeel move "All the Mods 10" -m 1.21.10     # an instance, by name
 ```
 
-Each JAR is identified exactly by its hash on Modrinth (no name to guess); one Modrinth does
-not know is looked up by the id and name in its metadata and marked as a guess. Then every
+Each JAR is identified exactly by its hash on Modrinth (no name to guess). For one Modrinth
+does not know, Modkeel reads what your launcher recorded when it installed the mod (Prism's
+`mods/.index`, CurseForge's `minecraftinstance.json`, a packwiz pack): a Modrinth project id
+there is exact too, and a CurseForge-only mod is reported as such. Otherwise the id and name
+in the JAR's metadata are looked up and marked as a guess. Then every
 mod goes through the same sources as `get`. A JAR that is on no catalog is checked as it is:
 if your own file passes the checks on the new version, it is reused. When some mods have no
 build there, Modkeel proposes the nearest version where more of the pack runs (`--fallback
@@ -253,7 +256,7 @@ token?) and ends with a result. Nothing but protocol lines is written to stdout.
 
 ```bash
 $ modkeel serve --stdio
-{"type":"hello","protocol":1,"modkeel":"0.1.3","methods":["get","instances","move"]}
+{"type":"hello","protocol":1,"modkeel":"0.1.4","methods":["get","instances","move"]}
 {"type":"request","id":"1","method":"get","params":{"query":"Sodium","mc_version":"1.21.10","loader":"fabric"}}
 {"type":"event","id":"1","event":{"kind":"mod_identified","query":"Sodium","title":"Sodium",...}}
 ...

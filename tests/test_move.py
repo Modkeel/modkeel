@@ -93,6 +93,35 @@ class TestScan:
         # the sources read search-hit fields: a full record gets project_id
         assert all(e.project["project_id"] for e in entries if e.project)
 
+    def test_the_launchers_record_identifies_what_the_hash_does_not(self, pack):
+        # Prism installed mine.jar from Modrinth (a project id the hash lookup missed) and
+        # cloth.jar from CurseForge, whose slug and name match the project on Modrinth
+        index = pack / ".index"
+        index.mkdir()
+        (index / "mine.pw.toml").write_text(
+            'name = "Mine"\nfilename = "mine.jar"\n[update.modrinth]\nmod-id = "AANobbMI"\n')
+        (index / "cloth-config.pw.toml").write_text(
+            'name = "Cloth Config API (Fabric/Forge/NeoForge)"\nfilename = "cloth.jar"\n'
+            '[update.curseforge]\nproject-id = 348521\nfile-id = 1\n')
+        events = []
+        entries = scan_pack(pack, ModrinthClient(_config(), events.append), events.append)
+        seen = {e.mod.file: (e.mod.identified_by, e.mod.slug) for e in entries}
+        assert seen["mine.jar"] == ("launcher", "sodium")
+        assert seen["cloth.jar"] == ("name", "cloth-config")
+        line = [e for e in events if isinstance(e, PackScanned)][0]
+        from modkeel.core.text import render_text
+
+        assert "1 by the launcher's records" in render_text(line)
+
+    def test_a_curseforge_only_mod_says_so(self, pack):
+        (pack.parent / "minecraftinstance.json").write_text(json.dumps({"installedAddons": [
+            {"addonID": 7, "name": "Totally Private", "installedFile": {"fileName": "mine.jar"}},
+        ]}))
+        with resolving({"Sodium", "Cloth Config API"}), evidence(ok=False):
+            result = move_pack(MoveRequest(str(pack), "1.21.10"), events=lambda e: None)
+        mine = next(m for m in result.mods if m.file == "mine.jar")
+        assert mine.status == "unknown" and mine.detail.startswith("on CurseForge only")
+
     def test_the_pack_loader_is_what_its_jars_declare(self, pack):
         entries = scan_pack(pack, ModrinthClient(_config(), lambda e: None), lambda e: None)
         assert pack_loader(entries) == "fabric"
