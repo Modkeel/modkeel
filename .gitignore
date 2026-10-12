@@ -47,3 +47,5 @@ research/.overnight.console
 # Modpack crawl: committed gzipped (packs_*.json.gz)
 research/packs_*.json
 research/.aeo/
+# tools/lab_pages.py drafts; published copies live in Modkeel/web
+research/pages/
