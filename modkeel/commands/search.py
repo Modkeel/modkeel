@@ -133,11 +133,11 @@ def search_command(
         "older_official": "Download and verify them (nearest first)?",
         "fork": "Compile the best fork?",
     }.get(strategy, "Fetch it?")
-    if not is_interactive or (strategy == "fork" and not loader_version):
+    if not is_interactive:
         if strategy == "fork":
             console.print(
                 "\n[dim]  Pre-filtered via gradle.properties. "
-                "Use 'modkeel get' with -lv to build, and "
+                "Use 'modkeel get' to build, and "
                 "'--docker-test' to confirm compatibility.[/dim]"
             )
         return

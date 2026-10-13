@@ -615,7 +615,8 @@ class TestProcessRepos:
                 patch("modkeel.pipeline.time.sleep"), \
                 patch("modkeel.pipeline.publish_to_maven_local") as publish:
             pipeline.process_repos(["r"])
-        publish.assert_called_once_with(clone, events=pipeline.events)
+        publish.assert_called_once_with(clone, events=pipeline.events,
+                                        mc_version=pipeline.config.mc_version)
 
     def test_crash_in_one_repo_does_not_stop_the_rest(self, pipeline):
         ok = CompilationResult(repo_url="b", success=True)

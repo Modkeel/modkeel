@@ -130,6 +130,24 @@ class TestGetMod:
         assert result.delivered is None
         assert [type(q) for q in asked] == [NeedToken]
 
+    def test_a_github_link_builds_that_branch_only(self):
+        """The lab names a port's repo and branch; get builds exactly that, with no
+        token and no search, and offers no other version when it fails."""
+        asked, built = [], []
+
+        def compile_(self, url, specific_branch=None, skip_modrinth=False):
+            built.append(url)
+            return CompilationResult(repo_url="voxy", success=True, jar_path="voxy.jar",
+                                     mod_name="Voxy", mod_version="2.20.0")
+
+        url = "https://github.com/alice/voxy/tree/mc_26_3"
+        with patched(*modrinth(project=None)), \
+                patch.object(Pipeline, "clone_and_compile", compile_):
+            result = get_mod(GetRequest(url, "26.3", "fabric"), events=lambda e: None,
+                             decide=asked.append)
+        assert built == [url] and not asked
+        assert result.delivered.mod_version == "2.20.0"
+
     def test_an_official_build_never_asks_for_a_token(self):
         asked = []
         exact = [mr_version("6.0.8", ["1.21.10"], filename="create.jar", deps=())]

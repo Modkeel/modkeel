@@ -79,7 +79,7 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
     """Get one mod for the request's target, or for the nearest version the user accepts."""
     from modkeel.modrinth import ModrinthClient
     from modkeel.resolve import ResolveContext, Resolver
-    from modkeel.sources import identify_mod
+    from modkeel.sources import RepoBranchSource, github_url, identify_mod, identify_repo
 
     loader = request.loader.lower()
     def make_config(tok: Optional[str], mc: str, out: str, lv: Optional[str],
@@ -94,7 +94,14 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
     config = make_config(token_on_demand.current, request.mc_version, request.output_dir,
                          request.loader_version, request.instance)
     modrinth = ModrinthClient(config, events)
-    mod = identify_mod(request.query, modrinth)
+    # a GitHub URL (the repo and branch a lab run names) is built as is, without a search
+    repo_source = None
+    if github_url(request.query):
+        url = request.query.strip()
+        repo_source = RepoBranchSource(url if "://" in url else f"https://{url}")
+        mod = identify_repo(repo_source.owner, repo_source.repo, modrinth)
+    else:
+        mod = identify_mod(request.query, modrinth)
     events(ModIdentified(
         request.query, mod.title, mod.project is not None,
         slug=mod.project.get("slug") if mod.project else None, source_repo=mod.source_repo,
@@ -112,7 +119,7 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
                 t, cfg.mc_version, str(cfg.output_dir), cfg.loader_version,
                 str(cfg.instance_path) if cfg.instance_path else None),
             verify_runtime=request.verify_runtime, events=events)
-        resolution = Resolver().resolve(mod, ctx)
+        resolution = Resolver([repo_source] if repo_source else None).resolve(mod, ctx)
         events(ModResolved(mod.title, cfg.mc_version,
                            tuple((s.strategy, s.ok, s.detail) for s in resolution.trail),
                            _delivery(resolution.delivered), retarget, request.verify_runtime))
@@ -120,7 +127,7 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
 
     result = GetResult(mod, request.mc_version, Path(request.output_dir))
     result.delivered = resolve_on(config, retarget=False)
-    if result.delivered or not mod.project:
+    if result.delivered or not mod.project or repo_source:
         return result
 
     option = _propose(

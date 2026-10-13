@@ -926,7 +926,8 @@ class Pipeline:
                 pass1_results[repo_url] = result
 
                 if result.success and result.clone_dir and result.clone_dir.exists():
-                    publish_to_maven_local(result.clone_dir, events=self.events)
+                    publish_to_maven_local(result.clone_dir, events=self.events,
+                                           mc_version=self.config.mc_version)
 
                 time.sleep(1)
 
@@ -962,7 +963,8 @@ class Pipeline:
                                 and compile_result.clone_dir.exists()
                             ):
                                 publish_to_maven_local(compile_result.clone_dir,
-                                                       events=self.events)
+                                                       events=self.events,
+                                                       mc_version=self.config.mc_version)
                         except Exception as e:
                             self._say(f"    \u26a0\ufe0f  Maven publish failed: {e}")
 
@@ -1008,7 +1010,8 @@ class Pipeline:
                         and result.clone_dir.exists()
                     ):
                         publish_to_maven_local(result.clone_dir, maven_args,
-                                               events=self.events)
+                                               events=self.events,
+                                               mc_version=self.config.mc_version)
 
                     time.sleep(1)
 

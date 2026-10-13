@@ -683,9 +683,6 @@ class ForkSource(SourceStrategy):
     def deliver(self, candidate: Candidate, mod: ModRef,
                 ctx: ResolveContext) -> Union[Delivered, Rejected]:
         ctx.events(ForkChosen(candidate.label))
-        if not ctx.loader_version:
-            return Rejected("-lv LOADER_VERSION is required to compile")
-
         fork = candidate.data["fork"]
         config = ctx.config_with_token(candidate.data["token"])
         with temp_pipeline(config, ctx.events) as pipeline:
@@ -704,6 +701,48 @@ class ForkSource(SourceStrategy):
             evidence=["built"],
             caveat=f"Community build from {fork['fork']['full_name']}, not the author's.",
         )
+
+
+class RepoBranchSource(SourceStrategy):
+    """A repo the user names by URL (get's query): that branch, or the repo's own branches
+    for the target when the URL names none. No search, so no token needed."""
+
+    name = "fork"
+    label = "Community fork"
+
+    def __init__(self, url: str):
+        from modkeel.github import parse_repo_url
+
+        self.url = url
+        self.owner, self.repo, self.branch = parse_repo_url(url)
+
+    def find(self, mod: ModRef, ctx: ResolveContext) -> Found:
+        where = f" branch {self.branch}" if self.branch else ""
+        return Found([Candidate(f"{self.owner}/{self.repo}{where}", {})])
+
+    def deliver(self, candidate: Candidate, mod: ModRef,
+                ctx: ResolveContext) -> Union[Delivered, Rejected]:
+        ctx.events(ForkChosen(candidate.label))
+        # a public clone needs no token: the saved one (in ctx.config) is used, none asked
+        config = ctx.config
+        with temp_pipeline(config, ctx.events) as pipeline:
+            result = pipeline.clone_and_compile(self.url, skip_modrinth=True)
+        if not result.success:
+            return Rejected(f"compilation failed: {result.error}")
+        return Delivered(
+            jar_path=Path(result.jar_path) if result.jar_path else config.output_dir,
+            mod_name=result.mod_name or mod.title,
+            mod_version=result.mod_version or "unknown",
+            verb="compiled",
+            evidence=["built"],
+            caveat=f"Built from {self.owner}/{self.repo}, not the author's release.",
+        )
+
+
+def github_url(query: str) -> bool:
+    """Whether get's query names a GitHub repo instead of a mod."""
+    q = query.strip().lower()
+    return q.startswith(("https://github.com/", "http://github.com/", "github.com/"))
 
 
 STRATEGIES = {cls.name: cls for cls in (OfficialSource, CurseForgeSource, OlderOfficialSource,

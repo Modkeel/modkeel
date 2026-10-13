@@ -51,7 +51,9 @@ For each repository in your list, Modkeel runs:
 
 - **Python 3.10+**
 - **Git** (in PATH)
-- **JDK 17 or 21** (for Gradle compilation)
+- **A JDK** for Gradle compilation: Modkeel builds each mod with the Java its Minecraft version runs on
+  (17, 21, or 25 for 26.x), using one already installed or downloading Eclipse Temurin once
+  into `~/.modkeel/jdks` (SHA-256 checked against Adoptium)
 - **Docker** (optional, for `--docker-test`)
 
 ```bash
@@ -127,13 +129,20 @@ modkeel get "Create" -m 1.21.10 -l neoforge -lv 21.10.64
    method or field it calls may have been removed or renamed since the version it was
    built for, and its mixins must still find their targets (with matching parameters). A
    static check, so test it in game (or with `--docker-test`).
-3. A community fork compiled for that version (needs a token and `-lv`).
+3. A community fork compiled for that version (the fork search needs a token).
 4. Last resort: an older official build refused only by its declared Minecraft range. Modkeel
    adds your version to that range, but keeps the result only if its bytecode resolves and a
    headless server boots with it (needs Docker). The file is renamed `...+modkeel-relaxed-...`
    and carries `META-INF/modkeel-relaxed.txt`.
 
 It never downloads a different mod with a similar name: addons are listed separately.
+
+To build one specific port, give its GitHub link instead of a name: Modkeel clones that
+branch and compiles it, with no search and no token.
+
+```bash
+modkeel get https://github.com/MineInAbyss/voxy/tree/mc_26_3 -m 26.3 -l fabric
+```
 
 When nothing runs on your version, Modkeel looks for the nearest Minecraft version with an
 official build and says so: in a terminal a 15-second countdown starts the search (Enter

@@ -29,8 +29,10 @@ from modkeel.sources import (
     OfficialSource,
     OlderOfficialSource,
     RelaxedOfficialSource,
+    RepoBranchSource,
     _family,
     default_strategies,
+    github_url,
     in_source_order,
     possible_ports,
     possible_ports_note,
@@ -332,10 +334,54 @@ class TestFork:
         assert found.note == ("GitHub refused 6 of the searches (rate limit or no access): "
                               "forks unknown")
 
-    def test_needs_a_loader_version_to_compile(self, ctx):
-        cand = Candidate("alice/create branch port", {"fork": {}, "token": "t"})
-        out = ForkSource().deliver(cand, MOD, ctx)
-        assert out.reason == "-lv LOADER_VERSION is required to compile"
+    def test_compiles_without_a_loader_version(self, ctx):
+        """The build never reads -lv (only Docker tests and reports do)."""
+        from modkeel.models import CompilationResult
+        from modkeel.pipeline import Pipeline
+
+        fork = {"fork": {"full_name": "alice/create"}, "_best_branch": MagicMock()}
+        fork["_best_branch"].name = "port"
+        built = CompilationResult(repo_url="create", success=True, jar_path="create.jar",
+                                  mod_name="Create", mod_version="6.0.9")
+        with patch.object(Pipeline, "clone_and_compile", return_value=built) as compile_:
+            out = ForkSource().deliver(Candidate("alice/create branch port",
+                                                 {"fork": fork, "token": "t"}), MOD, ctx)
+        assert isinstance(out, Delivered) and out.mod_version == "6.0.9"
+        assert compile_.call_args.kwargs["specific_branch"] == "port"
+
+
+class TestRepoBranchSource:
+    URL = "https://github.com/alice/create/tree/mc_1_21_10"
+
+    def test_names_the_branch_of_the_link_without_a_search_or_token(self, ctx):
+        ctx.github_token = lambda: pytest.fail("no token needed")
+        found = RepoBranchSource(self.URL).find(MOD, ctx)
+        assert [c.label for c in found.candidates] == ["alice/create branch mc_1_21_10"]
+
+    def test_builds_the_link_as_given(self, ctx):
+        from modkeel.models import CompilationResult
+        from modkeel.pipeline import Pipeline
+
+        ctx.github_token = lambda: pytest.fail("no token asked for")
+        built = CompilationResult(repo_url="create", success=True, jar_path="create.jar",
+                                  mod_name="Create", mod_version="6.0.9")
+        with patch.object(Pipeline, "clone_and_compile", return_value=built) as compile_:
+            out = RepoBranchSource(self.URL).deliver(Candidate("x"), MOD, ctx)
+        assert isinstance(out, Delivered) and "alice/create" in out.caveat
+        assert compile_.call_args.args[0] == self.URL
+
+    def test_a_failed_build_is_rejected(self, ctx):
+        from modkeel.models import CompilationResult
+        from modkeel.pipeline import Pipeline
+
+        failed = CompilationResult(repo_url="create", success=False, error="gradle")
+        with patch.object(Pipeline, "clone_and_compile", return_value=failed):
+            out = RepoBranchSource(self.URL).deliver(Candidate("x"), MOD, ctx)
+        assert out.reason == "compilation failed: gradle"
+
+    def test_github_links_are_told_from_mod_names(self):
+        assert github_url(self.URL) and github_url("github.com/alice/create")
+        assert not github_url("create") and not github_url("https://modrinth.com/mod/create")
 
 
 # ---------------------------------------------------------------------------

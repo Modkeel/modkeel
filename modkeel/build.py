@@ -15,6 +15,7 @@ from modkeel.loaders import LOADER_PROFILES
 from modkeel.models import FailureType
 from modkeel.version import is_version_in_fabric_range, is_version_in_maven_range
 from modkeel.constants import MODKEEL_HOME
+from modkeel.jdk import build_env
 from modkeel.core.events import Emitter, Message
 from modkeel.core.text import print_event
 
@@ -235,6 +236,7 @@ def compile_mod(
         return (False, None, "Gradle wrapper not found",
                 FailureType.BUILD_ERROR, [])
     repo_path = root
+    env = build_env(mc_version, events)
 
     # Quick dependency resolution check
     try:
@@ -251,7 +253,8 @@ def compile_mod(
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=120,
+            env=env,
         )
         if dep_result.returncode != 0:
             fail_type, missing = classify_build_failure(
@@ -278,7 +281,8 @@ def compile_mod(
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=600
+            timeout=600,
+            env=env,
         )
 
         if result.returncode != 0:
@@ -456,6 +460,7 @@ def publish_to_maven_local(
     repo_path: Path,
     extra_gradle_args: Optional[List[str]] = None,
     events: Emitter = print_event,
+    mc_version: Optional[str] = None,
 ) -> bool:
     """Run publishToMavenLocal on a successfully compiled repo."""
     root, gradlew = resolve_gradle(repo_path)
@@ -484,7 +489,8 @@ def publish_to_maven_local(
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=600
+            timeout=600,
+            env=build_env(mc_version, events),
         )
         if result.returncode == 0:
             events(Message("    \U0001f4e4 Published to Maven Local (~/.m2/repository/)"))

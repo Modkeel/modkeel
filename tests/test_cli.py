@@ -412,18 +412,21 @@ class TestGet:
         assert "No GitHub forks found" in result.output
         assert "No build of JEI for MC 1.21.1 + Neoforge found." in result.output
 
-    def test_fork_found_but_no_loader_version(self):
+    def test_fork_compiles_without_a_loader_version(self):
+        built = CompilationResult(repo_url="alice/jei", success=True, mod_name="JEI",
+                                  mod_version="1")
         with patched(*modrinth(project=None),
                      patch.object(GitHubClient, "search_compatible_repos",
                                   return_value=[fork("alice/jei")]),
                      patch.object(GitHubClient, "get_branches", return_value=[candidate()]),
                      patch.object(BranchValidator, "pre_validate_branches",
                                   return_value=[candidate()]),
-                     patch.object(BranchValidator, "score_branch", return_value=1)):
+                     patch.object(BranchValidator, "score_branch", return_value=1),
+                     patch.object(Pipeline, "clone_and_compile", return_value=built)):
             result = invoke("get", "JEI", "-m", "1.21.10", "-t", "tok")
-        assert result.exit_code == 1
+        assert result.exit_code == 0, result.output
         assert "Best fork: alice/jei branch port" in result.output
-        assert "-lv LOADER_VERSION" in result.output
+        assert "LOADER_VERSION" not in result.output
 
     @pytest.mark.parametrize("success", [True, False])
     def test_compiles_the_best_fork(self, success):

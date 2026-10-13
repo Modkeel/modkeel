@@ -38,7 +38,10 @@ from modkeel.utils import setup_logging
 
 
 def get_command(
-    query: str = typer.Argument(..., help="Mod name (e.g., 'JEI', 'Create')."),
+    query: str = typer.Argument(
+        ..., help="Mod name (e.g., 'JEI', 'Create'), or a GitHub link to build that repo's "
+                  "branch (https://github.com/owner/repo/tree/branch)."
+    ),
     mc_version: str = typer.Option(
         ..., "--mc-version", "-m", help="Minecraft version (e.g., 1.21.1)."
     ),
@@ -53,7 +56,7 @@ def get_command(
         None,
         "--loader-version",
         "-lv",
-        help="Mod loader version (required for fork compilation).",
+        help="Mod loader version (for --docker-test and reports).",
     ),
     github_token: Optional[str] = typer.Option(
         None,
