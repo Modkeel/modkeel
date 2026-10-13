@@ -8,6 +8,9 @@ Doubles are attached to the Pipeline instance (github, validator, modrinth, preb
 and the module-level build helpers are patched where pipeline.py looks them up.
 """
 
+import io
+import os
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -310,6 +313,37 @@ class TestBuildLoop:
         assert build.run.call_args.args[0][:6] == ["git", "clone", "-b", "main", "--depth", "1"]
         build.compile_mod.assert_called_once_with(
             Path(pipeline.temp_dir) / "mod", None, "1.21.10", events=pipeline.events)
+
+    def test_without_git_the_branch_comes_as_githubs_zip(self, pipeline, build):
+        self.setup_branches(pipeline, "mc_26_3")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("voxy-mc_26_3/gradlew", "#!/bin/sh\n")
+            z.writestr("voxy-mc_26_3/build.gradle", "")
+        r = MagicMock()
+        r.iter_content.return_value = [buf.getvalue()]
+        r.__enter__ = lambda s: r
+        r.__exit__ = lambda *a: None
+        with patch("modkeel.pipeline.shutil.which", return_value=None), \
+             patch("modkeel.pipeline.requests.get", return_value=r) as get:
+            result = pipeline.clone_and_compile(REPO)
+        assert result.success
+        assert get.call_args.args[0].endswith("/zip/refs/heads/mc_26_3")
+        assert not any(c.args[0][0] == "git" for c in build.run.call_args_list)
+        clone = Path(pipeline.temp_dir) / "mod"
+        assert (clone / "build.gradle").exists()
+        if os.name != "nt":
+            assert os.access(clone / "gradlew", os.X_OK)
+
+    def test_without_git_a_failed_download_fails_the_branch(self, pipeline, build):
+        import requests
+        self.setup_branches(pipeline, "mc_26_3")
+        with patch("modkeel.pipeline.shutil.which", return_value=None), \
+             patch("modkeel.pipeline.requests.get",
+                   side_effect=requests.ConnectionError("offline")):
+            result = pipeline.clone_and_compile(REPO)
+        assert not result.success
+        build.compile_mod.assert_not_called()
 
     def test_extra_gradle_args_reach_compile_mod(self, pipeline, build):
         self.setup_branches(pipeline, "main")

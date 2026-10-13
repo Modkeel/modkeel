@@ -867,6 +867,8 @@ class Pipeline:
 
         clone_url = f"https://github.com/{owner}/{repo}.git"
         self._say("    \U0001f4e5 Cloning...")
+        if not shutil.which("git"):
+            return self._fetch_archive(owner, repo, branch_name, dest)
         try:
             result = subprocess.run(
                 ["git", "clone", "-b", branch_name, "--depth", "1", clone_url, str(dest)],
@@ -880,6 +882,29 @@ class Pipeline:
             return f"Clone error: {e}"
         if result.returncode != 0:
             return f"Clone failed: {result.stderr.strip()[:200]}"
+        return None
+
+    def _fetch_archive(self, owner: str, repo: str, branch_name: str,
+                       dest: Path) -> Optional[str]:
+        """The branch as GitHub's zip, for machines without git (a player's PC): the same
+        tree, without history. Returns an error or None."""
+        url = f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch_name}"
+        try:
+            with requests.get(url, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                with tempfile.TemporaryFile() as tmp:
+                    for chunk in r.iter_content(1 << 20):
+                        tmp.write(chunk)
+                    tmp.seek(0)
+                    with zipfile.ZipFile(tmp) as z, tempfile.TemporaryDirectory() as unpacked:
+                        z.extractall(unpacked)
+                        top = next(Path(unpacked).iterdir())
+                        shutil.move(str(top), str(dest))
+        except (requests.RequestException, zipfile.BadZipFile, OSError, StopIteration) as e:
+            return f"Download failed: {e}"
+        wrapper = dest / "gradlew"
+        if wrapper.exists():  # zip entries keep no Unix modes
+            wrapper.chmod(wrapper.stat().st_mode | 0o111)
         return None
 
     def _install_jar(self, jar_path: Path) -> Path:
