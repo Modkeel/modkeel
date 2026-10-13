@@ -30,16 +30,16 @@ concurrency:
 
 jobs:
   # One job per Python version; ruff runs inside the 3.12 job instead of its own job.
-  # Pull requests test the oldest and newest supported Python (2 jobs); pushes to main and
-  # manual runs test every version. Fewer jobs per PR keeps several open PRs under the
-  # account's concurrent-job limit for GitHub-hosted runners.
+  # Pull requests, and every run in the private lab, test the oldest and newest supported
+  # Python (2 jobs); pushes to the public repo's main test every version on its free runners.
+  # Fewer jobs keeps several open PRs under the concurrent-job limit and the lab's minutes low.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.10", "3.12"]' || '["3.10", "3.11", "3.12"]') }}
+        python-version: ${{ fromJSON((github.event_name == 'pull_request' || github.repository != 'Modkeel/modkeel') && '["3.10", "3.12"]' || '["3.10", "3.11", "3.12"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
