@@ -151,6 +151,73 @@ class TestOfficialLauncher:
         assert find_instances(tmp_path, "Linux", {}) == []
 
 
+def launcher_profiles(game: Path, profiles: dict, versions: dict = None) -> None:
+    game.mkdir(parents=True, exist_ok=True)
+    (game / "launcher_profiles.json").write_text(json.dumps({"profiles": profiles}))
+    for vid, inherits in (versions or {}).items():
+        (game / "versions" / vid).mkdir(parents=True)
+        (game / "versions" / vid / f"{vid}.json").write_text(
+            json.dumps({"id": vid, "inheritsFrom": inherits} if inherits else {"id": vid}))
+
+
+class TestLauncherProfiles:
+    def test_profiles_with_their_own_game_dir(self, tmp_path):
+        game = tmp_path / ".minecraft"
+        inst = game / "instances" / "Remarkably_1.21.11"
+        jars(inst / "mods", 3)
+        (game / "sklauncher").mkdir(parents=True)
+        launcher_profiles(game, {
+            "a": {"type": "latest-release", "name": ""},
+            "b": {"type": "custom", "name": "Remarkably 1.21.11", "gameDir": str(inst),
+                  "lastVersionId": "fabric-loader-0.18.3-1.21.11"},
+            "c": {"type": "custom", "name": "Forge", "gameDir": str(tmp_path / "forge"),
+                  "lastVersionId": "1.21.10-forge-60.1.4"},
+            "d": {"type": "custom", "name": "Vanilla", "gameDir": str(tmp_path / "vanilla"),
+                  "lastVersionId": "1.21.11"},
+        })
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.launcher, i.name, i.mc_version, i.loader, i.loader_version, i.mods)
+                for i in found] == [
+            ("sklauncher", "Remarkably 1.21.11", "1.21.11", "fabric", "0.18.3", 3),
+            ("sklauncher", "Forge", "1.21.10", "forge", "60.1.4", 0),
+        ]
+        assert found[0].mods_dir == str(inst / "mods")
+
+    def test_neoforge_version_from_the_installed_version_json(self, tmp_path):
+        game = tmp_path / ".minecraft"
+        jars(game / "mods", 2)
+        launcher_profiles(game, {"x": {"type": "custom", "lastVersionId": "neoforge-21.1.216"}},
+                          {"neoforge-21.1.216": "1.21.1"})
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.launcher, i.name, i.mc_version, i.loader, i.loader_version, i.mods)
+                for i in found] == [
+            ("minecraft", ".minecraft", "1.21.1", "neoforge", "21.1.216", 2)]
+
+    def test_profiles_sharing_a_folder_disagree_so_no_version(self, tmp_path):
+        game = tmp_path / ".minecraft"
+        jars(game / "mods", 1)
+        launcher_profiles(game, {
+            "x": {"type": "custom", "name": "Neo", "lastVersionId": "neoforge-21.1.216"},
+            "y": {"type": "custom", "name": "Fab", "lastVersionId": "fabric-loader-0.16.5-1.21.1"},
+        })
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.name, i.mc_version, i.loader) for i in found] == [(".minecraft", None, None)]
+
+    def test_neoforge_without_its_version_json_leaves_minecraft_unknown(self, tmp_path):
+        game = tmp_path / ".minecraft"
+        launcher_profiles(game, {"x": {"type": "custom", "name": "Neo",
+                                       "gameDir": str(tmp_path / "neo"),
+                                       "lastVersionId": "neoforge-21.1.216"}})
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.name, i.mc_version, i.loader) for i in found] == [("Neo", None, "neoforge")]
+
+    def test_unreadable_profiles_fall_back_to_the_mods_folder(self, tmp_path):
+        game = tmp_path / ".minecraft"
+        jars(game / "mods", 1)
+        (game / "launcher_profiles.json").write_text("{not json")
+        assert [i.name for i in find_instances(tmp_path, "Linux", {})] == [".minecraft"]
+
+
 def test_nothing_installed(tmp_path):
     assert find_instances(tmp_path, "Linux", {}) == []
 

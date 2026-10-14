@@ -14,7 +14,13 @@ stores its instances its own way; everything here only reads:
     CurseForge      <home>/curseforge/minecraft/Instances/<dir>/ (Documents/ on macOS)
                     minecraftinstance.json (name, gameVersion, baseModLoader.name such as
                     "neoforge-21.1.77" or "fabric-0.16.5-1.21.1")
-    Minecraft       the official launcher's .minecraft/mods (no version: it is per profile)
+    Minecraft       .minecraft/launcher_profiles.json, shared by the official launcher and
+                    SKlauncher (its own files in .minecraft/sklauncher/): profiles{name,
+                    lastVersionId, gameDir}; the id's versions/<id>/<id>.json names the
+                    Minecraft version (inheritsFrom), the id itself the loader:
+                    "fabric-loader-0.18.3-1.21.11", "1.21.10-forge-60.1.4", "neoforge-21.1.216".
+                    Profiles sharing one game dir (all on .minecraft) are one instance, its
+                    version only when they agree; .minecraft/mods without a profile is listed too
 
 A field a launcher does not give (or a file that cannot be read) is None, never a guess; an
 instance with no mods folder yet is still listed (mods = 0). Paths come from the platform's
@@ -44,9 +50,10 @@ from urllib.parse import urlparse
 
 import toml
 
-LAUNCHERS = ("prism", "modrinth", "curseforge", "minecraft")
+LAUNCHERS = ("prism", "modrinth", "curseforge", "minecraft", "sklauncher")
 LAUNCHER_NAMES = {"prism": "Prism Launcher", "modrinth": "Modrinth App",
-                  "curseforge": "CurseForge", "minecraft": "Minecraft Launcher"}
+                  "curseforge": "CurseForge", "minecraft": "Minecraft Launcher",
+                  "sklauncher": "SKlauncher"}
 
 # Prism / MultiMC component uids of each loader
 PRISM_LOADERS = {
@@ -242,10 +249,53 @@ def _minecraft_dir(home: Path, system: str, env: Mapping[str, str]) -> Path:
     return home / ".minecraft"
 
 
+def _version_id(game: Path, version_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """(mc_version, loader, loader_version) of a launcher version id. Minecraft's version comes
+    from the installed version JSON (inheritsFrom), else from the id when the id carries it."""
+    data = _read_json(game / "versions" / version_id / f"{version_id}.json") or {}
+    mc = data.get("inheritsFrom") if isinstance(data.get("inheritsFrom"), str) else None
+    parts = version_id.split("-")
+    loader = loader_version = None
+    if len(parts) >= 4 and parts[0] in ("fabric", "quilt") and parts[1] == "loader":
+        loader, loader_version = parts[0], parts[2]
+        mc = mc or "-".join(parts[3:])
+    elif len(parts) >= 2 and parts[0] == "neoforge":
+        loader, loader_version = "neoforge", "-".join(parts[1:])
+    elif len(parts) >= 3 and parts[1] == "forge":
+        loader, loader_version = "forge", "-".join(parts[2:])
+        mc = mc or parts[0]
+    elif len(parts) == 1 and data and not data.get("inheritsFrom"):
+        mc = data.get("id") if isinstance(data.get("id"), str) else None   # vanilla
+    return mc, loader, loader_version
+
+
 def _minecraft(game: Path) -> Iterable[Instance]:
-    mods = game / "mods"
-    if mods.is_dir():                         # no mods folder: nobody plays modded there
-        yield Instance("minecraft", ".minecraft", str(game), str(mods), mods=_count_jars(mods))
+    """Profiles of launcher_profiles.json, one instance per game dir, then .minecraft itself."""
+    launcher = "sklauncher" if (game / "sklauncher").is_dir() else "minecraft"
+    profiles = (_read_json(game / "launcher_profiles.json") or {}).get("profiles")
+    by_dir: Dict[str, Tuple[Path, List[Tuple[str, Tuple]]]] = {}
+    for profile in (profiles.values() if isinstance(profiles, dict) else []):
+        if not isinstance(profile, dict) or profile.get("type") in ("latest-release",
+                                                                    "latest-snapshot"):
+            continue
+        version_id = profile.get("lastVersionId")
+        folder = Path(profile.get("gameDir") or game)
+        info = _version_id(game, version_id) if isinstance(version_id, str) else (None,) * 3
+        by_dir.setdefault(os.path.normcase(str(folder)), (folder, []))[1].append(
+            (str(profile.get("name") or ""), info))
+    root = os.path.normcase(str(game))
+    if root not in by_dir and (game / "mods").is_dir():  # no mods folder: nobody plays modded
+        by_dir[root] = (game, [])
+    for key, (folder, entries) in by_dir.items():
+        infos = {info for _, info in entries}
+        mc, loader, loader_version = infos.pop() if len(infos) == 1 else (None,) * 3
+        names = [n for n, _ in entries if n]
+        name = names[0] if len(names) == 1 else (folder.name if key != root else ".minecraft")
+        mods = folder / "mods"
+        if key != root and not mods.is_dir() and loader is None:
+            continue                           # a vanilla profile elsewhere: nothing to mod
+        yield Instance(launcher, name, str(folder), str(mods), mc, loader, loader_version,
+                       _count_jars(mods))
 
 
 # --------------------------------------------------------------------------------------------
