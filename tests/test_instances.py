@@ -226,7 +226,7 @@ class TestFTBApp:
     def test_mod_loader_version_ids(self, tmp_path):
         base = tmp_path / "AppData/Local/.ftba/instances"
         for folder, mc, mod_loader in [("a", "1.21.1", "fabric-loader-1.21.1-0.16.5"),
-                                       ("b", "1.21.1", "neoforge-21.1.77"),
+                                       ("b", "1.21.1", "neoforge-21.1.250"),  # FTB StoneBlock 4
                                        ("c", "1.20.1", "1.20.1-forge-47.2.0"),
                                        ("d", "1.21.1", "1.21.1"),
                                        ("e", "1.19.2", "forge-something-odd")]:
@@ -236,7 +236,7 @@ class TestFTBApp:
         assert [(i.launcher, i.name, i.mc_version, i.loader, i.loader_version)
                 for i in found] == [
             ("ftb", "A", "1.21.1", "fabric", "0.16.5"),
-            ("ftb", "B", "1.21.1", "neoforge", "21.1.77"),
+            ("ftb", "B", "1.21.1", "neoforge", "21.1.250"),
             ("ftb", "C", "1.20.1", "forge", "47.2.0"),
             ("ftb", "D", "1.21.1", None, None),
             ("ftb", "E", "1.19.2", "forge", None),
