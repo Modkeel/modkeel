@@ -17,7 +17,7 @@ events, the same questions, the same result. One JSON object per line, UTF-8.
 Rules that keep a front end from hanging or guessing:
 
 - One request at a time; a second one while the first runs gets error "busy".
-- Queries (QUERIES: "instances", "github") only read this machine: answered at once with a
+- Queries (QUERIES: "instances", "github", "history") only read this machine: answered at once with a
   result, no events or questions, even while a request runs.
 - GitHub: a request without github_token uses the token saved on this machine (config.toml,
   `modkeel token` / `modkeel login`). need_token is answered with a token, null (skip forks)
@@ -26,6 +26,9 @@ Rules that keep a front end from hanging or guessing:
   saves the token. The method "sign_in" ({"open_browser": bool}) does the same outside a run.
 - A question waits for its answer. An answer of the wrong type, or the client closing its
   input, answers it with the engine's safe default (decisions.safe_default).
+- "search" lists Modrinth's mods for a query with each one's status on the version and
+  loader; "add" puts one (by project_id) into an instance's mods folder and records it;
+  "undo" ({"id"}) takes back one add. "history" lists the adds.
 - Closing the input also cancels the running request; the server exits when it is done.
   A client that stops reading (its end of the output closed) cancels the request too.
 - Lines that are not JSON objects, unknown message types and unknown methods get an error
@@ -173,7 +176,55 @@ def _sign_in(params, events, decide, cancelled) -> Dict[str, Any]:
     return {"signed_in": True, "user": done.user, "reason": ""}
 
 
-METHODS: Dict[str, Handler] = {"get": _get, "move": _move, "sign_in": _sign_in}
+def _search(params, events, decide, cancelled) -> Dict[str, Any]:
+    """Modrinth's mods for a query, each with its status on the player's version and loader
+    (core/catalog.py). Modrinth down is a result with a reason, not an error."""
+    from modkeel.core.catalog import CatalogError, search_mods
+
+    unknown = set(params) - {"query", "mc_version", "loader", "limit"}
+    if unknown:
+        raise TypeError(f"search takes query, mc_version, loader, limit; got "
+                        f"{', '.join(sorted(unknown))}")
+    if not (params.get("query") and params.get("mc_version") and params.get("loader")):
+        raise TypeError("query, mc_version and loader are required")
+    try:
+        hits = search_mods(params["query"], params["mc_version"], params["loader"],
+                           int(params.get("limit") or 10))
+    except CatalogError as e:
+        return {"hits": [], "reason": str(e)}
+    return {"hits": [h.to_dict() for h in hits], "reason": ""}
+
+
+def _add(params, events, decide, cancelled) -> Dict[str, Any]:
+    """One mod (by Modrinth project id) into an instance's mods folder, with undo
+    (core/install.py)."""
+    from modkeel.core.install import AddRequest, add_to_instance
+
+    request = AddRequest(**_with_saved_token(params))   # unknown or missing fields: TypeError
+    if not (request.project_id and request.mods_dir and request.mc_version and request.loader):
+        raise TypeError("project_id, mods_dir, mc_version and loader are required")
+    if not Path(request.mods_dir).is_dir():
+        raise TypeError(f"not a folder: {request.mods_dir}")
+    result = add_to_instance(request, events=events, decide=decide, cancelled=cancelled)
+    return {
+        "installed": result.installed,
+        "reason": result.reason,
+        "record": result.record.to_dict() if result.record is not None else None,
+        "get": get_result_dict(result.get) if result.get is not None else None,
+    }
+
+
+def _undo(params, events, decide, cancelled) -> Dict[str, Any]:
+    """Take back one add by its history id."""
+    from modkeel.core.install import undo
+
+    if set(params) != {"id"} or not isinstance(params["id"], str):
+        raise TypeError("undo takes only id (a history record id)")
+    return _plain(asdict(undo(params["id"])))
+
+
+METHODS: Dict[str, Handler] = {"get": _get, "move": _move, "sign_in": _sign_in,
+                               "search": _search, "add": _add, "undo": _undo}
 
 
 def _instances(params) -> Dict[str, Any]:
@@ -193,8 +244,17 @@ def _github(params) -> Dict[str, Any]:
     return {"signed_in": bool(saved_token())}
 
 
+def _history(params) -> Dict[str, Any]:
+    """Every add into an instance, newest first, each with whether it was undone."""
+    from modkeel.core.install import history
+
+    if params:
+        raise TypeError(f"history takes no params, got {', '.join(sorted(params))}")
+    return {"history": [r.to_dict() for r in history()]}
+
+
 QUERIES: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
-    "instances": _instances, "github": _github}
+    "instances": _instances, "github": _github, "history": _history}
 
 
 class _Run:

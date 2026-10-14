@@ -108,6 +108,17 @@ def identify_mod(query: str, modrinth: ModrinthClient) -> ModRef:
     return mod
 
 
+def identify_project(project_id: str, query: str, modrinth: ModrinthClient) -> ModRef:
+    """The project the user picked by id (a search result): no name to match. Unknown id or
+    Modrinth down: not identified, with the reason, and nothing is guessed from `query`."""
+    full = modrinth.fetch_project(project_id)
+    if not full:
+        return ModRef(query=query, lookup_error=f"Modrinth project {project_id} not found")
+    project = {**full, "project_id": full.get("id") or project_id}
+    return ModRef(query=query, project=project,
+                  source_repo=ModrinthClient.source_repo_of(full))
+
+
 def identify_repo(owner: str, repo: str, modrinth: ModrinthClient) -> ModRef:
     """The mod behind a GitHub repo (compile's input): its Modrinth project when one names
     that repo as its source, which older_official needs."""

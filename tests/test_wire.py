@@ -157,7 +157,8 @@ class TestProtocolRules:
     def test_hello_names_the_protocol_and_methods(self, session):
         hello = session().hello
         assert hello["type"] == "hello" and hello["protocol"] == 1
-        assert hello["methods"] == ["get", "github", "instances", "move", "sign_in"] and hello["modkeel"]
+        assert hello["methods"] == ["add", "get", "github", "history", "instances", "move",
+                                "search", "sign_in", "undo"] and hello["modkeel"]
 
     def test_bad_lines_get_errors_and_never_stop_the_server(self, session):
         s = session({"echo": lambda params, *_: params})
@@ -338,3 +339,64 @@ class TestServeCommand:
                                input='{"type":"request","id":"1","method":"nope"}\n')
         lines = [json.loads(line) for line in result.stdout.splitlines()]
         assert [m["type"] for m in lines] == ["hello", "error"]
+
+
+class TestAddAMod:
+    def test_search_carries_hits_or_the_reason(self, session, monkeypatch):
+        from modkeel.core import catalog
+
+        hit = catalog.SearchHit("voxy-id", "voxy", "Voxy", "cortex", 7, None, "d",
+                                "https://modrinth.com/mod/voxy", catalog.OFFICIAL)
+        monkeypatch.setattr(catalog, "search_mods", lambda q, mc, loader, limit: [hit])
+        s = session()
+        s.send({"type": "request", "id": "1", "method": "search",
+                "params": {"query": "voxy", "mc_version": "1.21.11", "loader": "fabric"}})
+        result = s.until_done()[-1]["result"]
+        assert result == {"hits": [hit.to_dict()], "reason": ""}
+
+        def down(*a):
+            raise catalog.CatalogError("Modrinth timed out")
+        monkeypatch.setattr(catalog, "search_mods", down)
+        s.send({"type": "request", "id": "2", "method": "search",
+                "params": {"query": "voxy", "mc_version": "1.21.11", "loader": "fabric"}})
+        assert s.until_done()[-1]["result"] == {"hits": [], "reason": "Modrinth timed out"}
+
+    @pytest.mark.parametrize("method, params", [
+        ("search", {"query": "x"}),
+        ("search", {"query": "x", "mc_version": "1.21.11", "loader": "fabric", "page": 2}),
+        ("add", {"project_id": "x", "title": "X", "mods_dir": "/nowhere/mods",
+                 "mc_version": "1.21.11", "loader": "fabric"}),
+        ("add", {"project_id": "x"}),
+        ("undo", {}),
+        ("undo", {"id": 3}),
+    ])
+    def test_bad_params(self, session, method, params):
+        s = session()
+        s.send({"type": "request", "id": "b", "method": method, "params": params})
+        assert s.next()["error"]["code"] == "bad_params"
+
+    def test_add_history_and_undo_over_the_wire(self, session, tmp_path, monkeypatch):
+        from modkeel.core import install
+        from tests.test_install import staged_get
+
+        mods = tmp_path / "inst" / "mods"
+        mods.mkdir(parents=True)
+        monkeypatch.setattr("modkeel.core.engine.get_mod", staged_get({"voxy.jar": "v"}))
+        monkeypatch.setattr("modkeel.modrinth.ModrinthClient.versions_by_hash",
+                            lambda self, h: {})
+        s = session()
+        s.send({"type": "request", "id": "a", "method": "add",
+                "params": {"project_id": "voxy-id", "title": "Voxy", "mods_dir": str(mods),
+                           "mc_version": "1.21.11", "loader": "fabric",
+                           "github_token": "tok"}})
+        added = s.until_done()[-1]["result"]
+        assert added["installed"] and added["record"]["added"][0]["name"] == "voxy.jar"
+        rid = added["record"]["id"]
+
+        s.send({"type": "request", "id": "h", "method": "history"})
+        assert [r["id"] for r in s.next()["result"]["history"]] == [rid]
+
+        s.send({"type": "request", "id": "u", "method": "undo", "params": {"id": rid}})
+        undone = s.until_done()[-1]["result"]
+        assert undone["undone"] and undone["removed"] == ["voxy.jar"]
+        assert list(mods.iterdir()) == [] and install.history()[0].undone

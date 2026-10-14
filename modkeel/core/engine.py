@@ -52,6 +52,9 @@ class GetRequest:
     instance: Optional[str] = None
     verify_runtime: bool = False          # boot a server with the result (--docker-test)
     github_token: Optional[str] = None    # without one, NeedToken is asked when forks are needed
+    # The Modrinth project picked from a search (catalog.search_mods): identified by id, the
+    # query is then only a label
+    project_id: Optional[str] = None
 
 
 @dataclass
@@ -79,7 +82,8 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
     """Get one mod for the request's target, or for the nearest version the user accepts."""
     from modkeel.modrinth import ModrinthClient
     from modkeel.resolve import ResolveContext, Resolver
-    from modkeel.sources import RepoBranchSource, github_url, identify_mod, identify_repo
+    from modkeel.sources import (RepoBranchSource, github_url, identify_mod,
+                                 identify_project, identify_repo)
 
     loader = request.loader.lower()
     def make_config(tok: Optional[str], mc: str, out: str, lv: Optional[str],
@@ -100,6 +104,8 @@ def get_mod(request: GetRequest, events: Emitter = print_event,
         url = request.query.strip()
         repo_source = RepoBranchSource(url if "://" in url else f"https://{url}")
         mod = identify_repo(repo_source.owner, repo_source.repo, modrinth)
+    elif request.project_id:
+        mod = identify_project(request.project_id, request.query, modrinth)
     else:
         mod = identify_mod(request.query, modrinth)
     events(ModIdentified(

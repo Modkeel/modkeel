@@ -161,6 +161,32 @@ class TestGetMod:
             get_mod(REQUEST, events=lambda e: None, cancelled=lambda: True)
 
 
+    def test_a_picked_project_is_used_by_id_and_never_searched_by_name(self):
+        build = mr_version("0.2.0", ["1.21.11"], filename="voxy.jar", deps=())
+        with patched(patch.object(ModrinthClient, "fetch_project",
+                                  return_value={"id": "voxy-id", "slug": "voxy",
+                                                "title": "Voxy"}),
+                     by_version({"1.21.11": [build]}),
+                     patch("modkeel.sources._download", fake_download),
+                     patch("modkeel.sources.validate_jar",
+                           return_value=(True, "voxy", "0.2.0", "")),
+                     patch("modkeel.evidence.check_linkage", return_value=LINKAGE_OK),
+                     find=patch.object(ModrinthClient, "find_project")) as m:
+            result = get_mod(GetRequest("voxy", "1.21.11", "fabric", instance=None,
+                                        project_id="voxy-id"), events=lambda e: None)
+        m["find"].assert_not_called()
+        assert result.mod.project["project_id"] == "voxy-id"
+        assert result.delivered is not None and Path(result.delivered.jar_path).name == "voxy.jar"
+
+    def test_an_unknown_project_id_is_not_guessed_from_the_name(self):
+        with patched(patch.object(ModrinthClient, "fetch_project", return_value=None),
+                     find=patch.object(ModrinthClient, "find_project")) as m:
+            result = get_mod(GetRequest("voxy", "1.21.11", "fabric", instance=None,
+                                        project_id="gone"), events=lambda e: None)
+        m["find"].assert_not_called()
+        assert result.mod.project is None and result.delivered is None
+
+
 class TestRetargetPack:
     URLS = ["https://github.com/a/b", "https://github.com/c/d"]
 
