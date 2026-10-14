@@ -30,6 +30,14 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
+# Shown on PyPI's sidebar: the site, the docs, the code and where to report problems
+[project.urls]
+Homepage = "https://modkeel.com"
+Documentation = "https://github.com/Modkeel/modkeel#readme"
+Source = "https://github.com/Modkeel/modkeel"
+Issues = "https://github.com/Modkeel/modkeel/issues"
+Changelog = "https://github.com/Modkeel/modkeel/releases"
+
 [project.optional-dependencies]
 # Contributor tooling: `pip install -e ".[dev]"`. CI installs the same set.
 dev = [
