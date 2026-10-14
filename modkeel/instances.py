@@ -8,6 +8,20 @@ stores its instances its own way; everything here only reads:
     Prism Launcher  <data>/instances/<dir>/   instance.cfg (name), mmc-pack.json (components:
                     net.minecraft, the loader's uid), the game in .minecraft/ or minecraft/;
                     <data>/prismlauncher.cfg may move the instances (InstanceDir)
+    PolyMC          the same layout in <data>/PolyMC (polymc.cfg); NeoForge's uid is
+                    net.neoforged.neoforge. MultiMC is portable (its data is wherever the
+                    player unpacked it), so it has no usual place to look
+    ATLauncher      <data>/instances/<dir>/instance.json: id (Minecraft), launcher.name,
+                    launcher.loaderVersion {type, version}; mods/
+    GDLauncher      legacy: <appData>/gdlauncher_next/instances/<name>/config.json (name =
+                    folder; loader {loaderType, mcVersion, loaderVersion}); mods/.
+                    Carbon: <data>/gdlauncher_carbon/data/instances/<dir>/instance.json
+                    (name, game_configuration.version {release, modloaders [{type,
+                    version}]}); mods in instance/mods
+    FTB App         <home>/.ftba/instances/<dir>/instance.json (Windows: AppData/Local/.ftba):
+                    name, mcVersion, modLoader (a version id such as
+                    "fabric-loader-<mc>-<loader>", "neoforge-21.1.77", or the Minecraft
+                    version for vanilla); mods/
     Modrinth App    <data>/profiles/<path>/   app.db (SQLite, table profiles: name,
                     game_version, mod_loader, mod_loader_version); profile.json in older
                     versions (the launcher was called theseus)
@@ -50,10 +64,12 @@ from urllib.parse import urlparse
 
 import toml
 
-LAUNCHERS = ("prism", "modrinth", "curseforge", "minecraft", "sklauncher")
-LAUNCHER_NAMES = {"prism": "Prism Launcher", "modrinth": "Modrinth App",
-                  "curseforge": "CurseForge", "minecraft": "Minecraft Launcher",
-                  "sklauncher": "SKlauncher"}
+LAUNCHERS = ("prism", "polymc", "modrinth", "curseforge", "atlauncher", "gdlauncher", "ftb",
+             "minecraft", "sklauncher")
+LAUNCHER_NAMES = {"prism": "Prism Launcher", "polymc": "PolyMC", "modrinth": "Modrinth App",
+                  "curseforge": "CurseForge", "atlauncher": "ATLauncher",
+                  "gdlauncher": "GDLauncher", "ftb": "FTB App",
+                  "minecraft": "Minecraft Launcher", "sklauncher": "SKlauncher"}
 
 # Prism / MultiMC component uids of each loader
 PRISM_LOADERS = {
@@ -62,6 +78,7 @@ PRISM_LOADERS = {
     "net.neoforged": "neoforge",
     "net.minecraftforge": "forge",
 }
+POLYMC_LOADERS = {**PRISM_LOADERS, "net.neoforged.neoforge": "neoforge"}
 
 
 @dataclass
@@ -128,16 +145,25 @@ def _prism_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Path]:
     return roots
 
 
-def _prism_instances_dir(root: Path) -> Path:
-    custom = _read_cfg(root / "prismlauncher.cfg").get("instancedir")
+def _polymc_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Path]:
+    roots = _data_dirs("PolyMC", home, system, env)
+    if system not in ("Windows", "Darwin"):
+        roots.insert(0, roots[0].parent / "polymc")   # the legacy folder wins when present
+        roots.append(home / ".var" / "app" / "org.polymc.PolyMC" / "data" / "PolyMC")
+    return roots
+
+
+def _prism_instances_dir(root: Path, cfg_name: str = "prismlauncher.cfg") -> Path:
+    custom = _read_cfg(root / cfg_name).get("instancedir")
     if custom:
         p = Path(custom).expanduser()
         return p if p.is_absolute() else root / p
     return root / "instances"
 
 
-def _prism(root: Path) -> Iterable[Instance]:
-    base = _prism_instances_dir(root)
+def _prism(root: Path, launcher: str = "prism",
+           cfg_name: str = "prismlauncher.cfg") -> Iterable[Instance]:
+    base = _prism_instances_dir(root, cfg_name)
     if not base.is_dir():
         return
     for folder in sorted(p for p in base.iterdir() if p.is_dir()):
@@ -149,12 +175,12 @@ def _prism(root: Path) -> Iterable[Instance]:
             uid = comp.get("uid") if isinstance(comp, dict) else None
             if uid == "net.minecraft":
                 mc = comp.get("version")
-            elif uid in PRISM_LOADERS:
-                loader, loader_version = PRISM_LOADERS[uid], comp.get("version")
+            elif uid in POLYMC_LOADERS:
+                loader, loader_version = POLYMC_LOADERS[uid], comp.get("version")
         game = next((folder / d for d in ("minecraft", ".minecraft")
                      if (folder / d).is_dir()), folder / ".minecraft")
         mods = game / "mods"
-        yield Instance("prism", cfg.get("name") or folder.name, str(folder), str(mods),
+        yield Instance(launcher, cfg.get("name") or folder.name, str(folder), str(mods),
                        mc, loader, loader_version, _count_jars(mods))
 
 
@@ -239,7 +265,124 @@ def _curseforge(root: Path) -> Iterable[Instance]:
                        data.get("gameVersion"), loader, loader_version, _count_jars(mods))
 
 
-# --- The official launcher ------------------------------------------------------------------
+# --- ATLauncher, GDLauncher, FTB App --------------------------------------------------------
+
+def _loader_kind(kind: object) -> Optional[str]:
+    """A launcher's loader type ("Fabric", "neoforge", "LegacyFabric"...) as ours, or None."""
+    k = str(kind or "").lower()
+    return k if k in ("fabric", "quilt", "neoforge", "forge") else None
+
+
+def _instance_dirs(base: Path) -> List[Path]:
+    try:
+        return sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+def _atlauncher_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Path]:
+    if system == "Windows":
+        return _data_dirs("ATLauncher", home, system, env)     # the installer's default
+    if system == "Darwin":
+        return []                                 # lives inside the .app: no usual place
+    return [*_data_dirs("atlauncher", home, system, env),
+            home / ".var" / "app" / "com.atlauncher.ATLauncher" / "data"]
+
+
+def _atlauncher(root: Path) -> Iterable[Instance]:
+    for folder in _instance_dirs(root / "instances"):
+        data = _read_json(folder / "instance.json")
+        if data is None:
+            continue
+        meta = data.get("launcher") if isinstance(data.get("launcher"), dict) else {}
+        lv = meta.get("loaderVersion") if isinstance(meta.get("loaderVersion"), dict) else {}
+        loader = _loader_kind(lv.get("type"))
+        mods = folder / "mods"
+        yield Instance("atlauncher", meta.get("name") or folder.name, str(folder), str(mods),
+                       data.get("id"), loader, lv.get("version") if loader else None,
+                       _count_jars(mods))
+
+
+def _gdlauncher_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Path]:
+    """The legacy app's userData (Electron: .config on Linux) and Carbon's runtime folder."""
+    if system == "Windows":
+        appdata = Path(env.get("APPDATA") or home / "AppData" / "Roaming")
+        legacy, carbon = appdata / "gdlauncher_next", appdata / "gdlauncher_carbon"
+    elif system == "Darwin":
+        support = home / "Library" / "Application Support"
+        legacy, carbon = support / "gdlauncher_next", support / "gdlauncher_carbon"
+    else:
+        legacy = Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "gdlauncher_next"
+        carbon = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share") / "gdlauncher_carbon"
+    return [legacy, carbon / "data"]
+
+
+def _gdlauncher(root: Path) -> Iterable[Instance]:
+    for folder in _instance_dirs(root / "instances"):
+        legacy = _read_json(folder / "config.json")
+        if legacy is not None:
+            info = legacy.get("loader") if isinstance(legacy.get("loader"), dict) else {}
+            loader = _loader_kind(info.get("loaderType"))
+            mods = folder / "mods"
+            yield Instance("gdlauncher", folder.name, str(folder), str(mods),
+                           info.get("mcVersion"), loader,
+                           info.get("loaderVersion") if loader else None, _count_jars(mods))
+            continue
+        carbon = _read_json(folder / "instance.json")
+        if carbon is None or "_version" not in carbon:
+            continue
+        game = carbon.get("game_configuration")
+        version = game.get("version") if isinstance(game, dict) else None
+        mc = loader = loader_version = None
+        if isinstance(version, dict):                # a plain string is a custom version
+            mc = version.get("release")
+            first = next(iter(version.get("modloaders") or []), None)
+            if isinstance(first, dict):
+                loader = _loader_kind(first.get("type"))
+                loader_version = first.get("version") if loader else None
+        mods = folder / "instance" / "mods"
+        yield Instance("gdlauncher", carbon.get("name") or folder.name, str(folder), str(mods),
+                       mc, loader, loader_version, _count_jars(mods))
+
+
+def _ftb_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Path]:
+    if system == "Windows":
+        return [Path(env.get("LOCALAPPDATA") or home / "AppData" / "Local") / ".ftba"]
+    if system == "Darwin":
+        return [home / "Library" / "Application Support" / ".ftba"]
+    return [home / ".ftba"]
+
+
+def _ftb_loader(mod_loader: object, mc: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """FTB's modLoader version id -> (loader, version). Fabric's id puts Minecraft first."""
+    vid = str(mod_loader or "")
+    if not vid or vid == mc:
+        return None, None
+    if mc and vid.startswith(f"fabric-loader-{mc}-"):
+        return "fabric", vid[len(f"fabric-loader-{mc}-"):] or None
+    if vid.startswith("neoforge-"):
+        return "neoforge", vid[len("neoforge-"):] or None
+    if mc and vid.startswith(f"{mc}-forge-"):
+        return "forge", vid[len(f"{mc}-forge-"):] or None
+    for kind in ("neoforge", "forge", "fabric"):  # the app's own test; version unknown
+        if kind in vid:
+            return kind, None
+    return None, None
+
+
+def _ftb(root: Path) -> Iterable[Instance]:
+    for folder in _instance_dirs(root / "instances"):
+        data = _read_json(folder / "instance.json")
+        if data is None:
+            continue
+        mc = data.get("mcVersion") if isinstance(data.get("mcVersion"), str) else None
+        loader, loader_version = _ftb_loader(data.get("modLoader"), mc)
+        mods = folder / "mods"
+        yield Instance("ftb", data.get("name") or folder.name, str(folder), str(mods),
+                       mc, loader, loader_version, _count_jars(mods))
+
+
+# --- The official launcher------------------------------------------------------------------
 
 def _minecraft_dir(home: Path, system: str, env: Mapping[str, str]) -> Path:
     if system == "Windows":
@@ -318,10 +461,18 @@ def find_instances(home: Optional[Path] = None, system: Optional[str] = None,
 
     for root in _prism_roots(home, system, env):
         add(_prism(root))
+    for root in _polymc_roots(home, system, env):
+        add(_prism(root, "polymc", "polymc.cfg"))
     for root in _modrinth_roots(home, system, env):
         add(_modrinth(root))
     for root in _curseforge_roots(home, system, env):
         add(_curseforge(root))
+    for root in _atlauncher_roots(home, system, env):
+        add(_atlauncher(root))
+    for root in _gdlauncher_roots(home, system, env):
+        add(_gdlauncher(root))
+    for root in _ftb_roots(home, system, env):
+        add(_ftb(root))
     add(_minecraft(_minecraft_dir(home, system, env)))
     return found
 

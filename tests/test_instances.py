@@ -151,6 +151,103 @@ class TestOfficialLauncher:
         assert find_instances(tmp_path, "Linux", {}) == []
 
 
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+class TestPolyMC:
+    def test_same_layout_as_prism_with_its_own_neoforge_uid(self, tmp_path):
+        base = tmp_path / ".local/share/PolyMC/instances"
+        prism_instance(base, "Neo", "Neo pack", "1.21.1", "net.neoforged.neoforge", "21.1.77",
+                       mods=2)
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.launcher, i.name, i.mc_version, i.loader, i.loader_version, i.mods)
+                for i in found] == [("polymc", "Neo pack", "1.21.1", "neoforge", "21.1.77", 2)]
+
+    def test_custom_instance_dir_from_polymc_cfg(self, tmp_path):
+        root = tmp_path / "AppData/Roaming/PolyMC"
+        root.mkdir(parents=True)
+        (root / "polymc.cfg").write_text(f"InstanceDir={tmp_path / 'elsewhere'}\n")
+        prism_instance(tmp_path / "elsewhere", "A", "A", "1.20.1")
+        assert [i.name for i in find_instances(tmp_path, "Windows", {})] == ["A"]
+
+
+class TestATLauncher:
+    def test_instance_json(self, tmp_path):
+        folder = tmp_path / "AppData/Roaming/ATLauncher/instances/MyPack"
+        write_json(folder / "instance.json", {"id": "1.20.1", "launcher": {
+            "name": "My Pack", "loaderVersion": {"version": "0.15.11", "type": "Fabric"}}})
+        jars(folder / "mods", 4)
+        write_json(tmp_path / "AppData/Roaming/ATLauncher/instances/Vanilla/instance.json",
+                   {"id": "1.21.1", "launcher": {"name": "Plain"}})
+        found = find_instances(tmp_path, "Windows", {})
+        assert [(i.launcher, i.name, i.mc_version, i.loader, i.loader_version, i.mods)
+                for i in found] == [
+            ("atlauncher", "My Pack", "1.20.1", "fabric", "0.15.11", 4),
+            ("atlauncher", "Plain", "1.21.1", None, None, 0),
+        ]
+
+    def test_legacy_fabric_is_not_fabric(self, tmp_path):
+        write_json(tmp_path / ".local/share/atlauncher/instances/Old/instance.json",
+                   {"id": "1.8.9", "launcher": {"name": "Old", "loaderVersion": {
+                       "version": "0.14", "type": "LegacyFabric"}}})
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.name, i.loader, i.loader_version) for i in found] == [("Old", None, None)]
+
+
+class TestGDLauncher:
+    def test_legacy_config_json_named_by_its_folder(self, tmp_path):
+        folder = tmp_path / ".config/gdlauncher_next/instances/Skyblock"
+        write_json(folder / "config.json", {"loader": {
+            "loaderType": "forge", "mcVersion": "1.16.5", "loaderVersion": "1.16.5-36.2.39"}})
+        jars(folder / "mods", 1)
+        found = find_instances(tmp_path, "Linux", {})
+        assert [(i.launcher, i.name, i.mc_version, i.loader, i.mods) for i in found] == [
+            ("gdlauncher", "Skyblock", "1.16.5", "forge", 1)]
+
+    def test_carbon_instance_json_with_mods_one_level_deeper(self, tmp_path):
+        folder = tmp_path / "AppData/Roaming/gdlauncher_carbon/data/instances/x1"
+        write_json(folder / "instance.json", {"_version": "1", "name": "Carbon pack",
+                   "game_configuration": {"version": {"release": "1.21.1", "modloaders": [
+                       {"type": "Neoforge", "version": "21.1.77"}]}}})
+        jars(folder / "instance" / "mods", 3)
+        write_json(folder.parent / "custom" / "instance.json", {
+            "_version": "1", "name": "Custom", "game_configuration": {"version": "my-jar"}})
+        found = find_instances(tmp_path, "Windows", {})
+        assert [(i.name, i.mc_version, i.loader, i.loader_version, i.mods) for i in found] == [
+            ("Custom", None, None, None, 0),
+            ("Carbon pack", "1.21.1", "neoforge", "21.1.77", 3),
+        ]
+        assert found[1].mods_dir == str(folder / "instance" / "mods")
+
+
+class TestFTBApp:
+    def test_mod_loader_version_ids(self, tmp_path):
+        base = tmp_path / "AppData/Local/.ftba/instances"
+        for folder, mc, mod_loader in [("a", "1.21.1", "fabric-loader-1.21.1-0.16.5"),
+                                       ("b", "1.21.1", "neoforge-21.1.77"),
+                                       ("c", "1.20.1", "1.20.1-forge-47.2.0"),
+                                       ("d", "1.21.1", "1.21.1"),
+                                       ("e", "1.19.2", "forge-something-odd")]:
+            write_json(base / folder / "instance.json",
+                       {"name": folder.upper(), "mcVersion": mc, "modLoader": mod_loader})
+        found = find_instances(tmp_path, "Windows", {})
+        assert [(i.launcher, i.name, i.mc_version, i.loader, i.loader_version)
+                for i in found] == [
+            ("ftb", "A", "1.21.1", "fabric", "0.16.5"),
+            ("ftb", "B", "1.21.1", "neoforge", "21.1.77"),
+            ("ftb", "C", "1.20.1", "forge", "47.2.0"),
+            ("ftb", "D", "1.21.1", None, None),
+            ("ftb", "E", "1.19.2", "forge", None),
+        ]
+
+    def test_home_dot_ftba_on_linux(self, tmp_path):
+        write_json(tmp_path / ".ftba/instances/p/instance.json",
+                   {"name": "P", "mcVersion": "1.21.1", "modLoader": "neoforge-21.1.1"})
+        assert [i.name for i in find_instances(tmp_path, "Linux", {})] == ["P"]
+
+
 def launcher_profiles(game: Path, profiles: dict, versions: dict = None) -> None:
     game.mkdir(parents=True, exist_ok=True)
     (game / "launcher_profiles.json").write_text(json.dumps({"profiles": profiles}))
