@@ -86,3 +86,26 @@ def test_key_error_lines_takes_gradle_cause():
     out = "* What went wrong:\nCould not resolve all files for configuration ':compileClasspath'.\n"
     assert key_error_lines(out) == [
         "Could not resolve all files for configuration ':compileClasspath'."]
+
+
+class TestRunGradle:
+    def test_stdin_is_empty_not_the_callers(self, tmp_path):
+        import sys
+        from modkeel.build import run_gradle
+        r = run_gradle([sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"],
+                       tmp_path, 30)
+        assert r.returncode == 0 and r.stdout.strip() == "''"
+
+    def test_timeout_kills_the_children_too(self, tmp_path):
+        import subprocess
+        import sys
+        import time
+        import pytest
+        from modkeel.build import run_gradle
+        child = "import time; time.sleep(60)"
+        parent = ("import subprocess, sys, time; "
+                  f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)")
+        start = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_gradle([sys.executable, "-c", parent], tmp_path, 2)
+        assert time.monotonic() - start < 20

@@ -873,6 +873,7 @@ class Pipeline:
             result = subprocess.run(
                 ["git", "clone", "-b", branch_name, "--depth", "1", clone_url, str(dest)],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,  # under serve --stdio: the protocol pipe
                 text=True,
                 timeout=300,
             )

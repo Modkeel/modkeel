@@ -19,6 +19,33 @@ from modkeel.jdk import build_env
 from modkeel.core.events import Emitter, Message
 from modkeel.core.text import print_event
 
+
+def run_gradle(cmd: List[str], cwd: Path, timeout: int,
+               env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    """subprocess.run for Gradle, safe in `serve --stdio` and on Windows.
+
+    stdin is empty: under the app it would be the engine's protocol pipe, and Gradle hung on it.
+    On timeout the whole process tree dies: killing gradlew.bat alone leaves its java child
+    holding the output pipes, and the run never returns.
+    """
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=os.name != "nt")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True)
+        else:
+            try:
+                os.killpg(proc.pid, 9)
+            except OSError:
+                proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
 logger = logging.getLogger("modkeel")
 
 
@@ -248,14 +275,7 @@ def compile_mod(
         if extra_gradle_args:
             dep_cmd.extend(extra_gradle_args)
 
-        dep_result = subprocess.run(
-            dep_cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
+        dep_result = run_gradle(dep_cmd, repo_path, 120, env)
         if dep_result.returncode != 0:
             fail_type, missing = classify_build_failure(
                 dep_result.stderr, dep_result.stdout
@@ -276,14 +296,7 @@ def compile_mod(
         if extra_gradle_args:
             cmd.extend(extra_gradle_args)
 
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env=env,
-        )
+        result = run_gradle(cmd, repo_path, 600, env)
 
         if result.returncode != 0:
             failure_type, missing_deps = classify_build_failure(
@@ -484,14 +497,7 @@ def publish_to_maven_local(
         cmd.extend(extra_gradle_args)
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env=build_env(mc_version, events),
-        )
+        result = run_gradle(cmd, repo_path, 600, build_env(mc_version, events))
         if result.returncode == 0:
             events(Message("    \U0001f4e4 Published to Maven Local (~/.m2/repository/)"))
             return True
