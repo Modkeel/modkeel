@@ -1,6 +1,6 @@
 # Modkeel
 
-> **Compile the mods Mojang left behind**
+> **Minecraft mods for the version you play, checked before you get them**
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -9,7 +9,12 @@
 
 ---
 
-Modkeel is a CLI tool that finds, compiles, and verifies unofficial Minecraft mod forks for versions the original authors don't support. When Mojang releases a patch version (like 1.21.10), major mods skip it -- but community forks exist on GitHub as uncompiled branches. Modkeel finds them, builds them, and validates the output.
+Modkeel gets a Minecraft mod for the version you play, even when its author has not released for it yet: the author's own build, an older build that still runs there, or a community port built from source. Each one is checked before you get it (its declared versions, its bytecode against the game, a real server start), and Modkeel tells you how it knows. It can also move a whole pack to another version, beside the old one.
+
+This is the command-line engine. Most players want the
+[Modkeel app](https://github.com/Modkeel/app/releases/latest) (Windows, macOS, Linux), which
+runs the same engine. Everything is open source (MIT) and built by GitHub Actions; see
+[how to check a download](https://modkeel.com/verify).
 
 Playing the mods, not building them? The [Modkeel Companion](https://github.com/Modkeel/companion)
 mod backs up your worlds when your mods change and fixes crashes in one click.

@@ -85,7 +85,7 @@ def candidate(name: str = "port", mc: str = "1.21.10") -> BranchCandidate:
 def test_version_flag():
     result = invoke("--version")
     assert result.exit_code == 0
-    assert "Modkeel v" in result.output and "Compile the mods Mojang left behind" in result.output
+    assert "Modkeel v" in result.output and "Minecraft mods for the version you play, checked before you get them" in result.output
 
 
 # ---------------------------------------------------------------------------

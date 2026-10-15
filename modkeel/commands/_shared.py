@@ -21,7 +21,7 @@ BANNER = r"""    __  ___          ____             __
  / /  / / /_/ / /_/ / ,< /  __/  __/ /
 /_/  /_/\____/\__,_/_/|_|\___/\___/_/"""
 
-TAGLINE = "Compile the mods Mojang left behind"
+TAGLINE = "Minecraft mods for the version you play, checked before you get them"
 
 # The Windows console must be switched to UTF-8 before Rich binds to it.
 setup_windows_console()

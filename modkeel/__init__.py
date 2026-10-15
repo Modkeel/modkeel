@@ -1,5 +1,5 @@
 """
-Modkeel - Minecraft Mod Auto-Compiler
+Modkeel - Minecraft mods for the version you play
 
 Automatically detects, compiles, and installs mods from GitHub repositories
 for specific Minecraft versions and mod loaders.
