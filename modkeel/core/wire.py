@@ -229,11 +229,12 @@ METHODS: Dict[str, Handler] = {"get": _get, "move": _move, "sign_in": _sign_in,
 
 def _instances(params) -> Dict[str, Any]:
     """The player's launcher instances (modkeel/instances.py), for a "pick your pack" list."""
-    from modkeel.instances import find_instances
+    from modkeel.instances import find_instances, icon_data
 
     if params:
         raise TypeError(f"instances takes no params, got {', '.join(sorted(params))}")
-    return {"instances": [i.to_dict() for i in find_instances()]}
+    # the icon travels as a data: URI: the screen cannot read the player's files itself
+    return {"instances": [{**i.to_dict(), "icon": icon_data(i.icon)} for i in find_instances()]}
 
 
 # A query: (params) -> JSON-ready result; quick and read-only, so it never waits for a run.

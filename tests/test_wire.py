@@ -222,7 +222,7 @@ class TestProtocolRules:
         assert listed["result"]["instances"] == [{
             "launcher": "prism", "name": "ATM", "path": "/i", "mods_dir": "/i/mods",
             "mc_version": "1.21.1", "loader": "neoforge", "loader_version": "21.1.77",
-            "mods": 3}]
+            "mods": 3, "icon": None}]
         s.send({"type": "answer", "qid": question["qid"], "value": "tok"})
         assert s.next()["result"] == {"answer": "tok"}       # the run was not disturbed
 

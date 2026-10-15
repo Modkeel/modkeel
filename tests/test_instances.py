@@ -10,8 +10,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-from modkeel.instances import Instance, find_instance, find_instances, launcher_records, \
-    mods_dir_of
+from modkeel.instances import Instance, find_instance, find_instances, icon_data, \
+    launcher_records, mods_dir_of
 
 
 def jars(mods: Path, n: int) -> None:
@@ -317,6 +317,99 @@ class TestLauncherProfiles:
 
 def test_nothing_installed(tmp_path):
     assert find_instances(tmp_path, "Linux", {}) == []
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 8
+WEBP = b"RIFF\x0c\0\0\0WEBPVP8 " + b"\0" * 4
+
+
+class TestIcons:
+    def test_prism_custom_key_found_and_builtin_key_left_none(self, tmp_path):
+        root = tmp_path / "AppData/Roaming/PrismLauncher"
+        a = prism_instance(root / "instances", "a", "Mine", "1.21.1")
+        b = prism_instance(root / "instances", "b", "Builtin", "1.21.1")
+        (a / "instance.cfg").write_text("[General]\nname=Mine\niconKey=atm_logo\n")
+        (b / "instance.cfg").write_text("[General]\nname=Builtin\niconKey=grass\n")
+        (root / "icons").mkdir()
+        (root / "icons/atm_logo.png").write_bytes(PNG)
+        found = by_name(find_instances(tmp_path, "Windows", {}))
+        assert found["Mine"].icon == str(root / "icons/atm_logo.png")
+        assert found["Builtin"].icon is None
+
+    def test_prism_icons_dir_moved_by_its_cfg(self, tmp_path):
+        root = tmp_path / "AppData/Roaming/PrismLauncher"
+        a = prism_instance(root / "instances", "a", "Mine", "1.21.1")
+        (a / "instance.cfg").write_text("[General]\nname=Mine\niconKey=pack\n")
+        elsewhere = tmp_path / "my-icons"
+        elsewhere.mkdir()
+        (elsewhere / "pack.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        (root / "prismlauncher.cfg").write_text(f"IconsDir={elsewhere}\n")
+        assert find_instances(tmp_path, "Windows", {})[0].icon == str(elsewhere / "pack.jpg")
+
+    def test_modrinth_icon_path_and_a_database_without_the_column(self, tmp_path):
+        root = tmp_path / "AppData/Roaming/ModrinthApp"
+        (root / "profiles/p").mkdir(parents=True)
+        (root / "caches/icons").mkdir(parents=True)
+        icon = root / "caches/icons/abc.webp"
+        icon.write_bytes(WEBP)
+        con = sqlite3.connect(root / "app.db")
+        con.execute("CREATE TABLE profiles (path TEXT, name TEXT, icon_path TEXT, "
+                    "game_version TEXT, mod_loader TEXT, mod_loader_version TEXT)")
+        con.execute("INSERT INTO profiles VALUES ('p', 'Pack', ?, '1.21.1', 'fabric', '0.16')",
+                    (str(icon),))
+        con.commit()
+        con.close()
+        found = find_instances(tmp_path, "Windows", {})
+        assert (found[0].name, found[0].icon) == ("Pack", str(icon))
+
+    def test_curseforge_atlauncher_and_ftb_files(self, tmp_path):
+        image = tmp_path / "cf.png"
+        image.write_bytes(PNG)
+        write_json(tmp_path / "curseforge/minecraft/Instances/A/minecraftinstance.json",
+                   {"name": "CF", "gameVersion": "1.20.1", "profileImagePath": str(image)})
+        at = tmp_path / "AppData/Roaming/ATLauncher/instances/B"
+        write_json(at / "instance.json", {"id": "1.21.1", "launcher": {"name": "AT"}})
+        (at / "instance.png").write_bytes(PNG)
+        ftb = tmp_path / "AppData/Local/.ftba/instances/c"
+        write_json(ftb / "instance.json", {"name": "FTB", "mcVersion": "1.21.1"})
+        (ftb / ".ftbapp").mkdir()
+        (ftb / ".ftbapp/logo").write_bytes(b"\x03" + WEBP)
+        found = by_name(find_instances(tmp_path, "Windows", {}))
+        assert found["CF"].icon == str(image)
+        assert found["AT"].icon == str(at / "instance.png")
+        assert found["FTB"].icon == str(ftb / ".ftbapp/logo")
+
+    def test_launcher_profile_data_uri_kept_block_names_dropped(self, tmp_path):
+        game = tmp_path / ".minecraft"
+        uri = "data:image/png;base64,iVBORw0KGgo="
+        launcher_profiles(game, {
+            "a": {"name": "Own", "gameDir": str(tmp_path / "own"), "icon": uri,
+                  "lastVersionId": "fabric-loader-0.18.3-1.21.11"},
+            "b": {"name": "Block", "gameDir": str(tmp_path / "block"), "icon": "Furnace",
+                  "lastVersionId": "fabric-loader-0.18.3-1.21.11"},
+        })
+        found = by_name(find_instances(tmp_path, "Linux", {}))
+        assert found["Own"].icon == uri
+        assert found["Block"].icon is None
+
+    def test_icon_data_types_by_first_bytes(self, tmp_path):
+        png, webp, ftb, text = (tmp_path / n for n in ("a", "b", "c", "d"))
+        png.write_bytes(PNG)
+        webp.write_bytes(WEBP)
+        ftb.write_bytes(b"\x03" + WEBP)
+        text.write_bytes(b"not an image")
+        assert icon_data(str(png)).startswith("data:image/png;base64,iVBORw0KGgo")
+        assert icon_data(str(webp)).startswith("data:image/webp;base64,UklGR")
+        assert icon_data(str(ftb)) == icon_data(str(webp))     # the byte before is dropped
+        assert icon_data(str(text)) is None
+        assert icon_data(str(tmp_path / "missing")) is None
+        assert icon_data(None) is None
+        assert icon_data("data:image/png;base64,AAAA") == "data:image/png;base64,AAAA"
+
+    def test_icon_data_too_big(self, tmp_path):
+        big = tmp_path / "big.png"
+        big.write_bytes(PNG + b"\0" * (512 * 1024))
+        assert icon_data(str(big)) is None
 
 
 class TestNaming:

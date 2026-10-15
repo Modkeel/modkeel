@@ -36,6 +36,12 @@ stores its instances its own way; everything here only reads:
                     Profiles sharing one game dir (all on .minecraft) are one instance, its
                     version only when they agree; .minecraft/mods without a profile is listed too
 
+Icons, where the launcher keeps one: Prism/PolyMC <data>/icons/<iconKey>.* (IconsDir may move
+them; built-in keys have no file), Modrinth App profiles.icon_path (metadata.icon in older
+profile.json), CurseForge profileImagePath, ATLauncher instance.png, FTB App .ftbapp/logo, the
+official launcher's profile icon when it is a data: URI (the rest name built-in blocks).
+icon_data(icon) turns one into a data: URI a screen can show, or None.
+
 A field a launcher does not give (or a file that cannot be read) is None, never a guess; an
 instance with no mods folder yet is still listed (mods = 0). Paths come from the platform's
 usual places; `home`, `system` and `env` are parameters so tests can build any of them.
@@ -51,6 +57,7 @@ no longer matches the JAR on disk (replaced since) is dropped.
 
 from __future__ import annotations
 
+import base64
 import configparser
 import hashlib
 import json
@@ -93,6 +100,7 @@ class Instance:
     loader: Optional[str] = None     # fabric | quilt | neoforge | forge, None = vanilla/unknown
     loader_version: Optional[str] = None
     mods: int = 0                    # JARs in mods_dir
+    icon: Optional[str] = None       # the launcher's picture for it: a file, or a data: URI
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -122,6 +130,40 @@ def _read_json(path: Path) -> Optional[Dict]:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+ICON_MAX_BYTES = 512 * 1024
+_ICON_TYPES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
+               (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
+
+
+def _file(path: Optional[Path]) -> Optional[str]:
+    return str(path) if path is not None and path.is_file() else None
+
+
+def icon_data(icon: Optional[str]) -> Optional[str]:
+    """An instance's icon as a data: URI: a file read and typed by its first bytes (PNG, JPEG,
+    GIF, WebP), a data: image URI as it is. Anything else, missing or too big gives None."""
+    if not icon:
+        return None
+    if icon.startswith("data:image/"):
+        return icon if len(icon) <= ICON_MAX_BYTES * 4 // 3 + 64 else None
+    try:
+        path = Path(icon)
+        if path.stat().st_size > ICON_MAX_BYTES:
+            return None
+        raw = path.read_bytes()
+    except (OSError, ValueError):
+        return None
+    # FTB App's logo has one byte before the image: look a few bytes in, keep from the image on
+    for skip in range(4):
+        image = raw[skip:]
+        kind = next((t for magic, t in _ICON_TYPES if image.startswith(magic)), None)
+        if kind is None and image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+            kind = "image/webp"
+        if kind:
+            return f"data:{kind};base64,{base64.b64encode(image).decode('ascii')}"
+    return None
 
 
 def _read_cfg(path: Path) -> Dict[str, str]:
@@ -161,9 +203,24 @@ def _prism_instances_dir(root: Path, cfg_name: str = "prismlauncher.cfg") -> Pat
     return root / "instances"
 
 
+def _prism_icon(icons: Path, key: Optional[str]) -> Optional[str]:
+    """The file of a custom icon key; built-in keys ("default", "grass"...) have none."""
+    if not key or not icons.is_dir():
+        return None
+    for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        found = _file(icons / f"{key}{ext}")
+        if found:
+            return found
+    return None
+
+
 def _prism(root: Path, launcher: str = "prism",
            cfg_name: str = "prismlauncher.cfg") -> Iterable[Instance]:
     base = _prism_instances_dir(root, cfg_name)
+    custom = _read_cfg(root / cfg_name).get("iconsdir")
+    icons = Path(custom).expanduser() if custom else root / "icons"
+    if not icons.is_absolute():
+        icons = root / icons
     if not base.is_dir():
         return
     for folder in sorted(p for p in base.iterdir() if p.is_dir()):
@@ -181,7 +238,8 @@ def _prism(root: Path, launcher: str = "prism",
                      if (folder / d).is_dir()), folder / ".minecraft")
         mods = game / "mods"
         yield Instance(launcher, cfg.get("name") or folder.name, str(folder), str(mods),
-                       mc, loader, loader_version, _count_jars(mods))
+                       mc, loader, loader_version, _count_jars(mods),
+                       _prism_icon(icons, cfg.get("iconkey")))
 
 
 # --- Modrinth App ---------------------------------------------------------------------------
@@ -192,7 +250,8 @@ def _modrinth_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Pat
 
 
 def _modrinth_db(root: Path) -> Dict[str, Tuple[Optional[str], ...]]:
-    """profiles.path -> (name, game_version, mod_loader, mod_loader_version) from app.db.
+    """profiles.path -> (name, game_version, mod_loader, mod_loader_version, icon_path) from
+    app.db.
 
     Opened read-only and immutable: the app may be running and holding its own lock, and we
     must never write to it. An unreadable or differently shaped database gives {}."""
@@ -202,8 +261,10 @@ def _modrinth_db(root: Path) -> Dict[str, Tuple[Optional[str], ...]]:
     try:
         con = sqlite3.connect(f"{db.as_uri()}?mode=ro&immutable=1", uri=True)
         try:
-            rows = con.execute("SELECT path, name, game_version, mod_loader, mod_loader_version "
-                               "FROM profiles").fetchall()
+            columns = {r[1] for r in con.execute("PRAGMA table_info(profiles)")}
+            icon = "icon_path" if "icon_path" in columns else "NULL"   # not in every version
+            rows = con.execute("SELECT path, name, game_version, mod_loader, mod_loader_version, "
+                               f"{icon} FROM profiles").fetchall()
         finally:
             con.close()
     except sqlite3.Error:
@@ -217,20 +278,21 @@ def _modrinth(root: Path) -> Iterable[Instance]:
         return
     known = _modrinth_db(root)
     for folder in sorted(p for p in base.iterdir() if p.is_dir()):
-        name, mc, loader, loader_version = known.get(folder.name, (None,) * 4)
+        name, mc, loader, loader_version, icon = known.get(folder.name, (None,) * 5)
         if folder.name not in known:          # older app: profile.json in the folder
             data = _read_json(folder / "profile.json")
             if data is None:
                 continue                      # not a profile
             meta = data.get("metadata") or {}
-            name, mc = meta.get("name"), meta.get("game_version")
+            name, mc, icon = meta.get("name"), meta.get("game_version"), meta.get("icon")
             loader, loader_version = meta.get("loader"), (meta.get("loader_version") or {})
             if isinstance(loader_version, dict):
                 loader_version = loader_version.get("id")
         loader = None if not loader or loader == "vanilla" else str(loader).lower()
         mods = folder / "mods"
         yield Instance("modrinth", name or folder.name, str(folder), str(mods), mc, loader,
-                       loader_version, _count_jars(mods))
+                       loader_version, _count_jars(mods),
+                       _file(Path(icon)) if isinstance(icon, str) and icon else None)
 
 
 # --- CurseForge -----------------------------------------------------------------------------
@@ -261,8 +323,10 @@ def _curseforge(root: Path) -> Iterable[Instance]:
             continue
         loader, loader_version = _curseforge_loader((data.get("baseModLoader") or {}).get("name"))
         mods = folder / "mods"
+        image = data.get("profileImagePath")
         yield Instance("curseforge", data.get("name") or folder.name, str(folder), str(mods),
-                       data.get("gameVersion"), loader, loader_version, _count_jars(mods))
+                       data.get("gameVersion"), loader, loader_version, _count_jars(mods),
+                       _file(Path(image)) if isinstance(image, str) and image else None)
 
 
 # --- ATLauncher, GDLauncher, FTB App --------------------------------------------------------
@@ -300,7 +364,7 @@ def _atlauncher(root: Path) -> Iterable[Instance]:
         mods = folder / "mods"
         yield Instance("atlauncher", meta.get("name") or folder.name, str(folder), str(mods),
                        data.get("id"), loader, lv.get("version") if loader else None,
-                       _count_jars(mods))
+                       _count_jars(mods), _file(folder / "instance.png"))
 
 
 def _gdlauncher_roots(home: Path, system: str, env: Mapping[str, str]) -> List[Path]:
@@ -379,7 +443,8 @@ def _ftb(root: Path) -> Iterable[Instance]:
         loader, loader_version = _ftb_loader(data.get("modLoader"), mc)
         mods = folder / "mods"
         yield Instance("ftb", data.get("name") or folder.name, str(folder), str(mods),
-                       mc, loader, loader_version, _count_jars(mods))
+                       mc, loader, loader_version, _count_jars(mods),
+                       _file(folder / ".ftbapp" / "logo"))
 
 
 # --- The official launcher------------------------------------------------------------------
@@ -424,21 +489,24 @@ def _minecraft(game: Path) -> Iterable[Instance]:
         version_id = profile.get("lastVersionId")
         folder = Path(profile.get("gameDir") or game)
         info = _version_id(game, version_id) if isinstance(version_id, str) else (None,) * 3
+        icon = profile.get("icon")
         by_dir.setdefault(os.path.normcase(str(folder)), (folder, []))[1].append(
-            (str(profile.get("name") or ""), info))
+            (str(profile.get("name") or ""), info,
+             icon if isinstance(icon, str) and icon.startswith("data:image/") else None))
     root = os.path.normcase(str(game))
     if root not in by_dir and (game / "mods").is_dir():  # no mods folder: nobody plays modded
         by_dir[root] = (game, [])
     for key, (folder, entries) in by_dir.items():
-        infos = {info for _, info in entries}
+        infos = {info for _, info, _ in entries}
         mc, loader, loader_version = infos.pop() if len(infos) == 1 else (None,) * 3
-        names = [n for n, _ in entries if n]
+        names = [n for n, _, _ in entries if n]
+        icons = {i for _, _, i in entries}
         name = names[0] if len(names) == 1 else (folder.name if key != root else ".minecraft")
         mods = folder / "mods"
         if key != root and not mods.is_dir() and loader is None:
             continue                           # a vanilla profile elsewhere: nothing to mod
         yield Instance(launcher, name, str(folder), str(mods), mc, loader, loader_version,
-                       _count_jars(mods))
+                       _count_jars(mods), icons.pop() if len(icons) == 1 else None)
 
 
 # --------------------------------------------------------------------------------------------
