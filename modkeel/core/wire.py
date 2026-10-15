@@ -18,7 +18,9 @@ Rules that keep a front end from hanging or guessing:
 
 - One request at a time; a second one while the first runs gets error "busy".
 - Queries (QUERIES: "instances", "github", "history") only read this machine: answered at once with a
-  result, no events or questions, even while a request runs.
+  result, no events or questions, even while a request runs. Lookups (LOOKUPS: "builds") are
+  queries that ask Modrinth: each runs on its own thread, beside a request and other lookups,
+  and is answered when done.
 - GitHub: a request without github_token uses the token saved on this machine (config.toml,
   `modkeel token` / `modkeel login`). need_token is answered with a token, null (skip forks)
   or {"sign_in": true, "open_browser": bool}: the engine then signs in with GitHub (a
@@ -28,7 +30,8 @@ Rules that keep a front end from hanging or guessing:
   input, answers it with the engine's safe default (decisions.safe_default).
 - "search" lists Modrinth's mods for a query with each one's status on the version and
   loader; "add" puts one (by project_id) into an instance's mods folder and records it;
-  "undo" ({"id"}) takes back one add. "history" lists the adds.
+  "undo" ({"id"}) takes back one add. "history" lists the adds. "builds" ({"mods_dir",
+  "mc_version", "loader"}) names the instance's mods with no build for its version and loader.
 - Closing the input also cancels the running request; the server exits when it is done.
   A client that stops reading (its end of the output closed) cancels the request too.
 - Lines that are not JSON objects, unknown message types and unknown methods get an error
@@ -254,8 +257,21 @@ def _history(params) -> Dict[str, Any]:
     return {"history": [r.to_dict() for r in history()]}
 
 
+def _builds(params) -> Dict[str, Any]:
+    """Which mods of an instance have no build for its version and loader (core/catalog.py)."""
+    from modkeel.core.catalog import builds_check
+
+    if set(params) != {"mods_dir", "mc_version", "loader"} or not all(
+            isinstance(v, str) and v for v in params.values()):
+        raise TypeError("builds takes mods_dir, mc_version and loader")
+    if not Path(params["mods_dir"]).is_dir():
+        raise TypeError(f"not a folder: {params['mods_dir']}")
+    return builds_check(params["mods_dir"], params["mc_version"], params["loader"]).to_dict()
+
+
 QUERIES: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
-    "instances": _instances, "github": _github, "history": _history}
+    "instances": _instances, "github": _github, "history": _history, "builds": _builds}
+LOOKUPS = frozenset({"builds"})    # queries that wait on the network: never on the reader
 
 
 class _Run:
@@ -347,6 +363,10 @@ class Server:
         params = message.get("params", {})
         if not isinstance(params, dict):
             return self._error(request_id, "bad_params", "params is a JSON object")
+        if query is not None and name in LOOKUPS:
+            threading.Thread(target=self._query, args=(request_id, query, params),
+                             daemon=True).start()
+            return None
         if query is not None:
             return self._query(request_id, query, params)
         if self._worker is not None and self._worker.is_alive():

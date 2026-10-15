@@ -157,8 +157,8 @@ class TestProtocolRules:
     def test_hello_names_the_protocol_and_methods(self, session):
         hello = session().hello
         assert hello["type"] == "hello" and hello["protocol"] == 1
-        assert hello["methods"] == ["add", "get", "github", "history", "instances", "move",
-                                "search", "sign_in", "undo"] and hello["modkeel"]
+        assert hello["methods"] == ["add", "builds", "get", "github", "history", "instances",
+                                    "move", "search", "sign_in", "undo"] and hello["modkeel"]
 
     def test_bad_lines_get_errors_and_never_stop_the_server(self, session):
         s = session({"echo": lambda params, *_: params})
@@ -225,6 +225,35 @@ class TestProtocolRules:
             "mods": 3, "icon": None}]
         s.send({"type": "answer", "qid": question["qid"], "value": "tok"})
         assert s.next()["result"] == {"answer": "tok"}       # the run was not disturbed
+
+    def test_a_lookup_answers_beside_a_request_on_its_own_thread(self, session, monkeypatch,
+                                                                 tmp_path):
+        from modkeel.core.catalog import BuildsCheck, MissingBuild
+
+        seen = []
+        monkeypatch.setattr("modkeel.core.catalog.builds_check", lambda d, mc, loader: (
+            seen.append((d, mc, loader)),
+            BuildsCheck(2, 2, [MissingBuild("a.jar", "P1", "iron-chests", "Iron Chests")]))[1])
+        s = session(asks(NeedToken()))
+        s.send({"type": "request", "id": "run", "method": "ask"})
+        question = s.next()
+        s.send({"type": "request", "id": "b", "method": "builds", "params": {
+            "mods_dir": str(tmp_path), "mc_version": "1.21.1", "loader": "neoforge"}})
+        assert s.next() == {"type": "result", "id": "b", "result": {
+            "mods": 2, "known": 2, "reason": "", "missing": [
+                {"file": "a.jar", "project_id": "P1", "slug": "iron-chests",
+                 "title": "Iron Chests"}]}}
+        assert seen == [(str(tmp_path), "1.21.1", "neoforge")]
+        s.send({"type": "answer", "qid": question["qid"], "value": "tok"})
+        assert s.next()["result"] == {"answer": "tok"}
+
+    @pytest.mark.parametrize("params", [{}, {"mods_dir": "/nowhere", "mc_version": "1.21.1",
+                                                 "loader": "fabric"},
+                                        {"mods_dir": ".", "mc_version": "", "loader": "fabric"}])
+    def test_a_lookup_with_bad_params(self, session, params):
+        s = session({})
+        s.send({"type": "request", "id": "b", "method": "builds", "params": params})
+        assert s.next()["error"]["code"] == "bad_params"
 
     def test_a_query_with_params_it_does_not_take(self, session):
         s = session({})

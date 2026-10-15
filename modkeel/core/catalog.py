@@ -107,3 +107,84 @@ def search_mods(query: str, mc_version: str, loader: str, limit: int = 10) -> Li
         page_url=PAGE_URL.format(slug=h["slug"]),
         status=_status(h, mc_version, loader, builds),
     ) for h in hits if h.get("project_id") and h.get("slug")]
+
+
+@dataclass
+class MissingBuild:
+    file: str                      # the JAR in the mods folder
+    project_id: str
+    slug: str
+    title: str
+
+
+@dataclass
+class BuildsCheck:
+    """Which of an instance's mods have a build for its own version and loader, from the
+    JARs' hashes: two Modrinth requests, however many mods. Only JARs Modrinth knows by hash
+    are judged; the rest (CurseForge-only, local builds) are counted as unknown."""
+    mods: int                      # JARs in the folder
+    known: int                     # of those, files Modrinth knows by hash
+    missing: List[MissingBuild]    # known, but their project has no build for mc + loader
+    reason: str = ""               # why nothing could be judged (Modrinth down), else ""
+
+    def to_dict(self) -> Dict:
+        return {"mods": self.mods, "known": self.known, "reason": self.reason,
+                "missing": [dict(m.__dict__) for m in self.missing]}
+
+
+def _post(url: str, body: Dict) -> Dict:
+    try:
+        resp = modrinth_call(requests.post, url, json=body,
+                             headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30)
+    except requests.RequestException as e:
+        raise CatalogError("Modrinth timed out" if isinstance(e, requests.Timeout)
+                           else f"Modrinth unreachable: {e.__class__.__name__}") from e
+    if resp.status_code != 200:
+        raise CatalogError(f"Modrinth answered HTTP {resp.status_code}")
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise CatalogError("Modrinth sent an unreadable answer") from e
+
+
+def builds_check(mods_dir: str, mc_version: str, loader: str) -> BuildsCheck:
+    """The mods in `mods_dir` whose Modrinth project has no build for `mc_version` + `loader`
+    (the instance runs them anyway: an older build, or one for another loader). Modrinth
+    down is a check with a reason, never an error."""
+    from pathlib import Path
+
+    from modkeel.scanner import compute_sha1
+
+    loader = loader.lower()
+    jars = sorted(Path(mods_dir).glob("*.jar"))
+    try:
+        hashes = {compute_sha1(j): j.name for j in jars}
+    except OSError as e:
+        return BuildsCheck(len(jars), 0, [], f"could not read the mods folder: {e}")
+    if not hashes:
+        return BuildsCheck(0, 0, [])
+    base = "https://api.modrinth.com/v2/version_files"
+    try:
+        known = _post(base, {"hashes": list(hashes), "algorithm": "sha1"})
+        # the newest build of each file's own project for this version and loader, if any
+        have = _post(f"{base}/update", {"hashes": list(known), "algorithm": "sha1",
+                                        "loaders": [loader], "game_versions": [mc_version]})
+    except CatalogError as e:
+        return BuildsCheck(len(jars), 0, [], str(e))
+    lacking = {h: v["project_id"] for h, v in known.items() if h not in have}
+    projects: Dict[str, Dict] = {}
+    if lacking:
+        try:
+            resp = modrinth_call(requests.get, "https://api.modrinth.com/v2/projects",
+                                 params={"ids": json.dumps(sorted(set(lacking.values())))},
+                                 headers={"User-Agent": MODRINTH_USER_AGENT}, timeout=30)
+            if resp.status_code == 200:
+                projects = {p["id"]: p for p in resp.json()}
+        except (requests.RequestException, ValueError, KeyError):
+            pass                   # names are a nicety: the file names still say which
+    missing = []
+    for sha, pid in lacking.items():
+        project = projects.get(pid, {})
+        missing.append(MissingBuild(hashes[sha], pid, project.get("slug") or "",
+                                    project.get("title") or hashes[sha]))
+    return BuildsCheck(len(jars), len(known), sorted(missing, key=lambda m: m.title.lower()))

@@ -7,7 +7,8 @@ import requests
 
 from modkeel.core import catalog
 from modkeel.core.catalog import (OFFICIAL, OTHER_LOADER, OTHER_VERSIONS, CatalogError,
-                                  search_mods)
+                                  builds_check, search_mods)
+from modkeel.scanner import compute_sha1
 
 
 class Resp:
@@ -90,3 +91,72 @@ class TestSearch:
                           lambda *a, **k: Resp(200, ValueError("bad"))), \
                 pytest.raises(CatalogError, match="unreadable"):
             search_mods("x", "1.21.11", "fabric")
+
+
+class TestBuildsCheck:
+    """An instance's mods with no build for its own version and loader, by hash."""
+
+    def folder(self, tmp_path, *names):
+        for n in names:
+            (tmp_path / n).write_bytes(n.encode())
+        (tmp_path / "notes.txt").write_text("not a mod")
+        return {n: compute_sha1(tmp_path / n) for n in names}
+
+    def serve(self, known, have, projects, fail=None):
+        calls = []
+
+        def call(method, url, **kw):
+            calls.append((url, kw.get("json"), kw.get("params")))
+            if fail and fail in url:
+                raise requests.ConnectionError()
+            if url.endswith("/version_files"):
+                return Resp(200, known)
+            if url.endswith("/version_files/update"):
+                return Resp(200, have)
+            return Resp(200, projects)
+
+        return patch.object(catalog, "modrinth_call", call), calls
+
+    def test_known_files_without_a_build_are_named_unknown_ones_only_counted(self, tmp_path):
+        h = self.folder(tmp_path, "sodium.jar", "ironchests.jar", "local.jar")
+        p, calls = self.serve(
+            known={h["sodium.jar"]: {"project_id": "AANobbMI"},
+                   h["ironchests.jar"]: {"project_id": "P3iIrPH3"}},
+            have={h["sodium.jar"]: {"project_id": "AANobbMI"}},
+            projects=[{"id": "P3iIrPH3", "slug": "iron-chests", "title": "Iron Chests"}])
+        with p:
+            check = builds_check(str(tmp_path), "1.21.1", "NeoForge")
+        assert (check.mods, check.known, check.reason) == (3, 2, "")
+        assert [(m.file, m.slug, m.title) for m in check.missing] == [
+            ("ironchests.jar", "iron-chests", "Iron Chests")]
+        update = calls[1][1]
+        assert update["loaders"] == ["neoforge"] and update["game_versions"] == ["1.21.1"]
+        assert sorted(update["hashes"]) == sorted([h["sodium.jar"], h["ironchests.jar"]])
+
+    def test_every_build_there_asks_no_project_names(self, tmp_path):
+        h = self.folder(tmp_path, "a.jar")
+        known = {h["a.jar"]: {"project_id": "A"}}
+        p, calls = self.serve(known=known, have=known, projects=[])
+        with p:
+            check = builds_check(str(tmp_path), "1.21.11", "fabric")
+        assert check.missing == [] and len(calls) == 2
+
+    def test_modrinth_down_is_a_reason_not_an_error(self, tmp_path):
+        self.folder(tmp_path, "a.jar")
+        p, _ = self.serve({}, {}, [], fail="version_files")
+        with p:
+            check = builds_check(str(tmp_path), "1.21.11", "fabric")
+        assert check.reason == "Modrinth unreachable: ConnectionError" and check.missing == []
+
+    def test_names_failing_still_names_the_files(self, tmp_path):
+        h = self.folder(tmp_path, "a.jar")
+        p, _ = self.serve({h["a.jar"]: {"project_id": "A"}}, {}, [], fail="/projects")
+        with p:
+            check = builds_check(str(tmp_path), "1.21.11", "fabric")
+        assert [(m.file, m.title) for m in check.missing] == [("a.jar", "a.jar")]
+
+    def test_an_empty_folder_asks_nothing(self, tmp_path):
+        p, calls = self.serve({}, {}, [])
+        with p:
+            assert builds_check(str(tmp_path), "1.21.11", "fabric").mods == 0
+        assert calls == []
