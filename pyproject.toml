@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "modkeel"
 dynamic = ["version"]
-description = "Minecraft Mod Auto-Compiler - find, compile, and verify unofficial mod forks"
+description = "Minecraft mods for the version you play: the author's build, an older one that still runs, or a community port, each checked"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

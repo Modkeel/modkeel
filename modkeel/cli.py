@@ -24,7 +24,7 @@ __all__ = ["app", "console", "BANNER", "TAGLINE", "resolve_github_token"]
 
 app = typer.Typer(
     name="modkeel",
-    help="Minecraft Mod Auto-Compiler - find, compile, and verify unofficial mod forks.",
+    help="Get Minecraft mods for the version you play: the author's build, an older one that still runs, or a community port, each checked.",
     add_completion=False,
 )
 
@@ -47,7 +47,7 @@ def main(
         is_eager=True,
     ),
 ):
-    """Modkeel - Minecraft Mod Auto-Compiler."""
+    """Modkeel - Minecraft mods for the version you play."""
 
 
 # Order here is the order `modkeel --help` lists them.
