@@ -318,7 +318,7 @@ with `modkeel token --set ghp_...` (or pass `-t` once: it is saved).
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/Modkeel/modkeel/blob/main/CONTRIBUTING.md) for development setup, testing, and PR guidelines.
+See [CONTRIBUTING.md](https://github.com/Modkeel/modkeel/blob/main/CONTRIBUTING.md) for development setup, testing, and PR guidelines, and [ARCHITECTURE.md](ARCHITECTURE.md) for a map of the code.
 
 ## License
 

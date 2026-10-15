@@ -1,0 +1,11 @@
+# Modkeel CLI
+
+> Free, open source (MIT) command line tool that gets Minecraft mods running on versions their authors have not released for yet. For a mod, a Minecraft version and a loader, it tries the author's builds (Modrinth, CurseForge), the author's own branches, older builds whose bytecode still links against the target, then community forks it compiles, and verifies each JAR (metadata, linkage, mixins, optionally a real server) before delivering it. It also moves a whole mods folder or launcher instance to another Minecraft version. Install: `pipx install modkeel`.
+
+- Code map: [ARCHITECTURE.md](ARCHITECTURE.md): commands/ (terminal), core/ (the engine, also served as JSON lines by `modkeel serve --stdio` to the desktop app), resolve.py + sources.py (the order things are tried), evidence.py (the checks).
+- Usage and every command: [README.md](README.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+- Releases: published to PyPI by GitHub Actions with Trusted Publishing; each file carries a PEP 740 attestation tied to this repository's release workflow.
+- What it connects to: GitHub, Modrinth, Mojang and loader metadata, Prism Launcher's metadata, Adoptium (a JDK when needed) and api.modkeel.com for CurseForge lookups by file fingerprint. No analytics.
+- Desktop app over the same engine: https://github.com/Modkeel/app
+- In-game crash helper: https://github.com/Modkeel/companion
+- Project site: https://modkeel.com (verification guide: https://modkeel.com/verify)
