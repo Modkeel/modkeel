@@ -6,6 +6,7 @@ to prevent regression on the substring-matching bugs fixed in Phase 1.
 """
 
 import re
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
@@ -1062,3 +1063,34 @@ class TestBranchListingCost(unittest.TestCase):
         self.assertEqual(get.call_count, 1)          # cached by SHA, across repos
         self.assertEqual((a.commit_date, b.commit_date), ("2026-09-01T00:00:00Z",) * 2)
         self.assertEqual(dated.commit_date, "2026-01-01T00:00:00Z")
+
+
+class TestVersionForks(unittest.TestCase):
+    """Forks found by listing the repository's forks, not by repository search."""
+
+    def fork(self, i, pushed, created="2025-01-01T00:00:00Z"):
+        return {"id": i, "full_name": f"u{i}/emi", "name": "emi", "owner": {"login": f"u{i}"},
+                "created_at": created, "pushed_at": pushed}
+
+    def find(self, forks, branches):
+        client = GitHubClient(ModCompilerConfig("1.21.1", "fabric", "0"))
+        page = MagicMock(status_code=200, links={})
+        page.json.return_value = forks
+        with patch("modkeel.github.requests.get", return_value=page), \
+                patch.object(GitHubClient, "get_branches",
+                             side_effect=lambda o, r: [_branch(b, b) for b in branches[o]]):
+            return client.list_version_forks("emilyploszaj", "emi")
+
+    def test_only_forks_with_a_target_branch(self):
+        recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        forks = [self.fork(1, recent), self.fork(2, recent), self.fork(3, recent)]
+        branches = {"u1": ["main", "1.21.1"], "u2": ["1.21.10", "fabric-1.21.11"],
+                    "u3": ["mc1.21.1-fabric"]}
+        found = self.find(forks, branches)
+        self.assertEqual(sorted(found), [1, 3])
+        self.assertEqual(found[1]["_version_branches"], ["1.21.1"])
+
+    def test_copies_and_old_forks_are_not_listed(self):
+        never = self.fork(1, "2025-01-01T00:00:00Z")
+        old = self.fork(2, "2020-06-01T00:00:00Z", created="2020-01-01T00:00:00Z")
+        self.assertEqual(self.find([never, old], {"u1": ["1.21.1"], "u2": ["1.21.1"]}), {})

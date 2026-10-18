@@ -235,6 +235,20 @@ class TestStrategy:
         assert not found.candidates and "another mod" in found.note
         assert mod.curseforge is None
 
+    def test_a_short_name_is_the_same_mod_when_both_link_one_repo(self, tmp_path):
+        # "EMI" is too short for the name check; both sites naming emilyploszaj/emi settle it
+        emi = {"name": "EMI", "slug": "emi", "source": "https://github.com/emilyploszaj/emi"}
+        mod = ModRef("emi", project={"project_id": "fRiHVvU7", "slug": "emi", "title": "EMI"},
+                     source_repo="emilyploszaj/emi")
+        found = CurseForgeSource().find(mod, ctx_for(tmp_path, FakeClient(
+            {"emi": project(cf_file(), **emi)})))
+        assert found.candidates
+        other = ModRef("emi", project={"project_id": "x", "slug": "emi", "title": "EMI"},
+                       source_repo="someone/emi")
+        found = CurseForgeSource().find(other, ctx_for(tmp_path, FakeClient(
+            {"emi": project(cf_file(), **emi)})))
+        assert not found.candidates and "another mod" in found.note
+
     def test_no_build_for_the_target(self, tmp_path):
         found = CurseForgeSource().find(sodium_on_modrinth(),
                                         ctx_for(tmp_path, FakeClient({"sodium": project()})))

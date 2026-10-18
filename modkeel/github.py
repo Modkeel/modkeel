@@ -4,7 +4,7 @@ import base64
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -14,6 +14,10 @@ from modkeel.loaders import get_cross_loader_chain
 from modkeel.models import BranchCandidate, ModCompilerConfig
 from modkeel.core.events import Emitter, Message
 from modkeel.core.text import print_event
+
+# Fork lists read per repo (100 forks a page) and forks whose branches are listed
+MAX_FORK_PAGES = 5
+MAX_LISTED_FORKS = 40
 
 logger = logging.getLogger("modkeel")
 
@@ -85,6 +89,58 @@ class GitHubClient:
             self._say(f"  \u26a0\ufe0f  Error fetching repo info: {e}")
             return None
 
+    def list_version_forks(self, owner: str, repo: str) -> Dict[int, Dict]:
+        """Forks of owner/repo with a branch named after the target version, by repo id.
+
+        Repository search only finds a fork whose name or description mentions the version,
+        and porters rarely write it there: EMI's 26.3 ports were two forks among 164 with
+        a branch "26.3" and nothing in their description. So the fork list itself is read
+        (one call per 100 forks), forks pushed to since they were made and in the last year
+        are kept, and the most recently pushed have their branches listed (one call each).
+        Branch names are only a lead here: the validator still reads each branch's build files.
+        """
+        url = f"https://api.github.com/repos/{owner}/{repo}/forks"
+        params = {"sort": "newest", "per_page": 100}
+        forks: List[Dict] = []
+        try:
+            for _ in range(MAX_FORK_PAGES):
+                response = requests.get(url, headers=self.config.github_headers,
+                                        params=params, timeout=15)
+                if response.status_code == 403:
+                    self.search_denied += 1
+                    break
+                if response.status_code != 200:
+                    break
+                forks.extend(response.json())
+                url = response.links.get("next", {}).get("url")
+                params = None
+                if not url:
+                    break
+        except requests.RequestException as e:
+            self._say(f"       ⚠️  Fork list failed: {str(e)[:100]}")
+        if not forks:
+            return {}
+
+        year_ago = (datetime.now(timezone.utc) - timedelta(days=365)).strftime(
+            '%Y-%m-%dT%H:%M:%SZ')
+        changed = sorted(
+            (f for f in forks if (f.get('pushed_at') or '') > (f.get('created_at') or '')
+             and (f.get('pushed_at') or '') >= year_ago),
+            key=lambda f: f['pushed_at'], reverse=True)[:MAX_LISTED_FORKS]
+        names_version = re.compile(rf"(?<![\d.]){re.escape(self.config.mc_version)}(?![.\d])")
+        found: Dict[int, Dict] = {}
+        for fork in changed:
+            branches = [b.name for b in self.get_branches(fork['owner']['login'], fork['name'])]
+            matching = [b for b in branches if names_version.search(b)]
+            if matching:
+                fork['_version_branches'] = matching
+                found[fork['id']] = fork
+                self._say(f"       ✅ Fork: {fork['full_name']} ({', '.join(matching)})")
+        self._say(f"    ℹ️  {len(found)} of {len(forks)} forks of {owner}/{repo} have a "
+                  f"{self.config.mc_version} branch ({len(changed)} changed in the last year "
+                  "checked)")
+        return found
+
     def search_compatible_repos(self, original_owner: str, original_repo: str,
                                 cross_loader_available: bool = False) -> List[Dict]:
         """
@@ -107,7 +163,7 @@ class GitHubClient:
         if self.config.github_token:
             headers['Authorization'] = f'token {self.config.github_token}'
 
-        all_forks = {}
+        all_forks = self.list_version_forks(original_owner, original_repo)
 
         for query in searches:
             params = {
@@ -330,7 +386,8 @@ class GitHubClient:
                 'created_at': repo_data.get('created_at'),
                 'pushed_at': repo_data.get('pushed_at'),
                 'trust_analysis': trust_analysis,
-                'is_independent_port': repo_data.get('_is_independent_port', False)
+                'is_independent_port': repo_data.get('_is_independent_port', False),
+                'version_branches': repo_data.get('_version_branches', []),
             }
 
             scored = self.score_fork_reliability(fork_info)
@@ -552,6 +609,10 @@ class GitHubClient:
             score += 40
             has_version_match = True
             version_location.append("topics")
+        elif fork_data.get('version_branches'):
+            score += 40
+            has_version_match = True
+            version_location.append("branch")
 
         if version_location:
             signals.append(f"Ver:{'+'.join(version_location)}")

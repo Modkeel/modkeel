@@ -299,7 +299,11 @@ class CurseForgeSource(SourceStrategy):
             return Found(note=f"CurseForge unavailable ({client.last_error})")
         if project.mod is None:
             return Found(note="Not found on CurseForge")
-        if must_match and not same_mod_name(must_match, project.mod.name):
+        # Both sites linking the same repository settle it, also for names too short for the
+        # name check ("EMI", "JEI")
+        same_repo = bool(mod.source_repo and project.mod.github_repo
+                         and mod.source_repo.lower() == project.mod.github_repo.lower())
+        if must_match and not same_repo and not same_mod_name(must_match, project.mod.name):
             return Found(note=f"CurseForge's {ref} is another mod ({project.mod.name})")
         mod.curseforge = project.mod
         if not mod.source_repo and project.mod.github_repo:
