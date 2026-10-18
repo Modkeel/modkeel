@@ -1094,3 +1094,29 @@ class TestVersionForks(unittest.TestCase):
         never = self.fork(1, "2025-01-01T00:00:00Z")
         old = self.fork(2, "2020-06-01T00:00:00Z", created="2020-01-01T00:00:00Z")
         self.assertEqual(self.find([never, old], {"u1": ["1.21.1"], "u2": ["1.21.1"]}), {})
+
+
+class TestSearchLimit(unittest.TestCase):
+    """Searches wait out GitHub's per-minute limit when it resets soon."""
+
+    def answer(self, status, **headers):
+        return MagicMock(status_code=status, headers=headers)
+
+    def test_waits_for_a_near_reset_and_retries(self):
+        from modkeel.github import search_get
+        limited = self.answer(403, **{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1030"})
+        with patch("modkeel.github.requests.get", side_effect=[limited, self.answer(200)]), \
+                patch("modkeel.github.time.time", return_value=1000), \
+                patch("modkeel.github.time.sleep") as sleep:
+            self.assertEqual(search_get("u", {}, {}).status_code, 200)
+        sleep.assert_called_once_with(31)
+
+    def test_a_far_reset_or_a_plain_refusal_is_returned(self):
+        from modkeel.github import search_get
+        far = self.answer(403, **{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "5000"})
+        for refused in (far, self.answer(403)):
+            with patch("modkeel.github.requests.get", return_value=refused), \
+                    patch("modkeel.github.time.time", return_value=1000), \
+                    patch("modkeel.github.time.sleep") as sleep:
+                self.assertEqual(search_get("u", {}, {}).status_code, 403)
+            sleep.assert_not_called()

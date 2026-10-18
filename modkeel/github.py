@@ -22,6 +22,29 @@ MAX_LISTED_FORKS = 40
 logger = logging.getLogger("modkeel")
 
 
+# Longest wait for GitHub's search limit to reset (30 searches a minute) before giving up
+MAX_SEARCH_WAIT = 90
+
+
+def search_get(url: str, params: Dict, headers: Dict) -> requests.Response:
+    """GET on GitHub's search API that waits out its per-minute limit instead of failing.
+    Several runs sharing one token (port-ci's parallel jobs) use up 30 searches a minute in
+    seconds; the answer says when the minute ends (X-RateLimit-Reset, or Retry-After for the
+    secondary limit), so wait for it when it is near."""
+    for _ in range(3):
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        if response.status_code not in (403, 429):
+            return response
+        wait = response.headers.get('Retry-After')
+        if wait is None and response.headers.get('X-RateLimit-Remaining') == '0':
+            reset = response.headers.get('X-RateLimit-Reset')
+            wait = int(reset) - int(time.time()) + 1 if reset and reset.isdigit() else None
+        if wait is None or not 0 <= int(wait) <= MAX_SEARCH_WAIT:
+            return response
+        time.sleep(int(wait))
+    return response
+
+
 def parse_repo_url(url: str) -> Tuple[str, str, Optional[str]]:
     """
     Parse GitHub URL to extract owner, repo, and optional branch.
@@ -174,7 +197,7 @@ class GitHubClient:
 
             try:
                 self._say(f"    \U0001f50e Searching: {query[:60]}...")
-                response = requests.get(url, params=params, headers=headers, timeout=15)
+                response = search_get(url, params, headers)
 
                 self._say(f"       Status: {response.status_code}")
 
@@ -274,7 +297,7 @@ class GitHubClient:
 
             try:
                 self._say(f"    \U0001f50e Searching: {query[:60]}...")
-                response = requests.get(url, params=params, headers=headers, timeout=15)
+                response = search_get(url, params, headers)
 
                 if response.status_code == 403:
                     self.search_denied += 1
